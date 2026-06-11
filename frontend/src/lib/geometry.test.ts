@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toImage, toStage, normalizeRect, normalizeEllipse } from '../geometry';
+import { toImage, toStage, normalizeRect, normalizeEllipse } from './geometry';
 
 const T = { scaleX: 2, scaleY: 2, x: 100, y: 50 };
 
