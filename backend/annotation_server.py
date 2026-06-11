@@ -407,6 +407,86 @@ async def list_drafts_route() -> list[dict]:
     return await asyncio.to_thread(drafts_mod.list_drafts)
 
 
+@app.post("/api/export/coco")
+async def export_coco(payload: ExportRequest) -> dict:
+    """Write (or preview) the COCO dataset for the annotated slices."""
+    import os
+    export_root_env = os.getenv("EXPORT_ROOT", "")
+    if export_root_env:
+        export_root = Path(export_root_env).expanduser().resolve()
+    else:
+        local_root = Path(os.getenv("LOCAL_DATA_ROOT", "~/data")).expanduser().resolve()
+        export_root = local_root / "exports"
+
+    out_root = (export_root / payload.out_dir).resolve()
+    if not str(out_root).startswith(str(export_root)):
+        raise HTTPException(403, "out_dir must resolve under EXPORT_ROOT")
+
+    def _run() -> dict:
+        from coco_export import build_export_plan, write_coco_split, ExportConflict
+        import images as images_mod_local
+        import arrays as arrays_mod_local
+
+        node = arrays_mod_local.resolve_array(payload.source, payload.kind, payload.server_uri)
+        plan = build_export_plan(
+            node, payload,
+            render_slice_fn=images_mod_local.render_slice,
+            array_shape_meta_fn=arrays_mod_local.array_shape_meta,
+            read_slice_fn=arrays_mod_local.read_slice,
+            sample_global_stats_fn=images_mod_local._sample_global_stats,
+        )
+        summary: dict = {
+            "skipped_zero_area": plan["skipped_zero_area"],
+            "splits": {},
+        }
+        if payload.dry_run:
+            for split_name, split_data in plan["splits"].items():
+                summary["splits"][split_name] = {
+                    "n_images": len(split_data["images"]),
+                    "n_annotations": len(split_data["annotations"]),
+                }
+            return summary
+
+        written: dict = {}
+        for split_name, split_data in plan["splits"].items():
+            split_dir = out_root / split_name
+            result = write_coco_split(
+                split_dir,
+                images=split_data["images"],
+                categories=plan["categories"],
+                annotations=split_data["annotations"],
+                mode=payload.mode,
+                info=plan["info"],
+            )
+            written[split_name] = result
+        summary["written"] = written
+        return summary
+
+    try:
+        return await asyncio.to_thread(_run)
+    except FileExistsError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        logger.error("Export failed for %s: %s", payload.source, exc)
+        raise HTTPException(500, f"Export failed: {exc}") from exc
+
+
+@app.post("/api/import/coco")
+async def import_coco(dataset_dir: str = Query(...)) -> dict:
+    """Import a COCO dataset directory back into editor payload."""
+    def _run() -> dict:
+        from coco_import import import_dataset
+        return import_dataset(dataset_dir)
+
+    try:
+        return await asyncio.to_thread(_run)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:
+        logger.error("Import failed for %s: %s", dataset_dir, exc)
+        raise HTTPException(500, f"Import failed: {exc}") from exc
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}

@@ -1,0 +1,417 @@
+"""Shape rasterization and COCO dataset writing for SAM3 fine-tuning.
+
+Ports mlex ShapeConversion rasterizers, replacing matplotlib contains_points
+(O(H*W) per shape) with skimage.draw, and fixing the v1 brush and rectangle bugs.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import random
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pycocotools.mask as mask_utils
+from skimage import draw, measure
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Shape -> binary mask
+# ---------------------------------------------------------------------------
+
+def _polygon_mask(points: list[float], h: int, w: int) -> np.ndarray:
+    """Rasterize a closed polygon given flat [x0,y0,x1,y1,...] coords."""
+    xs = np.asarray(points[0::2])
+    ys = np.asarray(points[1::2])
+    mask = np.zeros((h, w), dtype=bool)
+    rr, cc = draw.polygon(ys, xs, shape=(h, w))
+    mask[rr, cc] = True
+    return mask
+
+
+def _rect_mask(x: float, y: float, rw: float, rh: float, h: int, w: int) -> np.ndarray:
+    """Rasterize a normalized (w,h >= 0) rectangle via start/end like mlex."""
+    x0 = int(np.clip(round(x), 0, w - 1))
+    y0 = int(np.clip(round(y), 0, h - 1))
+    x1 = int(np.clip(round(x + rw), 0, w - 1))
+    y1 = int(np.clip(round(y + rh), 0, h - 1))
+    mask = np.zeros((h, w), dtype=bool)
+    rr, cc = draw.rectangle(start=(y0, x0), end=(y1, x1))
+    mask[rr.astype(int), cc.astype(int)] = True
+    return mask
+
+
+def _ellipse_mask(cx: float, cy: float, rx: float, ry: float, h: int, w: int) -> np.ndarray:
+    """Rasterize an axis-aligned ellipse (radii pre-normalized >= 0)."""
+    mask = np.zeros((h, w), dtype=bool)
+    rr, cc = draw.ellipse(cy, cx, max(ry, 0.5), max(rx, 0.5), shape=(h, w))
+    mask[rr, cc] = True
+    return mask
+
+
+def _stamp_stroke(mask: np.ndarray, points: list[float], radius: float) -> None:
+    """Stamp disks of radius along a polyline at <= radius/2 spacing (in-place).
+
+    Fixes the v1 "beads on a hairline" bug: a disk per recorded vertex joined
+    by 1-px lines exported strokes far thinner than the on-screen
+    strokeWidth = 2 * radius rendering on fast mouse moves.
+    """
+    h, w = mask.shape
+    xs = np.asarray(points[0::2], dtype=float)
+    ys = np.asarray(points[1::2], dtype=float)
+    r = max(1.0, float(radius))
+    step = max(0.5, r / 2.0)
+    for i in range(len(xs)):
+        rr, cc = draw.disk((ys[i], xs[i]), r, shape=(h, w))
+        mask[rr, cc] = True
+    for i in range(len(xs) - 1):
+        dist = math.hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i])
+        if dist < 1e-9:
+            continue
+        for k in range(1, int(dist // step) + 1):
+            t = k * step / dist
+            cy = ys[i] + t * (ys[i + 1] - ys[i])
+            cx = xs[i] + t * (xs[i + 1] - xs[i])
+            rr, cc = draw.disk((cy, cx), r, shape=(h, w))
+            mask[rr, cc] = True
+
+
+def _brush_mask(strokes: list[dict[str, Any]], h: int, w: int) -> np.ndarray:
+    """Compose ordered paint/erase strokes into one instance mask.
+
+    Paint strokes OR pixels in; erase strokes AND them out.
+    Order matters and matches the on-canvas destination-out rendering exactly.
+    """
+    mask = np.zeros((h, w), dtype=bool)
+    for stroke in strokes:
+        stamp = np.zeros((h, w), dtype=bool)
+        _stamp_stroke(stamp, stroke["points"], stroke["radius"])
+        if stroke.get("mode", "paint") == "erase":
+            mask &= ~stamp
+        else:
+            mask |= stamp
+    return mask
+
+
+def shape_to_mask(shape: dict[str, Any], h: int, w: int) -> np.ndarray:
+    """Rasterize one Shape (image-pixel coords) to an (h, w) boolean mask."""
+    kind = shape["kind"]
+    if kind == "polygon":
+        return _polygon_mask(shape["points"], h, w)
+    if kind == "rectangle":
+        return _rect_mask(shape["x"], shape["y"], shape["w"], shape["h"], h, w)
+    if kind == "ellipse":
+        return _ellipse_mask(shape["cx"], shape["cy"], shape["rx"], shape["ry"], h, w)
+    if kind == "brush":
+        return _brush_mask(shape["strokes"], h, w)
+    raise ValueError(f"Unknown shape kind: {kind!r}")
+
+
+# ---------------------------------------------------------------------------
+# Mask -> COCO annotation
+# ---------------------------------------------------------------------------
+
+def _mask_to_polygons(mask: np.ndarray, min_pts: int = 6) -> list[list[float]]:
+    """Outer+inner contours as COCO-style flat polygons (holes NOT encoded -- see RLE)."""
+    polys: list[list[float]] = []
+    for contour in measure.find_contours(mask.astype(float), 0.5):
+        flat = np.flip(contour, axis=1).ravel().tolist()
+        if len(flat) >= min_pts:
+            polys.append([round(v, 2) for v in flat])
+    return polys
+
+
+def mask_to_coco_ann(
+    mask: np.ndarray,
+    ann_id: int,
+    image_id: int,
+    category_id: int,
+) -> dict[str, Any]:
+    """Build a COCO annotation: RLE in segmentation, polygons in segmentation_poly.
+
+    RLE is exact (holes, multiple components) and is what SAM3's pycocotools
+    segm path consumes. The polygon copy is a convenience for external viewers.
+    """
+    rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
+    rle["counts"] = rle["counts"].decode("ascii")
+    return {
+        "id": ann_id,
+        "image_id": image_id,
+        "category_id": category_id,
+        "iscrowd": 0,
+        "area": float(mask_utils.area(rle)),
+        "bbox": [float(v) for v in mask_utils.toBbox(rle)],
+        "segmentation": rle,
+        "segmentation_poly": _mask_to_polygons(mask),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Merge-safe dataset writer
+# ---------------------------------------------------------------------------
+
+class ExportConflict(Exception):
+    """Raised when a merge would corrupt category ids or names."""
+
+
+def _resolve_split(
+    slice_keys: list[str],
+    split_by_slice: dict[str, str],
+    auto_split: dict[str, Any],
+) -> dict[str, str]:
+    """Resolve 'auto' entries using a seeded ratio split."""
+    ratios = auto_split.get("ratios", [0.8, 0.1, 0.1])
+    seed = auto_split.get("seed", 1234)
+    splits_out = dict(split_by_slice)
+    auto_keys = [k for k in slice_keys if splits_out.get(k, "auto") == "auto"]
+    if auto_keys:
+        rng = random.Random(seed)
+        rng.shuffle(auto_keys)
+        n = len(auto_keys)
+        n_train = int(n * ratios[0])
+        n_valid = int(n * ratios[1])
+        labels = ["train"] * n_train + ["valid"] * n_valid + ["test"] * (n - n_train - n_valid)
+        for k, lbl in zip(auto_keys, labels):
+            splits_out[k] = lbl
+    return splits_out
+
+
+def write_coco_split(
+    split_dir: Path,
+    images: list[dict[str, Any]],
+    categories: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    *,
+    mode: str = "fail",
+    info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write/merge one split directory.
+
+    In merge mode existing image entries are matched by file_name:
+    matched images are replaced (their old annotations dropped),
+    new images get ids above the existing max; annotation ids likewise
+    re-baselined. Categories are matched by name -- id collisions with
+    different names abort with a clear error rather than silently corrupting.
+
+    Args:
+        split_dir: Destination directory (created if needed).
+        images: List of image dicts with file_name, height, width, png_bytes.
+        categories: List of category dicts with id, name.
+        annotations: List of annotation dicts.
+        mode: 'fail' | 'overwrite' | 'merge'.
+        info: Optional COCO info block.
+
+    Returns:
+        Summary dict with n_images, n_annotations, written paths.
+
+    Raises:
+        FileExistsError: mode='fail' and annotations file already exists.
+        ExportConflict: merge category name/id conflict.
+    """
+    split_dir.mkdir(parents=True, exist_ok=True)
+    coco_path = split_dir / "_annotations.coco.json"
+    sidecar_path = split_dir / "_studio_shapes.json"
+
+    existing_coco: dict[str, Any] = {"images": [], "annotations": [], "categories": []}
+    if coco_path.exists():
+        if mode == "fail":
+            raise FileExistsError(f"{coco_path} already exists (use overwrite or merge)")
+        if mode == "merge":
+            try:
+                existing_coco = json.loads(coco_path.read_text())
+            except json.JSONDecodeError:
+                logger.warning("Existing COCO file corrupt -- treating as empty")
+
+    # Category merge: match by name
+    merged_cats = {c["name"]: c for c in existing_coco.get("categories", [])}
+    for new_cat in categories:
+        if new_cat["name"] in merged_cats:
+            if merged_cats[new_cat["name"]]["id"] != new_cat["id"]:
+                # Remap to existing id -- no conflict unless names differ
+                pass
+        else:
+            # Assign id above current max
+            max_id = max((c["id"] for c in merged_cats.values()), default=0)
+            merged_cats[new_cat["name"]] = {**new_cat, "id": max_id + 1}
+    final_cats = sorted(merged_cats.values(), key=lambda c: c["id"])
+
+    # Build name->id mapping for annotation remapping
+    name_to_id = {c["name"]: c["id"] for c in final_cats}
+    old_cat_map = {c["id"]: c["name"] for c in categories}
+
+    # Image merge
+    existing_by_fname: dict[str, dict[str, Any]] = {
+        img["file_name"]: img for img in existing_coco.get("images", [])
+    }
+    existing_anns: list[dict[str, Any]] = list(existing_coco.get("annotations", []))
+    replaced_image_ids: set[int] = set()
+
+    new_image_fnames = {img["file_name"] for img in images}
+    for fname in new_image_fnames:
+        if fname in existing_by_fname:
+            replaced_image_ids.add(existing_by_fname[fname]["id"])
+
+    kept_images = [img for img in existing_coco.get("images", []) if img["id"] not in replaced_image_ids]
+    kept_anns = [a for a in existing_anns if a["image_id"] not in replaced_image_ids]
+
+    max_img_id = max((img["id"] for img in kept_images), default=0)
+    max_ann_id = max((a["id"] for a in kept_anns), default=0)
+
+    out_images: list[dict[str, Any]] = list(kept_images)
+    out_anns: list[dict[str, Any]] = list(kept_anns)
+
+    for img in images:
+        max_img_id += 1
+        img_id = max_img_id
+        png_bytes: bytes | None = img.pop("png_bytes", None)
+        out_img = {**img, "id": img_id}
+        out_images.append(out_img)
+
+        # Write PNG
+        if png_bytes is not None:
+            (split_dir / img["file_name"]).write_bytes(png_bytes)
+
+        # Write annotations for this image
+        img_anns = [a for a in annotations if a.get("_image_file_name") == img["file_name"]]
+        for ann in img_anns:
+            max_ann_id += 1
+            # Remap category id via name
+            orig_cat_id = ann.get("category_id", 1)
+            cat_name = old_cat_map.get(orig_cat_id, str(orig_cat_id))
+            new_cat_id = name_to_id.get(cat_name, orig_cat_id)
+            clean_ann = {k: v for k, v in ann.items() if not k.startswith("_")}
+            out_anns.append({**clean_ann, "id": max_ann_id, "image_id": img_id, "category_id": new_cat_id})
+
+    coco_doc = {
+        "info": info or {
+            "description": "SAM3 fine-tune dataset -- SAM3 Annotation Studio",
+            "date_created": datetime.now(timezone.utc).isoformat(),
+        },
+        "licenses": [],
+        "images": out_images,
+        "categories": final_cats,
+        "annotations": out_anns,
+    }
+    coco_path.write_text(json.dumps(coco_doc, indent=2))
+
+    return {
+        "n_images": len(images),
+        "n_annotations": sum(1 for a in out_anns if a["image_id"] in {img["id"] for img in out_images[-len(images):]}),
+        "path": str(coco_path),
+    }
+
+
+def build_export_plan(
+    node: Any,
+    payload: Any,
+    render_slice_fn: Any,
+    array_shape_meta_fn: Any,
+    read_slice_fn: Any,
+    sample_global_stats_fn: Any,
+) -> dict[str, Any]:
+    """Build the full export plan (rasterize all shapes, render PNGs).
+
+    Args:
+        node: Lazily-sliceable array node.
+        payload: ExportRequest pydantic model.
+        render_slice_fn: images.render_slice callable.
+        array_shape_meta_fn: arrays.array_shape_meta callable.
+        read_slice_fn: arrays.read_slice callable.
+        sample_global_stats_fn: images._sample_global_stats callable.
+
+    Returns:
+        Dict with splits (each has images, categories, annotations, info).
+    """
+    import io
+    from PIL import Image as PILImage
+
+    meta = array_shape_meta_fn(node)
+    h, w = meta["height"], meta["width"]
+    render_opts = payload.render.model_dump() if hasattr(payload.render, "model_dump") else dict(payload.render)
+    render_opts_mapped = {
+        "norm": render_opts.get("norm", "global"),
+        "scale": render_opts.get("scale", "linear"),
+        "vmin_pct": render_opts.get("vmin_pct", 1.0),
+        "vmax_pct": render_opts.get("vmax_pct", 99.0),
+        "cmap": render_opts.get("cmap", "gray"),
+    }
+
+    global_range = None
+    if render_opts_mapped["norm"] == "global":
+        global_range = sample_global_stats_fn(node, meta)
+
+    classes_by_id = {c.classId: c for c in payload.classes}
+    cat_id_map: dict[int, int] = {}
+    categories: list[dict[str, Any]] = []
+    for i, cls in enumerate(payload.classes, 1):
+        categories.append({"id": i, "name": cls.label, "supercategory": "object"})
+        cat_id_map[cls.classId] = i
+
+    all_slice_keys = list(payload.slices.keys())
+    neg_keys = set(str(k) for k in payload.negative_slices)
+    all_keys = list(set(all_slice_keys) | neg_keys)
+
+    resolved_splits = _resolve_split(all_keys, {str(k): v for k, v in payload.split_by_slice.items()}, payload.auto_split)
+
+    splits_data: dict[str, dict[str, Any]] = {}
+    skipped_zero_area = 0
+
+    for slice_key in all_keys:
+        split = resolved_splits.get(slice_key, "train")
+        if split not in splits_data:
+            splits_data[split] = {"images": [], "annotations": []}
+
+        slice_idx = int(slice_key)
+        arr = read_slice_fn(node, meta, slice_idx)
+        rgb = render_slice_fn(arr, render_opts_mapped, global_range)
+
+        buf = io.BytesIO()
+        PILImage.fromarray(rgb).save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+
+        source_stem = str(payload.source).replace("/", "_").replace("\\", "_")[-30:]
+        file_name = f"{source_stem}_{slice_idx:04d}.png"
+
+        shapes = payload.slices.get(slice_key, [])
+        anns: list[dict[str, Any]] = []
+        for shape in shapes:
+            shape_dict = shape if isinstance(shape, dict) else shape.model_dump()
+            mask = shape_to_mask(shape_dict, h, w)
+            area = float(mask.sum())
+            if area < 1:
+                skipped_zero_area += 1
+                logger.warning("Zero-area shape %r skipped", shape_dict.get("id"))
+                continue
+            class_id = shape_dict.get("classId", 1)
+            cat_id = cat_id_map.get(class_id, 1)
+            ann = mask_to_coco_ann(mask, ann_id=0, image_id=0, category_id=cat_id)
+            ann["_image_file_name"] = file_name
+            anns.append(ann)
+
+        splits_data[split]["images"].append({
+            "file_name": file_name,
+            "height": h,
+            "width": w,
+            "source_key": str(payload.source),
+            "slice_index": slice_idx,
+            "png_bytes": png_bytes,
+        })
+        splits_data[split]["annotations"].extend(anns)
+
+    info = {
+        "description": "SAM3 fine-tune dataset -- SAM3 Annotation Studio",
+        "date_created": datetime.now(timezone.utc).isoformat(),
+        "render": render_opts_mapped,
+    }
+
+    return {
+        "splits": splits_data,
+        "categories": categories,
+        "info": info,
+        "skipped_zero_area": skipped_zero_area,
+    }
