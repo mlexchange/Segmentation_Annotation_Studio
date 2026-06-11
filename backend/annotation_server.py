@@ -1,0 +1,314 @@
+"""FastAPI entry point for the SAM3 Annotation Studio API.
+
+Endpoints
+---------
+* ``GET /api/config/servers``   — list configured Tiled servers
+* ``GET /api/browse/facets``    — metadata fields available for browsing
+* ``GET /api/browse/column``    — distinct values + counts for one field
+* ``GET /api/browse/items``     — sample records matching a filter set
+* ``GET /api/browse/thumbnail`` — PNG thumbnail for a Tiled array path
+* ``GET /health``               — liveness check
+
+Run with
+--------
+    uvicorn annotation_server:app --host 127.0.0.1 --port 8002
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from browse_helpers import FieldMapping, build_field_mapping, tiled_distinct_values, tiled_search_items
+from cache import TTLCache
+from thumbnails import render_thumbnail
+from tiled_clients import api_key_for_uri, get_browse_container, get_tiled_client
+from tiled_config import get_tiled_api_key, get_tiled_servers
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("annotation-server")
+
+app = FastAPI(
+    title="SAM3 Annotation Studio API",
+    description="Annotation API for SAM3 fine-tuning dataset generation",
+    version="0.1.0",
+)
+
+# Allowed dev origins. Credentials + wildcard is rejected by browsers, so the
+# origin list is explicit and credentials stays off.
+_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "BROWSE_ALLOWED_ORIGINS",
+        "http://127.0.0.1:5173,http://localhost:5173",
+    ).split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Response models
+# ---------------------------------------------------------------------------
+
+class ServerConfig(BaseModel):
+    name: str
+    uri: str
+    has_api_key: bool
+    # api_key field intentionally omitted — never expose keys to frontend
+
+
+# ---------------------------------------------------------------------------
+# Caching
+# ---------------------------------------------------------------------------
+
+_CACHE_TTL = float(os.getenv("BROWSE_CACHE_TTL_SECONDS", "300"))
+_FIELD_MAPPING_TTL = float(os.getenv("BROWSE_FIELD_MAPPING_TTL_SECONDS", "300"))
+
+# Per-endpoint TTL caches. Keys are tuples of normalised query parameters.
+_column_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=256)
+_items_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=128)
+_field_mapping_cache: TTLCache = TTLCache(ttl_seconds=_FIELD_MAPPING_TTL, max_entries=32)
+
+
+def _resolve_field_mapping(container: object, server_uri: str, technique: str) -> FieldMapping:
+    """Return a cached :class:`FieldMapping` for the given container."""
+    key = (server_uri, technique)
+    cached = _field_mapping_cache.get(key)
+    if cached is not None:
+        return cached
+    mapping = build_field_mapping(container)
+    _field_mapping_cache.set(key, mapping)
+    return mapping
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/config/servers", response_model=list[ServerConfig])
+async def get_servers() -> list[ServerConfig]:
+    """List configured Tiled servers, with the local (8010) entry first."""
+    items = [
+        ServerConfig(
+            name=name,
+            uri=cfg["uri"],
+            has_api_key=bool(cfg.get("api_key")),
+        )
+        for name, cfg in get_tiled_servers().items()
+    ]
+    items.sort(key=lambda s: (0 if ":8010" in s.uri else 1, s.name))
+    return items
+
+
+@app.get("/api/browse/facets")
+async def browse_facets(
+    server_uri: Optional[str] = None,
+    server_api_key: Optional[str] = None,
+    technique: str = Query("GIWAXS"),
+    refresh: bool = Query(False),  # noqa: ARG001 — kept for client API compat
+) -> dict[str, list[str]]:
+    """Return ordered list of browsable metadata fields, discovered live.
+
+    For each key in the field mapping, the field is kept if at least two
+    distinct non-null values exist. Live (no cache) so newly-seeded metadata
+    appears in the UI without a restart.
+    """
+    def _discover() -> dict[str, list[str]]:
+        client = get_tiled_client(server_uri, server_api_key)
+        container, _ = get_browse_container(client)
+        mapping = _resolve_field_mapping(container, server_uri or "", technique)
+
+        def _facet_for_key(disp_key: str) -> tuple[list[str], list[str]]:
+            raw_key = mapping.display_to_raw.get(disp_key, disp_key)
+            try:
+                result = container.distinct(raw_key, counts=True)
+            except Exception:
+                return [], []
+            raw_values = result.get("metadata", {}).get(raw_key, [])
+            non_null = [
+                v for v in raw_values
+                if v.get("value") is not None
+                and str(v["value"]).strip() not in ("", "None", "NaN", "nan")
+            ]
+            facet_names: list[str] = []
+            if len(non_null) >= 2:
+                facet_names.append(disp_key)
+            tech_extra: list[str] = []
+            if disp_key in ("technique", "scan_type"):
+                for v in non_null:
+                    sv = str(v["value"]).strip()
+                    if sv:
+                        tech_extra.append(sv)
+            return facet_names, tech_extra
+
+        keys = mapping.all_display_keys
+        max_workers = min(16, max(1, len(keys)))
+        facets: list[str] = []
+        techniques_seen: list[str] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_facet_for_key, dk) for dk in keys]
+            for fut in as_completed(futures):
+                facet_names, tech_extra = fut.result()
+                facets.extend(facet_names)
+                for sv in tech_extra:
+                    if sv not in techniques_seen:
+                        techniques_seen.append(sv)
+
+        return {"facets": sorted(facets), "techniques": techniques_seen}
+
+    try:
+        return await asyncio.to_thread(_discover)
+    except Exception as exc:
+        logger.warning("browse_facets failed: %s", exc)
+        return {"facets": [], "techniques": []}
+
+
+@app.get("/api/browse/column")
+async def browse_column(
+    server_uri: Optional[str] = None,
+    server_api_key: Optional[str] = None,
+    technique: str = Query("GIWAXS"),
+    field: str = Query(..., description="Display-key metadata field to group by"),
+    filters: str = Query("{}", description="JSON dict of upstream display_key=value selections"),
+    limit: int = Query(500, ge=1, le=5000),
+    refresh: bool = Query(False),
+) -> dict:
+    """Return distinct values (+ counts) for *field* via Tiled ``distinct()``."""
+    filter_dict = _parse_json_filters(filters)
+
+    cache_key = ("column", server_uri or "", technique, field, filters, limit)
+    if not refresh:
+        cached = _column_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    def _build() -> dict:
+        client = get_tiled_client(server_uri, server_api_key)
+        container, _ = get_browse_container(client)
+        mapping = _resolve_field_mapping(container, server_uri or "", technique)
+        raw_key = mapping.display_to_raw.get(field, field)
+        return tiled_distinct_values(
+            container,
+            raw_key,
+            filters=filter_dict,
+            field_mapping=mapping,
+            limit=limit,
+        )
+
+    try:
+        result = await asyncio.to_thread(_build)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to browse column: {exc}") from exc
+
+    _column_cache.set(cache_key, result)
+    return result
+
+
+@app.get("/api/browse/items")
+async def browse_items(
+    server_uri: Optional[str] = None,
+    server_api_key: Optional[str] = None,
+    technique: str = Query("GIWAXS"),
+    filters: str = Query("{}", description="JSON dict of display_key=value selections"),
+    limit: int = Query(500, ge=1, le=2000),
+    refresh: bool = Query(False),
+) -> dict:
+    """Return sample records (path + metadata) matching *filters* via ``search()``."""
+    filter_dict = _parse_json_filters(filters)
+
+    cache_key = ("items", server_uri or "", technique, filters, limit)
+    if not refresh:
+        cached = _items_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    def _build() -> dict:
+        client = get_tiled_client(server_uri, server_api_key)
+        container, prefix = get_browse_container(client)
+        mapping = _resolve_field_mapping(container, server_uri or "", technique)
+        return tiled_search_items(
+            container,
+            filters=filter_dict,
+            field_mapping=mapping,
+            limit=limit,
+            container_path_prefix=prefix,
+        )
+
+    try:
+        result = await asyncio.to_thread(_build)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to browse items: {exc}") from exc
+
+    _items_cache.set(cache_key, result)
+    return result
+
+
+@app.get("/api/browse/thumbnail")
+async def browse_thumbnail(
+    tiled_path: str = Query(..., description="Slash-separated Tiled path"),
+    server_uri: Optional[str] = None,
+    size: int = Query(256, ge=32, le=512),
+) -> Response:
+    """Return a PNG thumbnail for the array at *tiled_path*."""
+    def _build() -> bytes | None:
+        api_key = api_key_for_uri(server_uri) or get_tiled_api_key()  # server-side only
+        client = get_tiled_client(server_uri, api_key)
+        node = client
+        for part in tiled_path.strip("/").split("/"):
+            node = node[part]
+        return render_thumbnail(node, size=size)
+
+    try:
+        png_bytes = await asyncio.to_thread(_build)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Tiled path not found: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to load array from Tiled: {exc}") from exc
+
+    if png_bytes is None:
+        raise HTTPException(status_code=404, detail="No array data found at the given path")
+
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_json_filters(raw: str) -> dict:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+if __name__ == "__main__":  # pragma: no cover — convenience entry point
+    import uvicorn
+
+    uvicorn.run("annotation_server:app", host="127.0.0.1", port=8002)

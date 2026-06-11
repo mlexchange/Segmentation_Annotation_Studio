@@ -1,0 +1,11 @@
+allow_origins:
+  - "http://127.0.0.1:5173"
+  - "http://localhost:5173"
+
+trees:
+  - path: /
+    tree: tiled.catalog:from_uri
+    args:
+      uri: "sqlite+aiosqlite:///./.tiled/catalog.db"
+      writable_storage: ".tiled/data"
+      init_if_not_exists: true

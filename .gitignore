@@ -1,0 +1,11 @@
+.venv/
+# Note: `.tiled/` is tracked in this repo (SQLite catalog + writable_storage zarr)
+# so clones get demo data under browse/generated_data without running the seed script.
+__pycache__/
+*.pyc
+.env
+node_modules/
+dist/
+.DS_Store
+.conda*/
+*.pid
