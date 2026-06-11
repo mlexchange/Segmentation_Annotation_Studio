@@ -21,14 +21,20 @@ import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import arrays as arrays_mod
+import drafts as drafts_mod
+import images as images_mod
+import local_fs
 from browse_helpers import FieldMapping, build_field_mapping, tiled_distinct_values, tiled_search_items
 from cache import TTLCache
+from schemas import DraftPayload, ExportRequest, ImageMeta, RenderOpts
 from thumbnails import render_thumbnail
 from tiled_clients import api_key_for_uri, get_browse_container, get_tiled_client
 from tiled_config import get_tiled_api_key, get_tiled_servers
@@ -289,6 +295,116 @@ async def browse_thumbnail(
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=300"},
     )
+
+
+@app.get("/api/local/list")
+async def local_list(
+    rel: str = Query("", description="Relative path under LOCAL_DATA_ROOT"),
+) -> list[dict]:
+    """List directory entries under LOCAL_DATA_ROOT."""
+    return await asyncio.to_thread(local_fs.list_dir, rel)
+
+
+@app.get("/api/image/meta", response_model=ImageMeta)
+async def image_meta(
+    source: str = Query(...),
+    kind: str = Query(...),
+    server_uri: Optional[str] = None,
+) -> ImageMeta:
+    """Return shape / dtype metadata for an image source."""
+    def _run() -> ImageMeta:
+        node = arrays_mod.resolve_array(source, kind, server_uri)
+        meta = arrays_mod.array_shape_meta(node)
+        sl = arrays_mod.read_slice(node, meta, 0)
+        flat = sl.ravel().astype(float)
+        return ImageMeta(
+            n_slices=meta["n_slices"],
+            height=meta["height"],
+            width=meta["width"],
+            dtype=meta["dtype"],
+            is_rgb=meta["is_rgb"],
+            value_range=[float(flat.min()), float(flat.max())],
+        )
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("image_meta failed: %s", exc)
+        raise HTTPException(500, f"Failed to read image meta: {exc}") from exc
+
+
+@app.get("/api/image/slice")
+async def image_slice(
+    source: str = Query(...),
+    kind: str = Query(...),
+    slice_index: int = Query(0),
+    server_uri: Optional[str] = None,
+    norm: str = Query("global"),
+    scale: str = Query("linear"),
+    vmin_pct: float = Query(1.0),
+    vmax_pct: float = Query(99.0),
+    cmap: str = Query("gray"),
+) -> Response:
+    """Render one slice of an image source as a PNG."""
+    opts = {
+        "norm": norm,
+        "scale": scale,
+        "vmin_pct": vmin_pct,
+        "vmax_pct": vmax_pct,
+        "cmap": cmap,
+    }
+
+    def _run() -> bytes:
+        node = arrays_mod.resolve_array(source, kind, server_uri)
+        meta = arrays_mod.array_shape_meta(node)
+        sl = arrays_mod.read_slice(node, meta, slice_index)
+        global_range = None
+        if norm == "global":
+            global_range = images_mod._sample_global_stats(node, meta)
+        rgb = images_mod.render_slice(sl, opts, global_range)
+        return images_mod.encode_png(rgb)
+
+    try:
+        png = await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("image_slice failed: %s", exc)
+        raise HTTPException(500, f"Failed to render slice: {exc}") from exc
+
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/api/annotations/draft")
+async def get_draft(source_key: str = Query(...)) -> dict:
+    """Return the saved draft for source_key, or 404."""
+    result = await asyncio.to_thread(drafts_mod.load_draft, source_key)
+    if result is None:
+        raise HTTPException(404, "No draft found")
+    return result
+
+
+@app.put("/api/annotations/draft")
+async def put_draft(
+    source_key: str = Query(...),
+    payload: DraftPayload = ...,
+) -> dict:
+    """Persist a session draft for source_key."""
+    return await asyncio.to_thread(
+        drafts_mod.save_draft, source_key, payload.model_dump()
+    )
+
+
+@app.get("/api/annotations/drafts")
+async def list_drafts_route() -> list[dict]:
+    """List all saved drafts with summary metadata."""
+    return await asyncio.to_thread(drafts_mod.list_drafts)
 
 
 @app.get("/health")
