@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 
-const STORAGE_KEY = 'hub_selected_tab_paths';
+const STORAGE_KEY = 'sam3_hub_selected_tab_paths';
 
 export function useHubSelectedTabs() {
   const [selectedPaths, setSelectedPathsState] = useState<string[] | null>(() => {

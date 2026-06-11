@@ -287,7 +287,10 @@ ensure_backend_env() {
 
   if ! "$PYTHON" -c "import tiled, uvicorn" >/dev/null 2>&1; then
     echo -e "${YELLOW}    Installing backend dependencies into $ENV_DIR${NC}"
-    "${PIP_CMD[@]}" install -e "$BACKEND_DIR[dev,test]"
+    "${PIP_CMD[@]}" install \
+      "fastapi>=0.115" "uvicorn[standard]>=0.30" "tiled[all]>=0.1" \
+      "numpy>=1.26" "pillow>=10.3" "python-dotenv>=1.0" "matplotlib>=3.8" \
+      "pycocotools>=2.0.7" "scikit-image>=0.22" "tifffile>=2024.0" "imagecodecs"
   fi
 }
 

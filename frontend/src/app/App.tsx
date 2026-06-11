@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, useLocation, Navigate } from 'react-router';
 import './App.css';
 import { RouteItem } from '@/types/navigationRouterTypes';
@@ -32,29 +32,35 @@ const allRoutes: RouteItem[] = [
   },
 ];
 
+const DEFAULT_PATHS = allRoutes.map((r) => r.path);
+
 function App() {
   const { selectedPaths, setSelectedPaths } = useHubSelectedTabs();
   const navigate = useNavigate();
   const location = useLocation();
   const [showTabSelector, setShowTabSelector] = useState(false);
 
-  const handleStartHub = (paths: string[]) => {
-    setSelectedPaths(paths);
-    setShowTabSelector(false);
-    if (paths.length > 0) navigate(paths[0]);
-  };
+  // Validate stored paths — discard any that don't belong to this app
+  const validPaths = selectedPaths?.filter((p) => DEFAULT_PATHS.includes(p)) ?? null;
+  const needsInit = validPaths === null || validPaths.length === 0;
 
-  const filteredRoutes = selectedPaths !== null
-    ? allRoutes.filter(r => selectedPaths.includes(r.path))
-    : [];
+  // Navigate on first mount if no valid paths stored
+  useEffect(() => {
+    if (needsInit) {
+      setSelectedPaths(DEFAULT_PATHS);
+      navigate('/connect', { replace: true });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (selectedPaths === null || showTabSelector || filteredRoutes.length === 0) {
-    // Default to all tabs selected on first load
-    handleStartHub(allRoutes.map(r => r.path));
+  const filteredRoutes = needsInit
+    ? allRoutes
+    : allRoutes.filter((r) => validPaths!.includes(r.path));
+
+  if (needsInit) {
     return null;
   }
 
-  if (location.pathname === '/' && !filteredRoutes.some(r => r.path === '/')) {
+  if (location.pathname === '/' && !filteredRoutes.some((r) => r.path === '/')) {
     return <Navigate to={filteredRoutes[0].path} replace />;
   }
 
@@ -66,7 +72,7 @@ function App() {
       />
       <CustomizePages
         routes={allRoutes}
-        selectedPaths={selectedPaths || []}
+        selectedPaths={validPaths!}
         onSelectionChange={setSelectedPaths}
       />
     </>
