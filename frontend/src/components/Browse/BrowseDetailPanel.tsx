@@ -11,6 +11,7 @@ interface BrowseDetailPanelProps {
 }
 
 const SECTION_ORDER = [
+  { label: 'Annotation', keys: ['studio_annotated', 'studio_shape_count', 'studio_class_count', 'studio_updated_at'] },
   { label: 'Identity', keys: ['ThinFilmID', 'sample_name', 'PS_ID', 'BatchID', 'bar', 'SampleDescription'] },
   { label: 'Experiment', keys: ['PI', 'beamline', 'technique', 'scan_type', 'date', 'scan_date', 'energy_keV', 'incident_angle_deg', 'Exposure time s'] },
   { label: 'Geometry', keys: ['beam_x', 'beam_y', 'sdd_mm', 'pixel_size_x', 'pixel_size_y', 'sample_detector_distance'] },
@@ -22,7 +23,27 @@ function formatValue(v: unknown): string {
   if (v === null || v === undefined) return '—';
   if (Array.isArray(v)) return `[${v.length} items]`;
   if (typeof v === 'object') return JSON.stringify(v).slice(0, 80);
-  return String(v);
+  const text = String(v);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text)) {
+    const parsed = Date.parse(text);
+    if (!Number.isNaN(parsed)) {
+      return new Date(parsed).toLocaleString(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      });
+    }
+  }
+  return text;
+}
+
+function displayKey(key: string): string {
+  const aliases: Record<string, string> = {
+    studio_annotated: 'Annotated',
+    studio_shape_count: 'Shape count',
+    studio_class_count: 'Class count',
+    studio_updated_at: 'Annotated at',
+  };
+  return aliases[key] ?? key;
 }
 
 export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAnnotate }: BrowseDetailPanelProps) {
@@ -76,10 +97,7 @@ export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAn
   if (otherEntries.length > 0) sections.push({ label: 'Other', entries: otherEntries });
 
   return (
-    <div
-      className="flex flex-col h-full"
-      style={{ background: '#0f172a', color: '#e2e8f0', width: 360, flexShrink: 0 }}
-    >
+    <div className="flex h-full w-full flex-col bg-slate-950 text-slate-200">
       {/* Header */}
       <div
         className="flex items-center justify-between px-4 py-3 border-b"
@@ -141,7 +159,7 @@ export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAn
                       className="pr-2 py-0.5 font-medium whitespace-nowrap"
                       style={{ color: '#94a3b8', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis' }}
                     >
-                      {k}
+                      {displayKey(k)}
                     </td>
                     <td
                       className="py-0.5 break-words"

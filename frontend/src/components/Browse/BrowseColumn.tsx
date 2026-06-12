@@ -7,6 +7,7 @@ interface BrowseColumnProps {
   column: ColumnState;
   facets: string[];
   width: number;
+  formatValue?: (field: string, value: string) => string;
   onFieldChange: (colIndex: number, field: string) => void;
   onSelect: (colIndex: number, value: string | null) => void;
   onRemove: (colIndex: number) => void;
@@ -18,6 +19,7 @@ export default function BrowseColumn({
   column,
   facets,
   width,
+  formatValue,
   onFieldChange,
   onSelect,
   onRemove,
@@ -96,6 +98,9 @@ export default function BrowseColumn({
         {!column.loading &&
           column.values.map((item: BrowseValue) => {
             const isSelected = column.selected === item.value;
+            const displayValue = formatValue
+              ? formatValue(column.field, item.value)
+              : item.value;
             return (
               <button
                 key={item.value}
@@ -113,8 +118,8 @@ export default function BrowseColumn({
                   if (!isSelected) (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
                 }}
               >
-                <span className="text-xs truncate flex-1 mr-2" title={item.value}>
-                  {item.value}
+                <span className="text-xs truncate flex-1 mr-2" title={displayValue}>
+                  {displayValue}
                 </span>
                 <span
                   className="shrink-0 text-xs px-1.5 py-0.5 rounded-full font-mono"

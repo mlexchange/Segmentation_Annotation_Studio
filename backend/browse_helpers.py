@@ -19,19 +19,38 @@ from typing import Any, Iterable, Optional
 
 logger = logging.getLogger("browse-server")
 
-# Display-name aliases applied to ``thinfilm_<name>`` raw keys.
-DISPLAY_KEY_ALIASES: dict[str, str] = {"AnnealingTemp": "Temp"}
+# Display-name aliases applied to ``thinfilm_<name>`` raw keys and studio keys.
+DISPLAY_KEY_ALIASES: dict[str, str] = {
+    "AnnealingTemp": "Temp",
+    "studio_annotated": "Annotated",
+    "studio_shape_count": "Shape count",
+    "studio_class_count": "Class count",
+    "studio_updated_at": "Annotated at",
+}
+
+# Raw keys written by annotation autosave (always exposed in Browse).
+_STUDIO_RAW_KEYS: tuple[str, ...] = (
+    "studio_annotated",
+    "studio_shape_count",
+    "studio_class_count",
+    "studio_updated_at",
+)
 
 # Raw keys that are stored at the array-node level rather than on the parent
 # sample container. When a filter references one of these, we switch to a
 # per-sample search path.
-_ARRAY_ONLY_RAW_KEYS: frozenset[str] = frozenset({"angle_id", "incident_angle_deg", "bar"})
+_ARRAY_ONLY_RAW_KEYS: frozenset[str] = frozenset({
+    "angle_id", "incident_angle_deg", "bar", *_STUDIO_RAW_KEYS,
+})
 
 # Heuristics used when introspecting the first few samples to decide that we
 # have "enough" metadata keys to lock in the mapping.
 _SCAN_MAX_SAMPLES = 20
 _KEY_RICHNESS_THRESHOLD = 10
-_IMPORTANT_KEYS = frozenset({"PI", "sample_name", "incident_angle_deg", "technique", "scan_type"})
+_IMPORTANT_KEYS = frozenset({
+    "PI", "sample_name", "incident_angle_deg", "technique", "scan_type",
+    "studio_annotated", "studio_shape_count",
+})
 _IMPORTANT_MIN_COUNT = 4
 
 
@@ -88,11 +107,24 @@ def build_field_mapping(container_node: Any) -> FieldMapping:
         display_to_raw.setdefault(display_key, raw_key)
         raw_to_display[raw_key] = display_key
 
+    _inject_studio_keys(display_to_raw, raw_to_display)
+
     return FieldMapping(
         display_to_raw=display_to_raw,
         raw_to_display=raw_to_display,
         all_display_keys=sorted(display_to_raw.keys()),
     )
+
+
+def _inject_studio_keys(
+    display_to_raw: dict[str, str],
+    raw_to_display: dict[str, str],
+) -> None:
+    """Ensure studio annotation fields are always available in Browse."""
+    for raw_key in _STUDIO_RAW_KEYS:
+        display_key = _display_name(raw_key)
+        display_to_raw.setdefault(display_key, raw_key)
+        raw_to_display.setdefault(raw_key, display_key)
 
 
 def _combined_metadata_keys(first_item: Any) -> list[str]:
@@ -118,7 +150,7 @@ def _display_name(raw_key: str) -> str:
     if raw_key.startswith("thinfilm_"):
         stripped = raw_key[len("thinfilm_"):]
         return DISPLAY_KEY_ALIASES.get(stripped, stripped)
-    return raw_key
+    return DISPLAY_KEY_ALIASES.get(raw_key, raw_key)
 
 
 # ---------------------------------------------------------------------------

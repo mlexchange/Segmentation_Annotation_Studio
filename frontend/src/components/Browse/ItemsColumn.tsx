@@ -37,7 +37,7 @@ export default function ItemsColumn({
 
   const filtered = items.filter((item) => {
     const sk = buildSourceKey('tiled', item.path, serverUri);
-    const isAnnotated = annotatedKeys.has(sk);
+    const isAnnotated = itemIsAnnotated(item, sk, annotatedKeys);
 
     if (annotationFilter === 'annotated' && !isAnnotated) return false;
     if (annotationFilter === 'unannotated' && isAnnotated) return false;
@@ -119,13 +119,24 @@ interface ItemRowProps {
   serverUri: string;
 }
 
+/** True if annotated in-session, in drafts, or synced to Tiled metadata. */
+function itemIsAnnotated(
+  item: BrowseItem,
+  sourceKey: string,
+  annotatedKeys: Set<string>,
+): boolean {
+  if (annotatedKeys.has(sourceKey)) return true;
+  const flag = item.metadata?.studio_annotated;
+  return flag === 'yes' || flag === true;
+}
+
 function ItemRow({ item, isSelected, onSelect, onOpenInAnnotate, serverUri }: ItemRowProps) {
   const sourceKey = buildSourceKey('tiled', item.path, serverUri);
   const rating = useRatingStore((s) => s.ratings[sourceKey] ?? 0) as StarRatingValue;
   const setRating = useRatingStore((s) => s.setRating);
   const annotatedKeys = useAnnotatedSourceKeys();
 
-  const isAnnotated = annotatedKeys.has(sourceKey);
+  const isAnnotated = itemIsAnnotated(item, sourceKey, annotatedKeys);
 
   const background = isSelected ? 'bg-blue-700' : 'bg-transparent hover:bg-slate-700';
 

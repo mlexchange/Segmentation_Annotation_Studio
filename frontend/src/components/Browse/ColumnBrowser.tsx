@@ -22,10 +22,32 @@ const DEFAULT_COLUMN_WIDTH = 220;
 const DEFAULT_ITEMS_WIDTH = 260;
 const INITIAL_COLUMN_COUNT = 4;
 
+/** Studio facets are useful as filters but should not fill the initial column set. */
+const STUDIO_FACETS = new Set(['Annotated', 'Annotated at', 'Shape count', 'Class count']);
+
 function columnWidthForField(field: string): number {
   if (field === 'sample_name') return 200;
+  if (field === 'Annotated') return 160;
+  if (field === 'Annotated at') return 280;
+  if (field === 'Shape count' || field === 'Class count') return 160;
   // ~7px per character at text-xs + padding for the field picker
   return Math.min(360, Math.max(DEFAULT_COLUMN_WIDTH, field.length * 7 + 48));
+}
+
+function formatColumnValue(field: string, value: string): string {
+  if (field === 'Annotated at') {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) {
+      return new Date(parsed).toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+    }
+  }
+  return value;
 }
 
 export default function ColumnBrowser({
@@ -85,8 +107,10 @@ export default function ColumnBrowser({
     if (initialised.current || state.facets.length === 0) return;
     initialised.current = true;
     skipNextAutoScroll.current = true;
-    const n = Math.min(INITIAL_COLUMN_COUNT, state.facets.length);
-    state.facets.slice(0, n).forEach((f) => actions.addColumn(f));
+    const preferred = state.facets.filter((f) => !STUDIO_FACETS.has(f));
+    const pool = preferred.length >= INITIAL_COLUMN_COUNT ? preferred : state.facets;
+    const n = Math.min(INITIAL_COLUMN_COUNT, pool.length);
+    pool.slice(0, n).forEach((f) => actions.addColumn(f));
   }, [state.facets, actions]);
 
   const handleResizeColumn = useCallback((index: number, newWidth: number) => {
@@ -157,8 +181,11 @@ export default function ColumnBrowser({
         </div>
       )}
 
-      <div className="flex flex-1 min-h-0">
-        <div ref={scrollRef} className="flex flex-1 overflow-x-auto overflow-y-hidden min-w-0">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        <div
+          ref={scrollRef}
+          className="relative z-0 flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
+        >
           {state.columns.length === 0 && !state.facetsLoading && (
             <div className="flex items-center justify-center flex-1">
               <p className="text-sm text-slate-500">
@@ -176,6 +203,7 @@ export default function ColumnBrowser({
                 column={col}
                 facets={state.facets}
                 width={columnWidths[i] ?? DEFAULT_COLUMN_WIDTH}
+                formatValue={formatColumnValue}
                 onFieldChange={actions.changeColumnField}
                 onSelect={actions.selectValue}
                 onRemove={actions.removeColumn}
@@ -211,12 +239,14 @@ export default function ColumnBrowser({
           )}
         </div>
 
-        <DetailPanelSlot
-          item={state.selectedItem}
-          onClose={() => actions.selectItem(null)}
-          serverUri={serverUri}
-          onOpenInAnnotate={handleOpenInAnnotate}
-        />
+        {state.selectedItem && (
+          <DetailPanelSlot
+            item={state.selectedItem}
+            onClose={() => actions.selectItem(null)}
+            serverUri={serverUri}
+            onOpenInAnnotate={handleOpenInAnnotate}
+          />
+        )}
       </div>
     </div>
   );
@@ -342,25 +372,13 @@ interface DetailPanelSlotProps {
 
 function DetailPanelSlot({ item, onClose, serverUri, onOpenInAnnotate }: DetailPanelSlotProps) {
   return (
-    <div
-      className="flex flex-col h-full border-l border-slate-700 bg-slate-900 shrink-0"
-      style={{ width: item ? 360 : 280, minWidth: 200 }}
-    >
-      {item ? (
-        <BrowseDetailPanel
-          item={item}
-          onClose={onClose}
-          serverUri={serverUri}
-          onOpenInAnnotate={() => onOpenInAnnotate(item)}
-        />
-      ) : (
-        <div className="flex flex-1 flex-col items-center justify-center px-4 py-8 text-center">
-          <p className="text-sm font-medium text-slate-400">Metadata</p>
-          <p className="text-xs mt-2 text-slate-500">
-            Select a sample in the list to view its metadata here.
-          </p>
-        </div>
-      )}
+    <div className="relative z-10 flex h-full w-[min(360px,40vw)] min-w-[280px] max-w-[360px] shrink-0 flex-col border-l border-slate-700 bg-slate-900 shadow-[-4px_0_12px_rgba(0,0,0,0.25)]">
+      <BrowseDetailPanel
+        item={item}
+        onClose={onClose}
+        serverUri={serverUri}
+        onOpenInAnnotate={() => onOpenInAnnotate(item)}
+      />
     </div>
   );
 }

@@ -3,7 +3,8 @@
  *
  * Layer 0: image (Konva filters: Brighten/Contrast)
  * Layer 1: committed shapes (listening=false, per-brush-instance Groups)
- * Layer 2: draft shape
+ * Layer 2: draft polygon + drag preview
+ * Layer 3: brush/eraser size cursor preview
  */
 import { useRef, useState, useCallback, useEffect } from 'react';
 import {
@@ -58,6 +59,8 @@ export default function AnnotationCanvas({
   // True while a brush/eraser stroke is actively being drawn — suppresses the
   // (expensive) layer re-cache so live painting stays responsive.
   const [isDrawing, setIsDrawing] = useState(false);
+  // Image-space pointer position for brush/eraser size preview (null when off-canvas).
+  const [brushCursorPos, setBrushCursorPos] = useState<{ x: number; y: number } | null>(null);
 
   const { data: sliceUrl } = useImageSlice(source, kind, currentSlice, renderOpts, serverUri);
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
@@ -135,6 +138,8 @@ export default function AnnotationCanvas({
   const activeColor =
     activeClassId !== null ? colorForClass(activeClassId) : '#4090ff';
 
+  const showBrushCursor = (tool === 'brush' || tool === 'eraser') && !!meta;
+
   const getPointerImagePos = () => {
     const stage = stageRef.current;
     if (!stage) return null;
@@ -179,9 +184,11 @@ export default function AnnotationCanvas({
   };
 
   const handleStageMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (!sourceKey || !meta) return;
     const pos = getPointerImagePos();
-    if (!pos) return;
+    if (showBrushCursor && pos) {
+      setBrushCursorPos(pos);
+    }
+    if (!sourceKey || !meta || !pos) return;
 
     if ((tool === 'rectangle' || tool === 'ellipse') && dragStart && e.evt.buttons === 1) {
       setDragCurrent(pos);
@@ -252,6 +259,18 @@ export default function AnnotationCanvas({
       setDraftPoly([]);
     }
   };
+
+  const handleStageMouseLeave = () => {
+    setBrushCursorPos(null);
+    if (isDrawing) setIsDrawing(false);
+    setDragStart(null);
+    setDragCurrent(null);
+  };
+
+  // Hide brush cursor preview when switching away from brush/eraser.
+  useEffect(() => {
+    if (!showBrushCursor) setBrushCursorPos(null);
+  }, [showBrushCursor]);
 
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault();
@@ -386,7 +405,11 @@ export default function AnnotationCanvas({
   };
 
   return (
-    <div ref={containerRef} className="relative w-full h-full bg-gray-900 overflow-hidden">
+    <div
+      ref={containerRef}
+      className="relative w-full h-full bg-gray-900 overflow-hidden"
+      style={{ cursor: showBrushCursor && brushCursorPos ? 'none' : undefined }}
+    >
       <Stage
         ref={stageRef}
         width={stageSize.width}
@@ -395,7 +418,7 @@ export default function AnnotationCanvas({
         onMouseDown={handleStageMouseDown}
         onMouseMove={handleStageMouseMove}
         onMouseUp={handleStageMouseUp}
-        onMouseLeave={handleStageMouseUp}
+        onMouseLeave={handleStageMouseLeave}
         onDblClick={handleStageDblClick}
         onWheel={handleWheel}
         x={transform.x}
@@ -454,6 +477,27 @@ export default function AnnotationCanvas({
             </>
           )}
           {renderDraftShape()}
+        </Layer>
+
+        {/* Layer 3: brush/eraser size preview */}
+        <Layer listening={false}>
+          {showBrushCursor && brushCursorPos && (
+            <Circle
+              x={brushCursorPos.x}
+              y={brushCursorPos.y}
+              radius={brushSize}
+              fill={tool === 'eraser' ? '#ffffff' : activeColor}
+              opacity={tool === 'eraser' ? 0.2 : 0.25}
+              stroke={tool === 'eraser' ? '#e2e8f0' : activeColor}
+              strokeWidth={2 / transform.scaleX}
+              dash={
+                tool === 'eraser'
+                  ? [5 / transform.scaleX, 4 / transform.scaleX]
+                  : undefined
+              }
+              perfectDrawEnabled={false}
+            />
+          )}
         </Layer>
       </Stage>
 

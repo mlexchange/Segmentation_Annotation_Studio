@@ -32,7 +32,7 @@ import arrays as arrays_mod
 import drafts as drafts_mod
 import images as images_mod
 import local_fs
-from browse_helpers import FieldMapping, build_field_mapping, tiled_distinct_values, tiled_search_items
+from browse_helpers import FieldMapping, build_field_mapping, tiled_distinct_values, tiled_search_items, _STUDIO_RAW_KEYS
 from cache import TTLCache
 from schemas import DraftPayload, ExportRequest, ExportSourceItem, ImageMeta, RenderOpts
 from thumbnails import render_thumbnail
@@ -142,6 +142,7 @@ async def browse_facets(
 
         def _facet_for_key(disp_key: str) -> tuple[list[str], list[str]]:
             raw_key = mapping.display_to_raw.get(disp_key, disp_key)
+            min_values = 1 if raw_key in _STUDIO_RAW_KEYS else 2
             try:
                 result = container.distinct(raw_key, counts=True)
             except Exception:
@@ -153,7 +154,7 @@ async def browse_facets(
                 and str(v["value"]).strip() not in ("", "None", "NaN", "nan")
             ]
             facet_names: list[str] = []
-            if len(non_null) >= 2:
+            if len(non_null) >= min_values:
                 facet_names.append(disp_key)
             tech_extra: list[str] = []
             if disp_key in ("technique", "scan_type"):
@@ -514,10 +515,22 @@ async def put_draft(
     source_key: str = Query(...),
     payload: DraftPayload = ...,
 ) -> dict:
-    """Persist a session draft for source_key."""
-    return await asyncio.to_thread(
-        drafts_mod.save_draft, source_key, payload.model_dump()
-    )
+    """Persist a session draft for source_key and sync summary metadata to Tiled."""
+    def _run() -> dict:
+        body = payload.model_dump()
+        result = drafts_mod.save_draft(source_key, body)
+        try:
+            import tiled_annotation_sync
+            tiled_annotation_sync.sync_annotation_metadata(source_key, body)
+            # Bust browse caches so new metadata facets appear promptly.
+            _field_mapping_cache.clear()
+            _column_cache.clear()
+            _items_cache.clear()
+        except Exception as exc:
+            logger.warning("Tiled metadata sync failed for %s: %s", source_key, exc)
+        return result
+
+    return await asyncio.to_thread(_run)
 
 
 @app.get("/api/annotations/drafts")
@@ -639,6 +652,26 @@ async def export_coco(payload: ExportRequest) -> dict:
             written[split_name] = result
         summary["written"] = written
         summary["dataset_path"] = str(out_root)
+
+        # Sync annotation flags back onto source Tiled nodes for Browse discovery.
+        import tiled_annotation_sync
+        from source_keys import parse_source_key
+
+        for item in source_items:
+            if item.kind != "tiled":
+                continue
+            sk = f"tiled:{item.server_uri or ''}:{item.source}"
+            try:
+                tiled_annotation_sync.sync_annotation_metadata(
+                    sk,
+                    {
+                        "classes": payload.classes,
+                        "slices": item.slices,
+                    },
+                )
+            except Exception as sync_exc:
+                logger.warning("Export Tiled sync failed for %s: %s", sk, sync_exc)
+
         return summary
 
     try:
