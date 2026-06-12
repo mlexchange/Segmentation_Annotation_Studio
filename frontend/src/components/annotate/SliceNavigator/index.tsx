@@ -4,23 +4,28 @@
 import { CaretLeft, CaretRight, WarningCircle } from '@phosphor-icons/react';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useDatasetStore } from '@/stores/datasetStore';
+import { buildSourceKey } from '@/lib/sourceKey';
 
 export default function SliceNavigator() {
-  const { meta, currentSlice, source, setSlice } = useDatasetStore();
+  const { meta, currentSlice, source, kind, serverUri, setSlice } = useDatasetStore();
   const { byImage, negativeSlices, toggleNegativeSlice } = useAnnotationStore();
 
-  if (!meta || !source) {
+  const sourceKey = source && kind
+    ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
+    : null;
+
+  if (!meta || !sourceKey) {
     return <p className="text-xs text-gray-400">No dataset loaded.</p>;
   }
 
   const n = meta.nSlices;
-  const slices = byImage[source] ?? {};
+  const slices = byImage[sourceKey] ?? {};
   const annotatedIndices = Object.keys(slices)
     .map(Number)
     .filter((i) => slices[String(i)]?.length > 0)
     .sort((a, b) => a - b);
 
-  const isNegative = (negativeSlices[source] ?? []).includes(String(currentSlice));
+  const isNegative = (negativeSlices[sourceKey] ?? []).includes(String(currentSlice));
 
   const prev = () => setSlice(Math.max(0, currentSlice - 1));
   const next = () => setSlice(Math.min(n - 1, currentSlice + 1));
@@ -78,7 +83,7 @@ export default function SliceNavigator() {
 
       <button
         aria-pressed={isNegative}
-        onClick={() => toggleNegativeSlice(source, currentSlice)}
+        onClick={() => toggleNegativeSlice(sourceKey, currentSlice)}
         className={`flex items-center gap-1 text-xs px-2 py-1 rounded border transition-colors ${
           isNegative
             ? 'bg-amber-100 border-amber-400 text-amber-800'

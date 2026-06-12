@@ -1,9 +1,11 @@
 /**
- * Toolbar — tool selector (radiogroup), brush size, opacity.
+ * Toolbar — tool selector (radiogroup), brush size, opacity, undo/redo.
  * Keybinds: q=polygon, w=ellipse, e=rectangle, a=pan, b=brush, x=eraser, s=select
  */
-import { Hand, Cursor, Polygon, Rectangle, Circle, PaintBucket, Eraser } from '@phosphor-icons/react';
+import { Hand, Cursor, Polygon, Rectangle, Circle, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
+import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
+import { useAnnotationStore } from '@/stores/annotationStore';
 import { cn } from '@/lib/utils';
 
 interface ToolButtonProps {
@@ -22,10 +24,10 @@ function ToolButton({ tool, label, icon, keybind, activeTool, onSelect }: ToolBu
       role="radio"
       aria-checked={isActive}
       aria-label={`${label}${keybind ? ` (${keybind})` : ''}`}
-      title={`${label}${keybind ? ` [${keybind}]` : ''}`}
+      title={`${label}${keybind ? ` [${keybind.toUpperCase()}]` : ''}`}
       onClick={() => onSelect(tool)}
       className={cn(
-        'flex flex-col items-center justify-center gap-0.5 py-2 px-1 rounded-md text-xs w-full',
+        'relative flex flex-col items-center justify-center gap-0.5 py-2 px-1 rounded-md text-xs w-full',
         'transition-colors border',
         isActive
           ? 'bg-sky-600 text-white border-sky-700'
@@ -34,12 +36,25 @@ function ToolButton({ tool, label, icon, keybind, activeTool, onSelect }: ToolBu
     >
       {icon}
       <span className="leading-tight">{label}</span>
+      {keybind && (
+        <span
+          className={cn(
+            'absolute top-1 right-1 text-[9px] font-mono font-semibold leading-none px-0.5 py-0.5 rounded',
+            isActive ? 'text-sky-200/80' : 'text-gray-400'
+          )}
+        >
+          {keybind.toUpperCase()}
+        </span>
+      )}
     </button>
   );
 }
 
 export default function Toolbar() {
   const { tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity } = useToolStore();
+  const { undo, redo } = useStore(useAnnotationStore.temporal);
+  const canUndo = useStore(useAnnotationStore.temporal, (s) => s.pastStates.length > 0);
+  const canRedo = useStore(useAnnotationStore.temporal, (s) => s.futureStates.length > 0);
 
   const tools: Array<{ tool: Tool; label: string; icon: React.ReactNode; keybind: string }> = [
     { tool: 'pan',       label: 'Pan',     icon: <Hand size={18} />,        keybind: 'a' },
@@ -53,6 +68,42 @@ export default function Toolbar() {
 
   return (
     <div className="flex flex-col gap-2">
+      {/* Undo / redo */}
+      <div className="flex gap-1">
+        <button
+          type="button"
+          onClick={() => undo()}
+          disabled={!canUndo}
+          title="Undo (Ctrl+Z)"
+          aria-label="Undo"
+          className={cn(
+            'flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border transition-colors',
+            canUndo
+              ? 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50 hover:border-sky-300'
+              : 'bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed',
+          )}
+        >
+          <ArrowBendUpLeft size={16} />
+          Undo
+        </button>
+        <button
+          type="button"
+          onClick={() => redo()}
+          disabled={!canRedo}
+          title="Redo (Ctrl+Shift+Z)"
+          aria-label="Redo"
+          className={cn(
+            'flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border transition-colors',
+            canRedo
+              ? 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50 hover:border-sky-300'
+              : 'bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed',
+          )}
+        >
+          Redo
+          <ArrowBendUpRight size={16} />
+        </button>
+      </div>
+
       <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">Tools</span>
       <div role="radiogroup" aria-label="Drawing tools" className="grid grid-cols-2 gap-1">
         {tools.map((t) => (
@@ -83,7 +134,7 @@ export default function Toolbar() {
 
       <div className="flex flex-col gap-1">
         <label className="text-xs text-gray-500">
-          Fill opacity: {Math.round(fillOpacity * 100)}%
+          Annotation opacity: {Math.round(fillOpacity * 100)}%
         </label>
         <input
           type="range"

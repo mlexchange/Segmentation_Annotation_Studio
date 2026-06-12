@@ -13,6 +13,8 @@ Supported array formats
 
 from __future__ import annotations
 
+IMAGE_EXTS: frozenset[str] = frozenset({".tif", ".tiff", ".npy", ".png", ".jpg", ".jpeg"})
+
 import logging
 import os
 from pathlib import Path
@@ -59,6 +61,12 @@ def list_dir(rel: str = "") -> list[dict[str, Any]]:
     """
     path = _safe(rel)
     if not path.exists():
+        # A missing root directory is treated as empty rather than an error,
+        # so the file browser can still render (and the user can fix the
+        # LOCAL_DATA_ROOT configuration) instead of seeing a 404.
+        if rel in ("", "."):
+            logger.warning("LOCAL_DATA_ROOT does not exist: %s", _ROOT)
+            return []
         raise HTTPException(404, f"Path not found: {rel!r}")
     if not path.is_dir():
         raise HTTPException(400, f"Not a directory: {rel!r}")
@@ -72,6 +80,52 @@ def list_dir(rel: str = "") -> list[dict[str, Any]]:
                 "size": child.stat().st_size if child.is_file() else None,
             }
         )
+    return entries
+
+
+def count_image_files(rel: str) -> int:
+    """Return a recursive count of image files under ``LOCAL_DATA_ROOT/rel``.
+
+    Args:
+        rel: Relative path to a directory under ``LOCAL_DATA_ROOT``.
+
+    Returns:
+        Number of files with a supported image extension.
+    """
+    path = _safe(rel)
+    if not path.exists() or not path.is_dir():
+        return 0
+    return sum(1 for f in path.rglob("*") if f.is_file() and f.suffix.lower() in IMAGE_EXTS)
+
+
+def list_image_files(rel: str) -> list[dict[str, Any]]:
+    """Return a flat, sorted list of image files under ``LOCAL_DATA_ROOT/rel``.
+
+    Args:
+        rel: Relative path to a directory under ``LOCAL_DATA_ROOT``.
+
+    Returns:
+        List of ``{"name", "path"}`` dicts sorted by path.
+
+    Raises:
+        HTTPException: 404 if path does not exist; 400 if not a directory.
+    """
+    path = _safe(rel)
+    if not path.exists():
+        raise HTTPException(404, f"Path not found: {rel!r}")
+    if not path.is_dir():
+        raise HTTPException(400, f"Not a directory: {rel!r}")
+    entries = sorted(
+        (
+            {
+                "name": f.name,
+                "path": str(f.relative_to(_ROOT)),
+            }
+            for f in path.rglob("*")
+            if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+        ),
+        key=lambda e: e["path"],
+    )
     return entries
 
 

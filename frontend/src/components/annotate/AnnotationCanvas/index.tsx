@@ -17,6 +17,7 @@ import { useToolStore } from '@/stores/toolStore';
 import { useClassStore } from '@/stores/classStore';
 import { toImage, normalizeRect, normalizeEllipse } from '@/lib/geometry';
 import { useImageSlice } from '@/hooks/useImageSlice';
+import { buildSourceKey } from '@/lib/sourceKey';
 
 interface AnnotationCanvasProps {
   brightness: number;
@@ -36,8 +37,12 @@ export default function AnnotationCanvas({
   const containerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<Konva.Image>(null);
   const stageRef = useRef<Konva.Stage>(null);
+  const shapesLayerRef = useRef<Konva.Layer>(null);
 
   const { kind, source, serverUri, meta, currentSlice, renderOpts } = useDatasetStore();
+  const sourceKey = source && kind
+    ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
+    : null;
   const { byImage, addShape, removeShape, appendBrushStroke, setShapes } = useAnnotationStore();
   const { tool, brushSize, fillOpacity, selectedShapeId, setSelectedShapeId } = useToolStore();
   const { classes } = useClassStore();
@@ -50,6 +55,9 @@ export default function AnnotationCanvas({
   // Draft rect/ellipse start
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(null);
+  // True while a brush/eraser stroke is actively being drawn — suppresses the
+  // (expensive) layer re-cache so live painting stays responsive.
+  const [isDrawing, setIsDrawing] = useState(false);
 
   const { data: sliceUrl } = useImageSlice(source, kind, currentSlice, renderOpts, serverUri);
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
@@ -100,10 +108,32 @@ export default function AnnotationCanvas({
     });
   }, [imageEl, meta, stageSize]);
 
-  const shapes = source ? (byImage[source]?.[String(currentSlice)] ?? []) : [];
+  const shapes = sourceKey ? (byImage[sourceKey]?.[String(currentSlice)] ?? []) : [];
+
+  // Cache the shapes layer so its children are flattened into a single bitmap
+  // BEFORE the layer opacity is applied. This makes overlapping brush strokes
+  // (and overlapping shapes of the same class) composite to one uniform color
+  // instead of stacking alpha and looking darker where they overlap.
+  useEffect(() => {
+    const layer = shapesLayerRef.current;
+    if (!layer) return;
+    if (isDrawing) return; // don't re-cache mid-stroke (keeps painting smooth)
+    layer.clearCache();
+    if (shapes.length > 0) {
+      // Cache at a pixel ratio matching the current zoom so the flattened
+      // bitmap stays crisp when the Stage scales it. Clamped to avoid huge
+      // canvases at extreme zoom.
+      const pr = Math.min(Math.max(transform.scaleX, 1), 4);
+      layer.cache({ pixelRatio: pr });
+    }
+    layer.batchDraw();
+  }, [shapes, classes, fillOpacity, meta, transform.scaleX, isDrawing]);
 
   const colorForClass = (classId: number) =>
     classes.find((c) => c.classId === classId)?.color ?? '#ff0000';
+
+  const activeColor =
+    activeClassId !== null ? colorForClass(activeClassId) : '#4090ff';
 
   const getPointerImagePos = () => {
     const stage = stageRef.current;
@@ -114,7 +144,7 @@ export default function AnnotationCanvas({
   };
 
   const handleStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (!source || !meta || activeClassId === null) return;
+    if (!sourceKey || !meta || activeClassId === null) return;
     const pos = getPointerImagePos();
     if (!pos) return;
 
@@ -124,35 +154,39 @@ export default function AnnotationCanvas({
       setDragStart(pos);
       setDragCurrent(pos);
     } else if (tool === 'brush') {
-      // Start a new brush stroke on the active brush instance (or create new)
+      setIsDrawing(true);
       const stroke: BrushStroke = { points: [pos.x, pos.y], radius: brushSize, mode: 'paint' };
-      if (activeBrushShapeId) {
-        appendBrushStroke(source, currentSlice, activeBrushShapeId, stroke);
+      const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
+      const existingBrush = activeBrushShapeId
+        ? sliceShapes.find((s) => s.id === activeBrushShapeId && s.kind === 'brush')
+        : null;
+      const canAppend = existingBrush && existingBrush.classId === activeClassId;
+      if (canAppend && activeBrushShapeId) {
+        appendBrushStroke(sourceKey, currentSlice, activeBrushShapeId, stroke);
       } else {
         const id = uuidv4();
-        addShape(source, currentSlice, { id, classId: activeClassId, kind: 'brush', strokes: [stroke] });
+        addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'brush', strokes: [stroke] });
         onNewBrushInstance(id);
       }
     } else if (tool === 'eraser') {
-      // Find target brush instance
+      setIsDrawing(true);
       const targetId = activeBrushShapeId ?? shapes.filter((s) => s.kind === 'brush' && s.classId === activeClassId).slice(-1)[0]?.id ?? null;
       if (targetId) {
         const eraseStroke: BrushStroke = { points: [pos.x, pos.y], radius: brushSize, mode: 'erase' };
-        appendBrushStroke(source, currentSlice, targetId, eraseStroke);
+        appendBrushStroke(sourceKey, currentSlice, targetId, eraseStroke);
       }
     }
   };
 
   const handleStageMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (!source || !meta) return;
+    if (!sourceKey || !meta) return;
     const pos = getPointerImagePos();
     if (!pos) return;
 
     if ((tool === 'rectangle' || tool === 'ellipse') && dragStart && e.evt.buttons === 1) {
       setDragCurrent(pos);
     } else if (tool === 'brush' && e.evt.buttons === 1 && activeBrushShapeId) {
-      // Append point to current stroke
-      const sliceShapes = byImage[source]?.[String(currentSlice)] ?? [];
+      const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
       const brushShape = sliceShapes.find((s) => s.id === activeBrushShapeId && s.kind === 'brush');
       if (brushShape && brushShape.kind === 'brush') {
         const lastStroke = brushShape.strokes[brushShape.strokes.length - 1];
@@ -162,7 +196,7 @@ export default function AnnotationCanvas({
         };
         const newStrokes = [...brushShape.strokes.slice(0, -1), updatedStroke];
         setShapes(
-          source,
+          sourceKey,
           currentSlice,
           sliceShapes.map((s) => (s.id === activeBrushShapeId ? { ...brushShape, strokes: newStrokes } : s))
         );
@@ -170,14 +204,14 @@ export default function AnnotationCanvas({
     } else if (tool === 'eraser' && e.evt.buttons === 1) {
       const targetId = activeBrushShapeId ?? shapes.filter((s) => s.kind === 'brush' && s.classId === activeClassId).slice(-1)[0]?.id ?? null;
       if (targetId) {
-        const sliceShapes = byImage[source]?.[String(currentSlice)] ?? [];
+        const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
         const brushShape = sliceShapes.find((s) => s.id === targetId && s.kind === 'brush');
         if (brushShape && brushShape.kind === 'brush') {
           const lastStroke = brushShape.strokes[brushShape.strokes.length - 1];
           if (lastStroke.mode === 'erase') {
             const updatedStroke: BrushStroke = { ...lastStroke, points: [...lastStroke.points, pos.x, pos.y] };
             const newStrokes = [...brushShape.strokes.slice(0, -1), updatedStroke];
-            setShapes(source, currentSlice, sliceShapes.map((s) => (s.id === targetId ? { ...brushShape, strokes: newStrokes } : s)));
+            setShapes(sourceKey, currentSlice, sliceShapes.map((s) => (s.id === targetId ? { ...brushShape, strokes: newStrokes } : s)));
           }
         }
       }
@@ -185,7 +219,8 @@ export default function AnnotationCanvas({
   };
 
   const handleStageMouseUp = () => {
-    if (!source || !meta || activeClassId === null) return;
+    if (isDrawing) setIsDrawing(false);
+    if (!sourceKey || !meta || activeClassId === null) return;
 
     if ((tool === 'rectangle' || tool === 'ellipse') && dragStart && dragCurrent) {
       const dx = dragCurrent.x - dragStart.x;
@@ -194,7 +229,7 @@ export default function AnnotationCanvas({
         const id = uuidv4();
         if (tool === 'rectangle') {
           const { x, y, w, h } = normalizeRect(dragStart.x, dragStart.y, dx, dy);
-          addShape(source, currentSlice, { id, classId: activeClassId, kind: 'rectangle', x, y, w, h });
+          addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'rectangle', x, y, w, h });
         } else {
           const { cx, cy, rx, ry } = normalizeEllipse(
             (dragStart.x + dragCurrent.x) / 2,
@@ -202,7 +237,7 @@ export default function AnnotationCanvas({
             Math.abs(dx) / 2,
             Math.abs(dy) / 2
           );
-          addShape(source, currentSlice, { id, classId: activeClassId, kind: 'ellipse', cx, cy, rx, ry });
+          addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'ellipse', cx, cy, rx, ry });
         }
       }
       setDragStart(null);
@@ -211,10 +246,9 @@ export default function AnnotationCanvas({
   };
 
   const handleStageDblClick = () => {
-    // Close polygon on double-click
-    if (tool === 'polygon' && draftPoly.length >= 6 && source && activeClassId !== null) {
+    if (tool === 'polygon' && draftPoly.length >= 6 && sourceKey && activeClassId !== null) {
       const id = uuidv4();
-      addShape(source, currentSlice, { id, classId: activeClassId, kind: 'polygon', points: draftPoly });
+      addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'polygon', points: draftPoly });
       setDraftPoly([]);
     }
   };
@@ -244,7 +278,7 @@ export default function AnnotationCanvas({
       return (
         <Rect
           x={x} y={y} width={w} height={h}
-          fill="rgba(100,160,255,0.3)" stroke="#4090ff" strokeWidth={1 / transform.scaleX}
+          fill={activeColor} stroke={activeColor} strokeWidth={1 / transform.scaleX}
           listening={false} perfectDrawEnabled={false}
         />
       );
@@ -256,7 +290,7 @@ export default function AnnotationCanvas({
           y={(dragStart.y + dragCurrent.y) / 2}
           radiusX={Math.abs(dx) / 2}
           radiusY={Math.abs(dy) / 2}
-          fill="rgba(100,160,255,0.3)" stroke="#4090ff" strokeWidth={1 / transform.scaleX}
+          fill={activeColor} stroke={activeColor} strokeWidth={1 / transform.scaleX}
           listening={false} perfectDrawEnabled={false}
         />
       );
@@ -265,17 +299,23 @@ export default function AnnotationCanvas({
   };
 
   const renderShape = (shape: Shape) => {
-    const color = colorForClass(shape.classId);
+    const color =
+      shape.id === activeBrushShapeId && activeClassId !== null
+        ? colorForClass(activeClassId)
+        : colorForClass(shape.classId);
     const isSelected = shape.id === selectedShapeId;
     const strokeW = (isSelected ? 2 : 1) / transform.scaleX;
 
+    // Fill is rendered at full color; the surrounding Layer applies opacity once
+    // so overlapping shapes/strokes of the same class don't compound into a
+    // darker/mismatched color.
     if (shape.kind === 'polygon') {
       return (
         <Line
           key={shape.id}
           points={shape.points}
           closed
-          fill={color + Math.round(fillOpacity * 255).toString(16).padStart(2, '0')}
+          fill={color}
           stroke={color}
           strokeWidth={strokeW}
           perfectDrawEnabled={false}
@@ -288,7 +328,7 @@ export default function AnnotationCanvas({
         <Rect
           key={shape.id}
           x={shape.x} y={shape.y} width={shape.w} height={shape.h}
-          fill={color + Math.round(fillOpacity * 255).toString(16).padStart(2, '0')}
+          fill={color}
           stroke={color} strokeWidth={strokeW}
           perfectDrawEnabled={false}
           onClick={() => setSelectedShapeId(shape.id)}
@@ -300,7 +340,7 @@ export default function AnnotationCanvas({
         <Ellipse
           key={shape.id}
           x={shape.cx} y={shape.cy} radiusX={shape.rx} radiusY={shape.ry}
-          fill={color + Math.round(fillOpacity * 255).toString(16).padStart(2, '0')}
+          fill={color}
           stroke={color} strokeWidth={strokeW}
           perfectDrawEnabled={false}
           onClick={() => setSelectedShapeId(shape.id)}
@@ -334,7 +374,6 @@ export default function AnnotationCanvas({
                 strokeWidth={stroke.radius * 2}
                 lineCap="round"
                 lineJoin="round"
-                opacity={fillOpacity}
                 perfectDrawEnabled={false}
                 listening={false}
               />
@@ -356,6 +395,7 @@ export default function AnnotationCanvas({
         onMouseDown={handleStageMouseDown}
         onMouseMove={handleStageMouseMove}
         onMouseUp={handleStageMouseUp}
+        onMouseLeave={handleStageMouseUp}
         onDblClick={handleStageDblClick}
         onWheel={handleWheel}
         x={transform.x}
@@ -379,18 +419,22 @@ export default function AnnotationCanvas({
           )}
         </Layer>
 
-        {/* Layer 1: committed shapes */}
-        <Layer listening={false}>
-          {shapes.map(renderShape)}
+        {/* Layer 1: committed shapes — cached + opacity applied once at the
+            layer so overlapping same-class shapes render a uniform class color
+            (no darker overlap). */}
+        <Layer ref={shapesLayerRef} listening={false} opacity={fillOpacity}>
+          {shapes
+            .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
+            .map(renderShape)}
         </Layer>
 
         {/* Layer 2: draft polygon + drag preview */}
-        <Layer>
+        <Layer opacity={fillOpacity}>
           {draftPoly.length >= 2 && (
             <>
               <Line
                 points={draftPoly}
-                stroke="#4090ff"
+                stroke={activeColor}
                 strokeWidth={1 / transform.scaleX}
                 dash={[4 / transform.scaleX, 2 / transform.scaleX]}
                 listening={false}
@@ -402,7 +446,7 @@ export default function AnnotationCanvas({
                     key={i}
                     x={draftPoly[i]} y={draftPoly[i + 1]}
                     radius={4 / transform.scaleX}
-                    fill="#4090ff"
+                    fill={activeColor}
                     listening={false}
                   />
                 ) : null

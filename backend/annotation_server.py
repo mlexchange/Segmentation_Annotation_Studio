@@ -34,7 +34,7 @@ import images as images_mod
 import local_fs
 from browse_helpers import FieldMapping, build_field_mapping, tiled_distinct_values, tiled_search_items
 from cache import TTLCache
-from schemas import DraftPayload, ExportRequest, ImageMeta, RenderOpts
+from schemas import DraftPayload, ExportRequest, ExportSourceItem, ImageMeta, RenderOpts
 from thumbnails import render_thumbnail
 from tiled_clients import api_key_for_uri, get_browse_container, get_tiled_client
 from tiled_config import get_tiled_api_key, get_tiled_servers
@@ -305,6 +305,125 @@ async def local_list(
     return await asyncio.to_thread(local_fs.list_dir, rel)
 
 
+@app.get("/api/local/samples")
+async def local_samples(
+    rel: str = Query(..., description="Relative path to a folder under LOCAL_DATA_ROOT"),
+) -> dict:
+    """Return all image files under a local folder (used by the Browse tab).
+
+    Args:
+        rel: Relative folder path under ``LOCAL_DATA_ROOT``.
+
+    Returns:
+        ``{"items": [{"name", "path"}], "total": int}``
+    """
+    items = await asyncio.to_thread(local_fs.list_image_files, rel)
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/connect/summary")
+async def connect_summary(
+    kind: str = Query(..., description="'tiled' or 'local'"),
+    server_uri: Optional[str] = None,
+    rel: str = Query("", description="Local folder path (kind=local only)"),
+) -> dict:
+    """Return a connection summary: sample count and display label.
+
+    For Tiled sources, counts catalog items via the browse API.
+    For local sources, counts image files recursively under the folder.
+
+    Returns:
+        ``{"kind", "label", "sample_count", "server_uri"}``
+    """
+    if kind == "local":
+        count = await asyncio.to_thread(local_fs.count_image_files, rel)
+        label = rel or "Local Data Root"
+        return {"kind": "local", "label": label, "sample_count": count, "server_uri": None}
+
+    if kind == "tiled":
+        def _count() -> int:
+            client = get_tiled_client(server_uri)
+            container, _ = get_browse_container(client)
+            result = tiled_search_items(container, filters={}, limit=10_000)
+            return int(result.get("total", 0))
+
+        try:
+            count = await asyncio.to_thread(_count)
+        except Exception as exc:
+            logger.warning("connect_summary tiled count failed: %s", exc)
+            count = 0
+
+        servers = get_tiled_servers()
+        label = next(
+            (cfg.get("name", name) for name, cfg in servers.items()
+             if (cfg.get("uri") or "").rstrip("/") == (server_uri or "").rstrip("/")),
+            server_uri or "Tiled Server",
+        )
+        return {"kind": "tiled", "label": label, "sample_count": count, "server_uri": server_uri}
+
+    raise HTTPException(400, f"Unknown kind: {kind!r}; must be 'tiled' or 'local'")
+
+
+@app.get("/api/tiled/list")
+async def tiled_list(
+    path: str = Query("", description="Slash-separated Tiled node path ('' = root)"),
+    server_uri: Optional[str] = None,
+) -> list[dict]:
+    """List children of a Tiled node, classifying containers vs. arrays.
+
+    Args:
+        path: Slash-separated path into the Tiled tree (empty → root).
+        server_uri: Tiled server URI; falls back to the default server.
+
+    Returns:
+        A list of ``{"name", "path", "is_dir", "is_array"}`` entries sorted
+        with containers first, then arrays, both alphabetically.
+
+    Raises:
+        HTTPException: 404 if the path does not exist, 500 on read failure.
+    """
+    def _run() -> list[dict]:
+        client = get_tiled_client(server_uri)
+        node = client
+        for key in [k for k in path.split("/") if k]:
+            try:
+                node = node[key]
+            except (KeyError, TypeError) as exc:
+                raise HTTPException(404, f"Tiled path not found: {path!r}") from exc
+
+        entries: list[dict] = []
+        try:
+            keys = list(node.keys())
+        except Exception as exc:  # leaf node (array) has no children
+            raise HTTPException(400, f"Not a container: {path!r}") from exc
+
+        for key in keys:
+            child = node[key]
+            family = getattr(getattr(child, "structure_family", None), "value", None) or str(
+                getattr(child, "structure_family", "")
+            )
+            is_array = family == "array"
+            is_container = family == "container"
+            entries.append(
+                {
+                    "name": key,
+                    "path": f"{path}/{key}".strip("/"),
+                    "is_dir": is_container,
+                    "is_array": is_array,
+                }
+            )
+        entries.sort(key=lambda e: (0 if e["is_dir"] else 1, e["name"]))
+        return entries
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("tiled_list failed: %s", exc)
+        raise HTTPException(500, f"Failed to list Tiled path: {exc}") from exc
+
+
 @app.get("/api/image/meta", response_model=ImageMeta)
 async def image_meta(
     source: str = Query(...),
@@ -409,8 +528,19 @@ async def list_drafts_route() -> list[dict]:
 
 @app.post("/api/export/coco")
 async def export_coco(payload: ExportRequest) -> dict:
-    """Write (or preview) the COCO dataset for the annotated slices."""
+    """Write the COCO dataset for one or more annotated samples.
+
+    Supports two modes:
+    - **Single-source** (legacy): ``kind``/``source``/``slices`` on the payload.
+    - **Multi-source**: ``sources`` list, each with its own kind/source/slices.
+
+    The output directory is derived automatically from ``dataset_name`` or the
+    first source path + a timestamp; always written under ``EXPORT_ROOT``.
+    After writing, the dataset is registered as a Tiled node.
+    """
     import os
+    from datetime import datetime, timezone
+
     export_root_env = os.getenv("EXPORT_ROOT", "")
     if export_root_env:
         export_root = Path(export_root_env).expanduser().resolve()
@@ -418,29 +548,77 @@ async def export_coco(payload: ExportRequest) -> dict:
         local_root = Path(os.getenv("LOCAL_DATA_ROOT", "~/data")).expanduser().resolve()
         export_root = local_root / "exports"
 
-    out_root = (export_root / payload.out_dir).resolve()
+    # Auto-derive a dataset folder name.
+    if payload.dataset_name:
+        folder_name = payload.dataset_name
+    else:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        first_source = (payload.sources[0].source if payload.sources else payload.source) or "dataset"
+        stem = first_source.replace("/", "_").replace("\\", "_")[-30:].strip("_") or "dataset"
+        folder_name = f"{stem}_{ts}"
+
+    out_root = (export_root / folder_name).resolve()
     if not str(out_root).startswith(str(export_root)):
-        raise HTTPException(403, "out_dir must resolve under EXPORT_ROOT")
+        raise HTTPException(403, "Derived output path escapes EXPORT_ROOT")
+
+    # Build a normalised list of source items from either multi or single mode.
+    if payload.sources:
+        source_items: list[ExportSourceItem] = payload.sources
+    else:
+        source_items = [ExportSourceItem(
+            kind=payload.kind,  # type: ignore[arg-type]
+            source=payload.source,
+            server_uri=payload.server_uri,
+            slices=payload.slices,
+            split_by_slice=payload.split_by_slice,
+            negative_slices=payload.negative_slices,
+        )]
 
     def _run() -> dict:
-        from coco_export import build_export_plan, write_coco_split, ExportConflict
+        from coco_export import build_export_plan, write_coco_split
         import images as images_mod_local
         import arrays as arrays_mod_local
 
-        node = arrays_mod_local.resolve_array(payload.source, payload.kind, payload.server_uri)
-        plan = build_export_plan(
-            node, payload,
-            render_slice_fn=images_mod_local.render_slice,
-            array_shape_meta_fn=arrays_mod_local.array_shape_meta,
-            read_slice_fn=arrays_mod_local.read_slice,
-            sample_global_stats_fn=images_mod_local._sample_global_stats,
-        )
-        summary: dict = {
-            "skipped_zero_area": plan["skipped_zero_area"],
-            "splits": {},
-        }
-        if payload.dry_run:
+        # Merged splits accumulator across all sources.
+        merged_splits: dict[str, dict] = {}
+        skipped_total = 0
+        merged_categories: list[dict] = []
+        merged_info: dict = {}
+
+        for item in source_items:
+            node = arrays_mod_local.resolve_array(item.source, item.kind, item.server_uri)
+            # Build a temporary single-source payload object for reuse of build_export_plan.
+            tmp = ExportRequest(
+                kind=item.kind,
+                source=item.source,
+                server_uri=item.server_uri,
+                slices=item.slices,
+                split_by_slice=item.split_by_slice,
+                negative_slices=item.negative_slices,
+                classes=payload.classes,
+                render=payload.render,
+                auto_split=payload.auto_split,
+            )
+            plan = build_export_plan(
+                node, tmp,
+                render_slice_fn=images_mod_local.render_slice,
+                array_shape_meta_fn=arrays_mod_local.array_shape_meta,
+                read_slice_fn=arrays_mod_local.read_slice,
+                sample_global_stats_fn=images_mod_local._sample_global_stats,
+            )
+            skipped_total += plan["skipped_zero_area"]
+            if not merged_categories:
+                merged_categories = plan["categories"]
+                merged_info = plan["info"]
             for split_name, split_data in plan["splits"].items():
+                if split_name not in merged_splits:
+                    merged_splits[split_name] = {"images": [], "annotations": []}
+                merged_splits[split_name]["images"].extend(split_data["images"])
+                merged_splits[split_name]["annotations"].extend(split_data["annotations"])
+
+        summary: dict = {"skipped_zero_area": skipped_total, "splits": {}}
+        if payload.dry_run:
+            for split_name, split_data in merged_splits.items():
                 summary["splits"][split_name] = {
                     "n_images": len(split_data["images"]),
                     "n_annotations": len(split_data["annotations"]),
@@ -448,26 +626,28 @@ async def export_coco(payload: ExportRequest) -> dict:
             return summary
 
         written: dict = {}
-        for split_name, split_data in plan["splits"].items():
+        for split_name, split_data in merged_splits.items():
             split_dir = out_root / split_name
             result = write_coco_split(
                 split_dir,
                 images=split_data["images"],
-                categories=plan["categories"],
+                categories=merged_categories,
                 annotations=split_data["annotations"],
                 mode=payload.mode,
-                info=plan["info"],
+                info=merged_info,
             )
             written[split_name] = result
         summary["written"] = written
+        summary["dataset_path"] = str(out_root)
         return summary
 
     try:
-        return await asyncio.to_thread(_run)
+        result = await asyncio.to_thread(_run)
+        return result
     except FileExistsError as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
-        logger.error("Export failed for %s: %s", payload.source, exc)
+        logger.error("Export failed: %s", exc)
         raise HTTPException(500, f"Export failed: {exc}") from exc
 
 

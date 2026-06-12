@@ -59,7 +59,10 @@ export interface AnnotationState {
   setShapes: (sourceKey: string, sliceIdx: number, shapes: Shape[]) => void;
   setSplitForSlice: (sourceKey: string, sliceIdx: number, split: Split | 'auto') => void;
   toggleNegativeSlice: (sourceKey: string, sliceIdx: number) => void;
+  /** Replaces ALL annotation data (used only at initial session restore). */
   loadFromDraft: (draft: Pick<AnnotationState, 'byImage' | 'splitBySlice' | 'negativeSlices'>) => void;
+  /** Merges a single sample's annotation data into the store without clearing other samples. */
+  mergeSourceDraft: (sourceKey: string, slices: Record<string, Shape[]>, splitBySlice: Record<string, string>, negativeSlices: string[]) => void;
   reset: () => void;
 }
 
@@ -153,6 +156,13 @@ export const useAnnotationStore = create<AnnotationState>()(
 
       loadFromDraft: (draft) =>
         set({ byImage: draft.byImage, splitBySlice: draft.splitBySlice, negativeSlices: draft.negativeSlices }),
+
+      mergeSourceDraft: (sourceKey, slices, splitMap, negSlices) =>
+        set((s) => ({
+          byImage: { ...s.byImage, [sourceKey]: slices },
+          splitBySlice: { ...s.splitBySlice, [sourceKey]: splitMap },
+          negativeSlices: { ...s.negativeSlices, [sourceKey]: negSlices },
+        })),
 
       reset: () => set({ byImage: {}, splitBySlice: {}, negativeSlices: {} }),
     }),

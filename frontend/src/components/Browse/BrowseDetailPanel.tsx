@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Image as ImageIcon, WarningCircle } from '@phosphor-icons/react';
+import { X, Image as ImageIcon, PencilSimple } from '@phosphor-icons/react';
 import { API_BASE } from '@/config';
 import type { BrowseItem } from './hooks/useBrowseData';
 
@@ -7,7 +7,7 @@ interface BrowseDetailPanelProps {
   item: BrowseItem;
   onClose: () => void;
   serverUri?: string;
-  serverApiKey?: string;
+  onOpenInAnnotate?: () => void;
 }
 
 const SECTION_ORDER = [
@@ -25,7 +25,7 @@ function formatValue(v: unknown): string {
   return String(v);
 }
 
-export default function BrowseDetailPanel({ item, onClose, serverUri, serverApiKey }: BrowseDetailPanelProps) {
+export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAnnotate }: BrowseDetailPanelProps) {
   const meta = item.metadata;
 
   // Thumbnail state
@@ -37,14 +37,13 @@ export default function BrowseDetailPanel({ item, onClose, serverUri, serverApiK
     setThumbStatus('loading');
     const params = new URLSearchParams({ tiled_path: item.path, size: '320' });
     if (serverUri) params.set('server_uri', serverUri);
-    if (serverApiKey) params.set('server_api_key', serverApiKey);
     const url = `${API_BASE}/api/browse/thumbnail?${params}`;
     const img = new window.Image();
     img.onload = () => { setThumbSrc(url); setThumbStatus('ok'); };
     img.onerror = () => setThumbStatus('error');
     img.src = url;
     return () => { img.onload = null; img.onerror = null; };
-  }, [item.path, serverUri, serverApiKey]);
+  }, [item.path, serverUri]);
 
   // Build sections, collecting remaining keys for "Other"
   const shown = new Set<string>();
@@ -157,6 +156,19 @@ export default function BrowseDetailPanel({ item, onClose, serverUri, serverApiK
           </div>
         ))}
       </div>
+
+      {onOpenInAnnotate && (
+        <div className="shrink-0 px-4 py-3 border-t" style={{ borderColor: '#334155' }}>
+          <button
+            type="button"
+            onClick={onOpenInAnnotate}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-md text-sm font-medium bg-sky-600 text-white hover:bg-sky-500 transition-colors"
+          >
+            <PencilSimple size={16} />
+            Open in Annotate
+          </button>
+        </div>
+      )}
     </div>
   );
 }

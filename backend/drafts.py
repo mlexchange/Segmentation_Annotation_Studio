@@ -95,11 +95,17 @@ def list_drafts() -> list[dict[str, Any]]:
     for f in sorted(_DRAFT_DIR.glob("*.json")):
         try:
             doc = json.loads(f.read_text())
+            payload = doc.get("payload") or {}
+            slices = payload.get("slices") or {}
+            has_annotations = any(
+                isinstance(shapes, list) and len(shapes) > 0 for shapes in slices.values()
+            )
             results.append(
                 {
                     "source_key": doc.get("source_key"),
                     "saved_at": doc.get("saved_at"),
                     "file": f.name,
+                    "has_annotations": has_annotations,
                 }
             )
         except Exception:

@@ -20,7 +20,7 @@ export const DEFAULT_COLORS = [
 
 interface ClassStore {
   classes: AnnotationClass[];
-  addClass: (label: string, color: string) => void;
+  addClass: (label: string, color: string) => number;
   updateClass: (classId: number, updates: Partial<Omit<AnnotationClass, 'classId'>>) => void;
   deleteClass: (classId: number) => void;
   toggleVisibility: (classId: number) => void;
@@ -34,6 +34,7 @@ export const useClassStore = create<ClassStore>((set, get) => ({
     const existingIds = classes.map((c) => c.classId);
     const classId = existingIds.length ? Math.max(...existingIds) + 1 : 1;
     set({ classes: [...classes, { classId, label, color, isVisible: true }] });
+    return classId;
   },
   updateClass: (classId, updates) =>
     set((s) => ({

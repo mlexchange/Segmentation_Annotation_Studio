@@ -22,7 +22,7 @@ export default function ExportPage() {
 
   if (!source || !meta) {
     return (
-      <div className="flex h-full items-center justify-center text-gray-400">
+      <div className="flex h-full items-center justify-center text-sky-200">
         <p>No annotations to export. Connect to a dataset and annotate first.</p>
       </div>
     );
@@ -35,7 +35,7 @@ export default function ExportPage() {
 
   if (allSlices.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-gray-400">
+      <div className="flex h-full items-center justify-center text-sky-200">
         <p>No Annotations to Export! Annotate an image first.</p>
       </div>
     );
@@ -95,7 +95,7 @@ export default function ExportPage() {
 
   return (
     <div className="flex flex-col h-full overflow-y-auto p-6 max-w-3xl mx-auto space-y-6">
-      <h2 className="text-2xl font-semibold text-gray-800">Export COCO Dataset</h2>
+      <h2 className="text-2xl font-semibold text-white">Export COCO Dataset</h2>
 
       {/* Render options summary */}
       <div className="bg-gray-50 rounded-lg p-3 text-sm space-y-1">
@@ -107,7 +107,7 @@ export default function ExportPage() {
 
       {/* Split table */}
       <div>
-        <h3 className="text-sm font-semibold mb-2 text-gray-700">Split assignment ({allSlices.length} slices)</h3>
+        <h3 className="text-sm font-semibold mb-2 text-sky-100">Split assignment ({allSlices.length} slices)</h3>
         <div className="border rounded-lg overflow-hidden text-sm">
           <table className="w-full">
             <thead className="bg-gray-50">
@@ -152,7 +152,7 @@ export default function ExportPage() {
       {/* Output dir + mode */}
       <div className="space-y-3">
         <div>
-          <label className="text-sm font-medium text-gray-700 block mb-1">Output directory</label>
+          <label className="text-sm font-medium text-sky-100 block mb-1">Output directory</label>
           <input
             className="w-full border rounded-md px-3 py-2 text-sm font-mono"
             placeholder="/abs/path/to/dataset"
@@ -161,7 +161,7 @@ export default function ExportPage() {
           />
         </div>
         <div>
-          <label className="text-sm font-medium text-gray-700 block mb-1">Write mode</label>
+          <label className="text-sm font-medium text-sky-100 block mb-1">Write mode</label>
           <select
             className="border rounded-md px-3 py-2 text-sm"
             value={mode}
@@ -174,7 +174,7 @@ export default function ExportPage() {
         </div>
       </div>
 
-      {status && <p className="text-sm text-gray-600">{status}</p>}
+      {status && <p className="text-sm text-sky-100">{status}</p>}
 
       {/* Dry-run preview */}
       {preview && (

@@ -4,10 +4,10 @@ import './App.css';
 import { RouteItem } from '@/types/navigationRouterTypes';
 import HubAppLayout from '@/components/HubAppLayout';
 import { useHubSelectedTabs } from '@/hooks/useHubSelectedTabs';
-import { PlugsConnected, PencilSimple, Export } from '@phosphor-icons/react';
+import { PlugsConnected, PencilSimple, MagnifyingGlass } from '@phosphor-icons/react';
 import ConnectPage from './pages/ConnectPage';
 import AnnotatePage from './pages/AnnotatePage';
-import ExportPage from './pages/ExportPage';
+import BrowsePage from './pages/BrowsePage';
 import CustomizePages from '@/components/CustomizePages';
 
 const allRoutes: RouteItem[] = [
@@ -18,17 +18,18 @@ const allRoutes: RouteItem[] = [
     element: <ConnectPage />,
   },
   {
+    path: '/browse',
+    label: 'Browse',
+    icon: <MagnifyingGlass size={32} />,
+    element: <BrowsePage />,
+    isBackgroundTransparent: true,
+  },
+  {
     path: '/annotate',
     label: 'Annotate',
     icon: <PencilSimple size={32} />,
     element: <AnnotatePage />,
     isBackgroundTransparent: true,
-  },
-  {
-    path: '/export',
-    label: 'Export',
-    icon: <Export size={32} />,
-    element: <ExportPage />,
   },
 ];
 
@@ -40,15 +41,26 @@ function App() {
   const location = useLocation();
   const [showTabSelector, setShowTabSelector] = useState(false);
 
-  // Validate stored paths — discard any that don't belong to this app
-  const validPaths = selectedPaths?.filter((p) => DEFAULT_PATHS.includes(p)) ?? null;
+  // Validate stored paths — discard unknown paths and merge in any newly added tabs.
+  const storedValid = selectedPaths?.filter((p) => DEFAULT_PATHS.includes(p)) ?? null;
+  const validPaths =
+    storedValid === null
+      ? null
+      : [...storedValid, ...DEFAULT_PATHS.filter((p) => !storedValid.includes(p))];
   const needsInit = validPaths === null || validPaths.length === 0;
 
-  // Navigate on first mount if no valid paths stored
+  // Navigate on first mount if no valid paths stored; persist merged tab list.
   useEffect(() => {
     if (needsInit) {
       setSelectedPaths(DEFAULT_PATHS);
       navigate('/connect', { replace: true });
+    } else if (
+      selectedPaths &&
+      validPaths &&
+      (validPaths.length !== selectedPaths.length ||
+        !validPaths.every((p, i) => p === selectedPaths[i]))
+    ) {
+      setSelectedPaths(validPaths);
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

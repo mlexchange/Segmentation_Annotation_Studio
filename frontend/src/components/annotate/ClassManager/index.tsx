@@ -106,7 +106,8 @@ export default function ClassManager({ activeClassId, onActivate }: ClassManager
     if (dupColor && !newColor) {
       // silently pick another
     }
-    addClass(label, color || nextColor());
+    const classId = addClass(label, color || nextColor());
+    onActivate(classId);
     setNewLabel('');
     setNewColor('');
     setShowAdd(false);

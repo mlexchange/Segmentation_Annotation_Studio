@@ -46,8 +46,9 @@ export default function BrowseColumn({
           <select
             ref={selectRef}
             value={column.field}
+            title={column.field}
             onChange={e => onFieldChange(colIndex, e.target.value)}
-            className="w-full appearance-none truncate pr-6 pl-2 py-1 text-xs rounded font-medium focus:outline-none focus:ring-1"
+            className="w-full appearance-none pr-6 pl-2 py-1 text-xs rounded font-medium focus:outline-none focus:ring-1"
             style={{
               background: '#1e293b',
               color: '#e2e8f0',

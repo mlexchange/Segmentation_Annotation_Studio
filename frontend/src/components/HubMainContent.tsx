@@ -29,10 +29,27 @@ export type HubMainContentProps = {
     routes: RouteItem[];
     className?: string;
 }
-export default function HubMainContent({routes, className}: HubMainContentProps) {
+
+export default function HubMainContent({ routes, className }: HubMainContentProps) {
+    const location = useLocation();
+    const fullBleed = routes.some(
+        (r) => r.isBackgroundTransparent && r.path === location.pathname,
+    );
+
     return (
-        <main className={cn("bg-sky-900 h-full w-full max-w-full p-8 overflow-hidden", className)}>
-            <div className="h-full w-full max-w-full overflow-y-auto">
+        <main
+            className={cn(
+                "bg-sky-900 h-full w-full max-w-full overflow-hidden",
+                !fullBleed && "p-8",
+                className,
+            )}
+        >
+            <div
+                className={cn(
+                    "h-full w-full max-w-full",
+                    fullBleed ? "overflow-hidden" : "overflow-y-auto",
+                )}
+            >
                 <Routes>
                     {routes.map((route) => (
                         <Route
@@ -45,5 +62,5 @@ export default function HubMainContent({routes, className}: HubMainContentProps)
                 </Routes>
             </div>
         </main>
-    )
+    );
 }

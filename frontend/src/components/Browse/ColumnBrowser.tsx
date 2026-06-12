@@ -1,36 +1,48 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowsClockwise, CheckSquare, CloudArrowUp, Plus } from '@phosphor-icons/react';
+import { ArrowsClockwise, PencilSimple, Plus } from '@phosphor-icons/react';
 import BrowseColumn from './BrowseColumn';
 import BrowseDetailPanel from './BrowseDetailPanel';
 import ItemsColumn from './ItemsColumn';
 import ResizeDivider from './ResizeDivider';
 import { useBrowseData, type BrowseItem } from './hooks/useBrowseData';
-import { useBrowseStore, type StagedItem } from '@/stores/browseStore';
+import { useOpenInAnnotate } from '@/hooks/useOpenInAnnotate';
+import type { ServerInfo } from '@/types/server';
+import { ANNOTATION_FILTER_OPTIONS, type AnnotationFilter } from '@/types/annotationFilter';
 
 interface ColumnBrowserProps {
   serverUri: string;
-  technique: string;
-  serverApiKey?: string;
+  servers: ServerInfo[];
+  selectedServerUri: string;
+  onServerChange: (uri: string) => void;
+  annotationFilter: AnnotationFilter;
+  onAnnotationFilterChange: (filter: AnnotationFilter) => void;
 }
 
 const DEFAULT_COLUMN_WIDTH = 220;
 const DEFAULT_ITEMS_WIDTH = 260;
-const SAMPLE_NAME_COLUMN_WIDTH = 190;
-const INITIAL_COLUMN_COUNT = 5;
-const STAGED_MESSAGE_DURATION_MS = 3500;
+const INITIAL_COLUMN_COUNT = 4;
 
-export default function ColumnBrowser({ serverUri, technique, serverApiKey }: ColumnBrowserProps) {
-  const { state, actions } = useBrowseData(serverUri, technique, serverApiKey);
+function columnWidthForField(field: string): number {
+  if (field === 'sample_name') return 200;
+  // ~7px per character at text-xs + padding for the field picker
+  return Math.min(360, Math.max(DEFAULT_COLUMN_WIDTH, field.length * 7 + 48));
+}
+
+export default function ColumnBrowser({
+  serverUri,
+  servers,
+  selectedServerUri,
+  onServerChange,
+  annotationFilter,
+  onAnnotationFilterChange,
+}: ColumnBrowserProps) {
+  const { state, actions } = useBrowseData(serverUri, 'All');
+  const { openTiledArray } = useOpenInAnnotate();
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [itemsColumnWidth, setItemsColumnWidth] = useState(DEFAULT_ITEMS_WIDTH);
-  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
-  const [stagedMsg, setStagedMsg] = useState<string | null>(null);
-
-  const setStagedItems = useBrowseStore((s) => s.setStagedItems);
-  const stagedItems = useBrowseStore((s) => s.stagedItems);
-  const setMetadataDisplayKeys = useBrowseStore((s) => s.setMetadataDisplayKeys);
+  const [openStatus, setOpenStatus] = useState<string | null>(null);
 
   // Keep columnWidths in sync with the number of columns.
   useEffect(() => {
@@ -39,22 +51,32 @@ export default function ColumnBrowser({ serverUri, technique, serverApiKey }: Co
       if (prev.length === n) return prev;
       if (prev.length > n) return prev.slice(0, n);
       const additions = Array.from({ length: n - prev.length }, (_, i) => {
-        const field = state.columns[prev.length + i]?.field;
-        return field === 'sample_name' ? SAMPLE_NAME_COLUMN_WIDTH : DEFAULT_COLUMN_WIDTH;
+        const field = state.columns[prev.length + i]?.field ?? '';
+        return columnWidthForField(field);
       });
       return [...prev, ...additions];
     });
   }, [state.columns]);
 
-  useEffect(() => {
-    setSelectedPaths(new Set());
-  }, [state.items]);
+  const prevColumnCount = useRef(0);
+  const skipNextAutoScroll = useRef(false);
 
-  // Auto-scroll to the newest column when columns are added.
+  // Scroll to reveal newly added columns (not on the initial bulk load).
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
+    const el = scrollRef.current;
+    if (!el) return;
+
+    if (skipNextAutoScroll.current) {
+      skipNextAutoScroll.current = false;
+      el.scrollLeft = 0;
+      prevColumnCount.current = state.columns.length;
+      return;
     }
+
+    if (state.columns.length > prevColumnCount.current) {
+      el.scrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+    }
+    prevColumnCount.current = state.columns.length;
   }, [state.columns.length]);
 
   // First-load: populate with the first few discovered facets.
@@ -62,14 +84,10 @@ export default function ColumnBrowser({ serverUri, technique, serverApiKey }: Co
   useEffect(() => {
     if (initialised.current || state.facets.length === 0) return;
     initialised.current = true;
+    skipNextAutoScroll.current = true;
     const n = Math.min(INITIAL_COLUMN_COUNT, state.facets.length);
     state.facets.slice(0, n).forEach((f) => actions.addColumn(f));
   }, [state.facets, actions]);
-
-  // Publish current column fields for other tabs that mirror the selection.
-  useEffect(() => {
-    setMetadataDisplayKeys(state.columns.map((col) => col.field));
-  }, [state.columns, setMetadataDisplayKeys]);
 
   const handleResizeColumn = useCallback((index: number, newWidth: number) => {
     setColumnWidths((prev) => {
@@ -86,51 +104,17 @@ export default function ColumnBrowser({ serverUri, technique, serverApiKey }: Co
     if (next) actions.addColumn(next);
   }, [state.columns, state.facets, actions]);
 
-  const togglePath = useCallback((path: string) => {
-    setSelectedPaths((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  }, []);
-
-  const selectAll = useCallback(() => {
-    setSelectedPaths(new Set(state.items.map((i) => i.path)));
-  }, [state.items]);
-
-  const clearSelection = useCallback(() => setSelectedPaths(new Set()), []);
-
-  const stageSelected = useCallback(() => {
-    const stagedIds = new Set(stagedItems.map((s) => s.tiledId));
-    const toAdd: StagedItem[] = state.items
-      .filter((item) => selectedPaths.has(item.path) && !stagedIds.has(item.path))
-      .map((item) => ({
-        id: `browse-${item.path}-${Date.now()}`,
-        name: String(item.metadata.sample_name ?? item.sample),
-        source: 'tiled',
-        tiledId: item.path,
-        tiledUri: serverUri || undefined,
-        tiledApiKey: serverApiKey || undefined,
-        metadata: {
-          sample_name: String(item.metadata.sample_name ?? item.sample),
-          bar: typeof item.metadata.bar === 'number' ? item.metadata.bar : undefined,
-          sample_folder: item.metadata.sample_folder as string | undefined,
-          beamline: item.metadata.beamline as string | undefined,
-        },
-      }));
-
-    if (toAdd.length === 0) return;
-    setStagedItems([...stagedItems, ...toAdd]);
-
-    const msg =
-      toAdd.length === 1
-        ? `"${toAdd[0].name}" added to staging`
-        : `${toAdd.length} scans added to staging`;
-    setStagedMsg(msg);
-    setSelectedPaths(new Set());
-    setTimeout(() => setStagedMsg(null), STAGED_MESSAGE_DURATION_MS);
-  }, [state.items, selectedPaths, stagedItems, setStagedItems, serverUri, serverApiKey]);
+  const handleOpenInAnnotate = useCallback(
+    async (item: BrowseItem) => {
+      setOpenStatus(`Opening ${item.sample}…`);
+      try {
+        await openTiledArray(item.path, serverUri);
+      } catch (err) {
+        setOpenStatus(`Failed to open: ${err}`);
+      }
+    },
+    [openTiledArray, serverUri],
+  );
 
   const activeFilters = useMemo(() => {
     const out: Record<string, string> = {};
@@ -150,16 +134,20 @@ export default function ColumnBrowser({ serverUri, technique, serverApiKey }: Co
         facetsLoading={state.facetsLoading}
         facetCount={state.facets.length}
         activeFilterCount={activeFilterCount}
-        selectedCount={selectedPaths.size}
-        onStage={stageSelected}
+        selectedItem={state.selectedItem}
+        onOpenInAnnotate={handleOpenInAnnotate}
         onRefresh={actions.refresh}
         onAddColumn={handleAddColumn}
+        servers={servers}
+        selectedServerUri={selectedServerUri}
+        onServerChange={onServerChange}
+        annotationFilter={annotationFilter}
+        onAnnotationFilterChange={onAnnotationFilterChange}
       />
 
-      {stagedMsg && (
-        <div className="shrink-0 px-4 py-1.5 text-xs font-medium border-b border-green-800 bg-green-950 text-green-300 flex items-center gap-2">
-          <CheckSquare size={13} weight="fill" />
-          {stagedMsg}
+      {openStatus && (
+        <div className="shrink-0 px-4 py-1.5 text-xs font-medium border-b border-slate-700 bg-slate-800 text-sky-200">
+          {openStatus}
         </div>
       )}
 
@@ -214,11 +202,10 @@ export default function ColumnBrowser({ serverUri, technique, serverApiKey }: Co
                 loading={state.itemsLoading}
                 selectedItem={state.selectedItem}
                 onSelect={actions.selectItem}
+                onOpenInAnnotate={handleOpenInAnnotate}
                 width={itemsColumnWidth}
-                checkedPaths={selectedPaths}
-                onToggleCheck={togglePath}
-                onSelectAll={selectAll}
-                onClearAll={clearSelection}
+                serverUri={serverUri}
+                annotationFilter={annotationFilter}
               />
             </>
           )}
@@ -228,7 +215,7 @@ export default function ColumnBrowser({ serverUri, technique, serverApiKey }: Co
           item={state.selectedItem}
           onClose={() => actions.selectItem(null)}
           serverUri={serverUri}
-          serverApiKey={serverApiKey}
+          onOpenInAnnotate={handleOpenInAnnotate}
         />
       </div>
     </div>
@@ -241,24 +228,66 @@ interface ToolbarProps {
   facetsLoading: boolean;
   facetCount: number;
   activeFilterCount: number;
-  selectedCount: number;
-  onStage: () => void;
+  selectedItem: BrowseItem | null;
+  onOpenInAnnotate: (item: BrowseItem) => void;
   onRefresh: () => void;
   onAddColumn: () => void;
+  servers: ServerInfo[];
+  selectedServerUri: string;
+  onServerChange: (uri: string) => void;
+  annotationFilter: AnnotationFilter;
+  onAnnotationFilterChange: (filter: AnnotationFilter) => void;
 }
 
 function Toolbar({
   facetsLoading,
   facetCount,
   activeFilterCount,
-  selectedCount,
-  onStage,
+  selectedItem,
+  onOpenInAnnotate,
   onRefresh,
   onAddColumn,
+  servers,
+  selectedServerUri,
+  onServerChange,
+  annotationFilter,
+  onAnnotationFilterChange,
 }: ToolbarProps) {
   return (
-    <div className="flex items-center gap-3 px-4 py-2 border-b border-slate-700 bg-slate-800 shrink-0">
-      <span className="text-sm font-semibold text-slate-400">Metadata Browser</span>
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 border-b border-slate-700 bg-slate-800 shrink-0">
+      <span className="text-sm font-semibold text-slate-200 whitespace-nowrap">Metadata Browser</span>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          Server
+          <select
+            value={selectedServerUri}
+            onChange={(e) => onServerChange(e.target.value)}
+            className="text-xs rounded px-2 py-1 bg-slate-900 text-slate-200 border border-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 min-w-[180px] max-w-[280px]"
+          >
+            {servers.map((s) => (
+              <option key={s.uri} value={s.uri}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          Annotation
+          <select
+            value={annotationFilter}
+            onChange={(e) => onAnnotationFilterChange(e.target.value as AnnotationFilter)}
+            className="text-xs rounded px-2 py-1 bg-slate-900 text-slate-200 border border-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
+          >
+            {ANNOTATION_FILTER_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
       {facetsLoading && <span className="text-xs text-slate-500">Loading fields…</span>}
 
       <div className="flex items-center gap-1 ml-auto">
@@ -268,15 +297,15 @@ function Toolbar({
           </span>
         )}
 
-        {selectedCount > 0 && (
+        {selectedItem && (
           <button
             type="button"
-            onClick={onStage}
-            title="Add selected scans to the staging area"
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors bg-green-900 text-green-300 border border-green-700 hover:bg-green-800"
+            onClick={() => onOpenInAnnotate(selectedItem)}
+            title="Open this scan in the Annotate tab"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors bg-sky-700 text-white border border-sky-600 hover:bg-sky-600"
           >
-            <CloudArrowUp size={13} />
-            Stage {selectedCount}
+            <PencilSimple size={13} />
+            Open in Annotate
           </button>
         )}
 
@@ -308,10 +337,10 @@ interface DetailPanelSlotProps {
   item: BrowseItem | null;
   onClose: () => void;
   serverUri: string;
-  serverApiKey?: string;
+  onOpenInAnnotate: (item: BrowseItem) => void;
 }
 
-function DetailPanelSlot({ item, onClose, serverUri, serverApiKey }: DetailPanelSlotProps) {
+function DetailPanelSlot({ item, onClose, serverUri, onOpenInAnnotate }: DetailPanelSlotProps) {
   return (
     <div
       className="flex flex-col h-full border-l border-slate-700 bg-slate-900 shrink-0"
@@ -322,7 +351,7 @@ function DetailPanelSlot({ item, onClose, serverUri, serverApiKey }: DetailPanel
           item={item}
           onClose={onClose}
           serverUri={serverUri}
-          serverApiKey={serverApiKey}
+          onOpenInAnnotate={() => onOpenInAnnotate(item)}
         />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center px-4 py-8 text-center">

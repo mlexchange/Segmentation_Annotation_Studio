@@ -6,11 +6,11 @@
  * 1-9=class  arrows=slice  Del/Back=delete  Ctrl+Z/Ctrl+Shift+Z=undo/redo  Esc=cancel
  */
 import { useEffect } from 'react';
+import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
-import { useTemporalStore } from 'zundo';
 
 const TOOL_KEYBINDS: Record<string, Tool> = {
   a: 'pan',
@@ -32,7 +32,7 @@ export function useKeybinds(
   const { setTool } = useToolStore();
   const { meta, currentSlice, setSlice } = useDatasetStore();
   const { classes } = useClassStore();
-  const temporalStore = useTemporalStore(useAnnotationStore);
+  const temporalStore = useStore(useAnnotationStore.temporal);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {

@@ -1,0 +1,88 @@
+/**
+ * Open any sample (Tiled or local) in the Annotate tab — load meta + restore draft.
+ */
+import { useCallback } from 'react';
+import { useNavigate } from 'react-router';
+import { API_BASE } from '@/config';
+import { useDatasetStore } from '@/stores/datasetStore';
+import { useClassStore } from '@/stores/classStore';
+import { useAnnotationStore } from '@/stores/annotationStore';
+import { loadDraft } from '@/hooks/useDraftSync';
+import { buildSourceKey } from '@/lib/sourceKey';
+import type { Shape } from '@/stores/annotationStore';
+
+/** Merge a loaded draft into the stores for the given sourceKey. */
+async function applyDraft(
+  sourceKey: string,
+  setClasses: (classes: Parameters<ReturnType<typeof useClassStore>['setClasses']>[0]) => void,
+  mergeSourceDraft: ReturnType<typeof useAnnotationStore>['mergeSourceDraft'],
+) {
+  const draft = await loadDraft(sourceKey);
+  if (!draft?.payload) return;
+  const payload = draft.payload as Record<string, unknown>;
+  if (Array.isArray(payload.classes)) {
+    setClasses(payload.classes as Parameters<typeof setClasses>[0]);
+  }
+  const slices = (payload.slices ?? {}) as Record<string, Shape[]>;
+  const splitMap = (payload.split_by_slice ?? {}) as Record<string, string>;
+  const negSlices = (payload.negative_slices ?? []) as string[];
+  mergeSourceDraft(sourceKey, slices, splitMap, negSlices);
+}
+
+export function useOpenInAnnotate() {
+  const navigate = useNavigate();
+  const { setDataset } = useDatasetStore();
+  const { setClasses } = useClassStore();
+  const { mergeSourceDraft } = useAnnotationStore();
+
+  const openTiledArray = useCallback(
+    async (tiledPath: string, serverUri: string) => {
+      const params = new URLSearchParams({ source: tiledPath, kind: 'tiled' });
+      if (serverUri) params.set('server_uri', serverUri);
+
+      const res = await fetch(`${API_BASE}/api/image/meta?${params}`);
+      if (!res.ok) throw new Error(await res.text());
+
+      const meta = await res.json();
+      setDataset('tiled', tiledPath, serverUri || null, {
+        nSlices: meta.n_slices,
+        height: meta.height,
+        width: meta.width,
+        dtype: meta.dtype,
+        isRgb: meta.is_rgb,
+        valueRange: meta.value_range,
+      });
+
+      const sourceKey = buildSourceKey('tiled', tiledPath, serverUri);
+      await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      navigate('/annotate');
+    },
+    [navigate, setDataset, setClasses, mergeSourceDraft],
+  );
+
+  const openLocalFile = useCallback(
+    async (relPath: string) => {
+      const params = new URLSearchParams({ source: relPath, kind: 'local' });
+
+      const res = await fetch(`${API_BASE}/api/image/meta?${params}`);
+      if (!res.ok) throw new Error(await res.text());
+
+      const meta = await res.json();
+      setDataset('local', relPath, null, {
+        nSlices: meta.n_slices,
+        height: meta.height,
+        width: meta.width,
+        dtype: meta.dtype,
+        isRgb: meta.is_rgb,
+        valueRange: meta.value_range,
+      });
+
+      const sourceKey = buildSourceKey('local', relPath);
+      await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      navigate('/annotate');
+    },
+    [navigate, setDataset, setClasses, mergeSourceDraft],
+  );
+
+  return { openTiledArray, openLocalFile };
+}

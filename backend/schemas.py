@@ -151,29 +151,52 @@ class RenderOpts(BaseModel):
     cmap: Literal["gray", "viridis"] = "gray"
 
 
+class ExportSourceItem(BaseModel):
+    """A single annotated sample within a multi-source export.
+
+    Attributes:
+        kind: Source kind — ``"tiled"`` or ``"local"``.
+        source: Tiled path or local relative path to the image data.
+        server_uri: Tiled server URI (required when kind is ``"tiled"``).
+        slices: Mapping of slice key → list of serialised shape dicts.
+        split_by_slice: Mapping of slice key → dataset split name.
+        negative_slices: Slice keys included as negative (unannotated) examples.
+    """
+
+    kind: Literal["tiled", "local"]
+    source: str
+    server_uri: str | None = None
+    slices: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    split_by_slice: dict[str, str] = Field(default_factory=dict)
+    negative_slices: list[str] = Field(default_factory=list)
+
+
 class ExportRequest(BaseModel):
     """Request body for the dataset export endpoint.
 
     Attributes:
-        out_dir: Destination directory (absolute path or relative to server cwd).
-        kind: Source kind — ``"tiled"`` or ``"local"``.
-        source: Tiled path or local relative path to the image data.
-        server_uri: Tiled server URI (required when kind is ``"tiled"``).
+        dataset_name: Optional name for the output folder; auto-derived if absent.
+        kind: Source kind — ``"tiled"`` or ``"local"`` (single-source mode).
+        source: Tiled path or local relative path (single-source mode).
+        server_uri: Tiled server URI (single-source mode, tiled only).
+        sources: List of annotated samples for multi-source export (overrides
+            kind/source/slices when provided).
         mode: Conflict resolution when output already exists.
         dry_run: If ``True``, compute the export plan but do not write files.
         render: Render options applied to exported PNG tiles.
         classes: Annotation classes present in this export.
-        slices: Mapping of slice key → list of serialised shape dicts.
-        split_by_slice: Mapping of slice key → dataset split name.
+        slices: Mapping of slice key → list of serialised shape dicts (single-source).
+        split_by_slice: Mapping of slice key → dataset split name (single-source).
         auto_split: Auto-split configuration (ratios + seed).
-        negative_slices: Slice keys included as negative (unannotated) examples.
+        negative_slices: Slice keys included as negative examples (single-source).
     """
 
-    out_dir: str
-    kind: Literal["tiled", "local"]
-    source: str
+    dataset_name: str | None = None
+    kind: Literal["tiled", "local"] = "tiled"
+    source: str = ""
     server_uri: str | None = None
-    mode: Literal["fail", "overwrite", "merge"] = "fail"
+    sources: list[ExportSourceItem] = Field(default_factory=list)
+    mode: Literal["fail", "overwrite", "merge"] = "merge"
     dry_run: bool = False
     render: RenderOpts = Field(default_factory=RenderOpts)
     classes: list[AnnotationClass] = Field(default_factory=list)
