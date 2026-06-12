@@ -1,6 +1,7 @@
 /**
  * Toolbar — tool selector (radiogroup), brush size, opacity, undo/redo.
- * Keybinds: q=polygon, w=ellipse, e=rectangle, a=pan, b=brush, x=eraser, s=select
+ * Keybinds: a=polygon, w=ellipse, e=rectangle, q=eraser, b=brush, s=select,
+ *           Space=pan (hold), x=next slice, f=fit to screen, z=undo
  */
 import { Hand, Cursor, Polygon, Rectangle, Circle, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
 import { useStore } from 'zustand';
@@ -43,7 +44,7 @@ function ToolButton({ tool, label, icon, keybind, activeTool, onSelect }: ToolBu
             isActive ? 'text-sky-200/80' : 'text-gray-400'
           )}
         >
-          {keybind.toUpperCase()}
+          {keybind.length > 1 ? keybind.slice(0, 3).toUpperCase() : keybind.toUpperCase()}
         </span>
       )}
     </button>
@@ -57,13 +58,13 @@ export default function Toolbar() {
   const canRedo = useStore(useAnnotationStore.temporal, (s) => s.futureStates.length > 0);
 
   const tools: Array<{ tool: Tool; label: string; icon: React.ReactNode; keybind: string }> = [
-    { tool: 'pan',       label: 'Pan',     icon: <Hand size={18} />,        keybind: 'a' },
+    { tool: 'pan',       label: 'Pan',     icon: <Hand size={18} />,        keybind: 'space' },
     { tool: 'select',    label: 'Select',  icon: <Cursor size={18} />,      keybind: 's' },
-    { tool: 'polygon',   label: 'Polygon', icon: <Polygon size={18} />,     keybind: 'q' },
+    { tool: 'polygon',   label: 'Polygon', icon: <Polygon size={18} />,     keybind: 'a' },
     { tool: 'rectangle', label: 'Rect',    icon: <Rectangle size={18} />,   keybind: 'e' },
     { tool: 'ellipse',   label: 'Ellipse', icon: <Circle size={18} />,      keybind: 'w' },
     { tool: 'brush',     label: 'Brush',   icon: <PaintBucket size={18} />, keybind: 'b' },
-    { tool: 'eraser',    label: 'Eraser',  icon: <Eraser size={18} />,      keybind: 'x' },
+    { tool: 'eraser',    label: 'Eraser',  icon: <Eraser size={18} />,      keybind: 'q' },
   ];
 
   return (
@@ -74,7 +75,7 @@ export default function Toolbar() {
           type="button"
           onClick={() => undo()}
           disabled={!canUndo}
-          title="Undo (Ctrl+Z)"
+          title="Undo (Z or Ctrl+Z)"
           aria-label="Undo"
           className={cn(
             'flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border transition-colors',
@@ -114,6 +115,14 @@ export default function Toolbar() {
             onSelect={setTool}
           />
         ))}
+      </div>
+
+      {/* Extra (non-tool) shortcuts */}
+      <div className="text-[10px] leading-relaxed text-gray-400">
+        <span className="font-mono font-semibold text-gray-500">Space</span> pan (hold) ·{' '}
+        <span className="font-mono font-semibold text-gray-500">X</span> next slice ·{' '}
+        <span className="font-mono font-semibold text-gray-500">F</span> fit ·{' '}
+        <span className="font-mono font-semibold text-gray-500">Z</span> undo
       </div>
 
       {(tool === 'brush' || tool === 'eraser') && (

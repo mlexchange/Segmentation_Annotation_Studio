@@ -1,6 +1,6 @@
 # Python
 .venv/
-.conda*/
+.conda-py312/
 __pycache__/
 *.pyc
 *.pyo
@@ -18,6 +18,9 @@ build/
 .tiled/catalog.db
 .tiled/catalog.db-shm
 .tiled/catalog.db-wal
+
+# Runtime Tiled thumbnail containers created on save
+**/*__v_thumbs/
 
 # Node
 node_modules/

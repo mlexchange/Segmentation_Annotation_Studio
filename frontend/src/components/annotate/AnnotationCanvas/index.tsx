@@ -2,11 +2,16 @@
  * AnnotationCanvas — react-konva Stage with image + shape layers.
  *
  * Layer 0: image (Konva filters: Brighten/Contrast)
- * Layer 1: committed shapes (listening=false, per-brush-instance Groups)
+ * Layer 1: committed shapes (listening=false, cached for opacity compositing)
  * Layer 2: draft polygon + drag preview
- * Layer 3: brush/eraser size cursor preview
+ * Layer 3: in-progress brush stroke (imperative, zero React re-renders per move)
+ * Layer 4: brush/eraser size cursor preview (imperative position update)
+ *
+ * Lag fix: brush/eraser strokes are buffered in a ref during mousemove and
+ * committed to the Zustand store ONCE on mouseup, eliminating the per-frame
+ * store updates + zundo history snapshots that caused cursor lag.
  */
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useEffect, useCallback } from 'react';
 import {
   Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Group, Circle,
 } from 'react-konva';
@@ -15,7 +20,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore, type Shape, type BrushStroke } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
-import { useClassStore } from '@/stores/classStore';
+import { useClassStore, type AnnotationClass } from '@/stores/classStore';
 import { toImage, normalizeRect, normalizeEllipse } from '@/lib/geometry';
 import { useImageSlice } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
@@ -26,6 +31,10 @@ interface AnnotationCanvasProps {
   activeClassId: number | null;
   activeBrushShapeId: string | null;
   onNewBrushInstance: (id: string) => void;
+  /** When non-null, the canvas renders these shapes read-only (version preview). */
+  previewShapes?: Shape[] | null;
+  /** Class definitions used for preview shape colors (the version's own classes). */
+  previewClasses?: AnnotationClass[] | null;
 }
 
 export default function AnnotationCanvas({
@@ -34,18 +43,36 @@ export default function AnnotationCanvas({
   activeClassId,
   activeBrushShapeId,
   onNewBrushInstance,
+  previewShapes = null,
+  previewClasses = null,
 }: AnnotationCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<Konva.Image>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const shapesLayerRef = useRef<Konva.Layer>(null);
 
+  // Imperative refs for lag-free brush drawing
+  const draftStrokeLayerRef = useRef<Konva.Layer>(null);
+  const draftLineRef = useRef<Konva.Line>(null);
+  const brushCursorLayerRef = useRef<Konva.Layer>(null);
+  const brushCursorRef = useRef<Konva.Circle>(null);
+
+  // Buffered in-progress stroke — populated on mousedown, flushed on mouseup.
+  // Never stored in React state so mousemove causes zero re-renders.
+  const draftStrokeRef = useRef<{
+    shapeId: string;
+    mode: 'paint' | 'erase';
+    points: number[];
+    radius: number;
+  } | null>(null);
+
   const { kind, source, serverUri, meta, currentSlice, renderOpts } = useDatasetStore();
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
-  const { byImage, addShape, removeShape, appendBrushStroke, setShapes } = useAnnotationStore();
+  const { byImage, addShape, appendBrushStroke } = useAnnotationStore();
   const { tool, brushSize, fillOpacity, selectedShapeId, setSelectedShapeId } = useToolStore();
+  const fitRequestId = useToolStore((s) => s.fitRequestId);
   const { classes } = useClassStore();
 
   const [stageSize, setStageSize] = useState({ width: 800, height: 600 });
@@ -57,15 +84,12 @@ export default function AnnotationCanvas({
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(null);
   // True while a brush/eraser stroke is actively being drawn — suppresses the
-  // (expensive) layer re-cache so live painting stays responsive.
+  // (expensive) layer re-cache so we don't rebuild the shapes bitmap mid-stroke.
   const [isDrawing, setIsDrawing] = useState(false);
-  // Image-space pointer position for brush/eraser size preview (null when off-canvas).
-  const [brushCursorPos, setBrushCursorPos] = useState<{ x: number; y: number } | null>(null);
 
   const { data: sliceUrl } = useImageSlice(source, kind, currentSlice, renderOpts, serverUri);
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
 
-  // Load image element when URL changes
   useEffect(() => {
     if (!sliceUrl) return;
     const img = new window.Image();
@@ -73,7 +97,6 @@ export default function AnnotationCanvas({
     img.src = sliceUrl;
   }, [sliceUrl]);
 
-  // Apply brightness/contrast filters on image node
   useEffect(() => {
     if (!imageRef.current) return;
     imageRef.current.cache();
@@ -86,7 +109,6 @@ export default function AnnotationCanvas({
     imageRef.current.getLayer()?.batchDraw();
   }, [brightness, contrast, imageEl]);
 
-  // Fit container
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -98,8 +120,8 @@ export default function AnnotationCanvas({
     return () => ro.disconnect();
   }, []);
 
-  // Fit image to stage when image or stage size changes
-  useEffect(() => {
+  // Fit the image into the viewport, centered (also bound to the F shortcut).
+  const fitToScreen = useCallback(() => {
     if (!imageEl || !meta) return;
     const scaleX = stageSize.width / meta.width;
     const scaleY = stageSize.height / meta.height;
@@ -111,34 +133,48 @@ export default function AnnotationCanvas({
     });
   }, [imageEl, meta, stageSize]);
 
-  const shapes = sourceKey ? (byImage[sourceKey]?.[String(currentSlice)] ?? []) : [];
+  // Auto-fit when the image or viewport changes.
+  useEffect(() => {
+    fitToScreen();
+  }, [fitToScreen]);
 
-  // Cache the shapes layer so its children are flattened into a single bitmap
-  // BEFORE the layer opacity is applied. This makes overlapping brush strokes
-  // (and overlapping shapes of the same class) composite to one uniform color
-  // instead of stacking alpha and looking darker where they overlap.
+  // Explicit fit requests (F shortcut) — skip the initial id=0 since the
+  // auto-fit effect above already handles the first render.
+  const lastFitIdRef = useRef(0);
+  useEffect(() => {
+    if (fitRequestId === lastFitIdRef.current) return;
+    lastFitIdRef.current = fitRequestId;
+    fitToScreen();
+  }, [fitRequestId, fitToScreen]);
+
+  const isPreviewing = previewShapes !== null;
+  const storeShapes = sourceKey ? (byImage[sourceKey]?.[String(currentSlice)] ?? []) : [];
+  // Shapes actually drawn on Layer 1: previewed version when previewing, else the live store.
+  const displayShapes = isPreviewing ? previewShapes! : storeShapes;
+  // Classes used for color/visibility lookups when rendering Layer 1.
+  const renderClasses = isPreviewing && previewClasses ? previewClasses : classes;
+
+  // Cache the shapes layer for uniform opacity compositing — skipped mid-stroke
+  // so the cache rebuild doesn't stall painting.
   useEffect(() => {
     const layer = shapesLayerRef.current;
     if (!layer) return;
-    if (isDrawing) return; // don't re-cache mid-stroke (keeps painting smooth)
+    if (isDrawing) return;
     layer.clearCache();
-    if (shapes.length > 0) {
-      // Cache at a pixel ratio matching the current zoom so the flattened
-      // bitmap stays crisp when the Stage scales it. Clamped to avoid huge
-      // canvases at extreme zoom.
+    if (displayShapes.length > 0) {
       const pr = Math.min(Math.max(transform.scaleX, 1), 4);
       layer.cache({ pixelRatio: pr });
     }
     layer.batchDraw();
-  }, [shapes, classes, fillOpacity, meta, transform.scaleX, isDrawing]);
+  }, [displayShapes, renderClasses, fillOpacity, meta, transform.scaleX, isDrawing]);
 
   const colorForClass = (classId: number) =>
-    classes.find((c) => c.classId === classId)?.color ?? '#ff0000';
+    renderClasses.find((c) => c.classId === classId)?.color ?? '#ff0000';
 
   const activeColor =
     activeClassId !== null ? colorForClass(activeClassId) : '#4090ff';
 
-  const showBrushCursor = (tool === 'brush' || tool === 'eraser') && !!meta;
+  const showBrushCursor = (tool === 'brush' || tool === 'eraser') && !!meta && !isPreviewing;
 
   const getPointerImagePos = () => {
     const stage = stageRef.current;
@@ -148,7 +184,27 @@ export default function AnnotationCanvas({
     return toImage(pos, transform);
   };
 
+  /** Flush the buffered draft stroke to the Zustand store (one write per stroke). */
+  const commitDraftStroke = () => {
+    const draft = draftStrokeRef.current;
+    if (!draft || !sourceKey) return;
+    const { shapeId, mode, points, radius } = draft;
+    draftStrokeRef.current = null;
+
+    // Hide the draft line imperatively
+    if (draftLineRef.current) {
+      draftLineRef.current.visible(false);
+      draftStrokeLayerRef.current?.batchDraw();
+    }
+
+    if (points.length < 2) return;
+    // Duplicate single point so Konva renders it as a dot
+    const finalPoints = points.length === 2 ? [...points, ...points] : points;
+    appendBrushStroke(sourceKey, currentSlice, shapeId, { points: finalPoints, radius, mode });
+  };
+
   const handleStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (isPreviewing) return;
     if (!sourceKey || !meta || activeClassId === null) return;
     const pos = getPointerImagePos();
     if (!pos) return;
@@ -160,73 +216,94 @@ export default function AnnotationCanvas({
       setDragCurrent(pos);
     } else if (tool === 'brush') {
       setIsDrawing(true);
-      const stroke: BrushStroke = { points: [pos.x, pos.y], radius: brushSize, mode: 'paint' };
+
+      // Determine which brush shape to append to
       const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
       const existingBrush = activeBrushShapeId
         ? sliceShapes.find((s) => s.id === activeBrushShapeId && s.kind === 'brush')
         : null;
       const canAppend = existingBrush && existingBrush.classId === activeClassId;
+
+      let shapeId: string;
       if (canAppend && activeBrushShapeId) {
-        appendBrushStroke(sourceKey, currentSlice, activeBrushShapeId, stroke);
+        shapeId = activeBrushShapeId;
       } else {
-        const id = uuidv4();
-        addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'brush', strokes: [stroke] });
-        onNewBrushInstance(id);
+        shapeId = uuidv4();
+        // Create container with empty strokes; stroke appended on mouseup
+        addShape(sourceKey, currentSlice, {
+          id: shapeId,
+          classId: activeClassId,
+          kind: 'brush',
+          strokes: [],
+        });
+        onNewBrushInstance(shapeId);
+      }
+
+      draftStrokeRef.current = { shapeId, mode: 'paint', points: [pos.x, pos.y], radius: brushSize };
+
+      // Prime the draft line for imperative updates
+      if (draftLineRef.current) {
+        draftLineRef.current.stroke(activeColor);
+        draftLineRef.current.strokeWidth(brushSize * 2);
+        draftLineRef.current.points([pos.x, pos.y]);
+        draftLineRef.current.visible(true);
+        draftStrokeLayerRef.current?.batchDraw();
       }
     } else if (tool === 'eraser') {
       setIsDrawing(true);
-      const targetId = activeBrushShapeId ?? shapes.filter((s) => s.kind === 'brush' && s.classId === activeClassId).slice(-1)[0]?.id ?? null;
+      const targetId =
+        activeBrushShapeId ??
+        shapes.filter((s) => s.kind === 'brush' && s.classId === activeClassId).slice(-1)[0]?.id ??
+        null;
       if (targetId) {
-        const eraseStroke: BrushStroke = { points: [pos.x, pos.y], radius: brushSize, mode: 'erase' };
-        appendBrushStroke(sourceKey, currentSlice, targetId, eraseStroke);
-      }
-    }
-  };
-
-  const handleStageMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    const pos = getPointerImagePos();
-    if (showBrushCursor && pos) {
-      setBrushCursorPos(pos);
-    }
-    if (!sourceKey || !meta || !pos) return;
-
-    if ((tool === 'rectangle' || tool === 'ellipse') && dragStart && e.evt.buttons === 1) {
-      setDragCurrent(pos);
-    } else if (tool === 'brush' && e.evt.buttons === 1 && activeBrushShapeId) {
-      const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
-      const brushShape = sliceShapes.find((s) => s.id === activeBrushShapeId && s.kind === 'brush');
-      if (brushShape && brushShape.kind === 'brush') {
-        const lastStroke = brushShape.strokes[brushShape.strokes.length - 1];
-        const updatedStroke: BrushStroke = {
-          ...lastStroke,
-          points: [...lastStroke.points, pos.x, pos.y],
-        };
-        const newStrokes = [...brushShape.strokes.slice(0, -1), updatedStroke];
-        setShapes(
-          sourceKey,
-          currentSlice,
-          sliceShapes.map((s) => (s.id === activeBrushShapeId ? { ...brushShape, strokes: newStrokes } : s))
-        );
-      }
-    } else if (tool === 'eraser' && e.evt.buttons === 1) {
-      const targetId = activeBrushShapeId ?? shapes.filter((s) => s.kind === 'brush' && s.classId === activeClassId).slice(-1)[0]?.id ?? null;
-      if (targetId) {
-        const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
-        const brushShape = sliceShapes.find((s) => s.id === targetId && s.kind === 'brush');
-        if (brushShape && brushShape.kind === 'brush') {
-          const lastStroke = brushShape.strokes[brushShape.strokes.length - 1];
-          if (lastStroke.mode === 'erase') {
-            const updatedStroke: BrushStroke = { ...lastStroke, points: [...lastStroke.points, pos.x, pos.y] };
-            const newStrokes = [...brushShape.strokes.slice(0, -1), updatedStroke];
-            setShapes(sourceKey, currentSlice, sliceShapes.map((s) => (s.id === targetId ? { ...brushShape, strokes: newStrokes } : s)));
-          }
+        draftStrokeRef.current = { shapeId: targetId, mode: 'erase', points: [pos.x, pos.y], radius: brushSize };
+        // Show a white dash to indicate erasing (destination-out not feasible in uncached layer)
+        if (draftLineRef.current) {
+          draftLineRef.current.stroke('#ffffff');
+          draftLineRef.current.strokeWidth(brushSize * 2);
+          draftLineRef.current.points([pos.x, pos.y]);
+          draftLineRef.current.visible(true);
+          draftStrokeLayerRef.current?.batchDraw();
         }
       }
     }
   };
 
+  const handleStageMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (isPreviewing) return;
+    const pos = getPointerImagePos();
+    if (!pos) return;
+
+    // Update brush cursor position imperatively — no React state, no re-render
+    if (showBrushCursor && brushCursorRef.current) {
+      brushCursorRef.current.position({ x: pos.x, y: pos.y });
+      brushCursorLayerRef.current?.batchDraw();
+    }
+
+    if (!sourceKey || !meta) return;
+
+    if ((tool === 'rectangle' || tool === 'ellipse') && dragStart && e.evt.buttons === 1) {
+      setDragCurrent(pos);
+      return;
+    }
+
+    // Buffer brush/eraser points — no store writes here
+    if ((tool === 'brush' || tool === 'eraser') && e.evt.buttons === 1 && draftStrokeRef.current) {
+      draftStrokeRef.current.points.push(pos.x, pos.y);
+      if (draftLineRef.current) {
+        // Passing the array directly avoids an extra copy; Konva reads it synchronously
+        draftLineRef.current.points(draftStrokeRef.current.points.slice());
+        draftStrokeLayerRef.current?.batchDraw();
+      }
+    }
+  };
+
   const handleStageMouseUp = () => {
-    if (isDrawing) setIsDrawing(false);
+    if (isPreviewing) return;
+    if (isDrawing) {
+      commitDraftStroke();
+      setIsDrawing(false);
+    }
     if (!sourceKey || !meta || activeClassId === null) return;
 
     if ((tool === 'rectangle' || tool === 'ellipse') && dragStart && dragCurrent) {
@@ -253,6 +330,7 @@ export default function AnnotationCanvas({
   };
 
   const handleStageDblClick = () => {
+    if (isPreviewing) return;
     if (tool === 'polygon' && draftPoly.length >= 6 && sourceKey && activeClassId !== null) {
       const id = uuidv4();
       addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'polygon', points: draftPoly });
@@ -261,15 +339,33 @@ export default function AnnotationCanvas({
   };
 
   const handleStageMouseLeave = () => {
-    setBrushCursorPos(null);
-    if (isDrawing) setIsDrawing(false);
+    // Hide brush cursor
+    if (brushCursorRef.current) {
+      brushCursorRef.current.visible(false);
+      brushCursorLayerRef.current?.batchDraw();
+    }
+    // Commit any in-progress stroke
+    if (isDrawing) {
+      commitDraftStroke();
+      setIsDrawing(false);
+    }
     setDragStart(null);
     setDragCurrent(null);
   };
 
-  // Hide brush cursor preview when switching away from brush/eraser.
+  const handleStageMouseEnter = () => {
+    if (showBrushCursor && brushCursorRef.current) {
+      brushCursorRef.current.visible(true);
+      brushCursorLayerRef.current?.batchDraw();
+    }
+  };
+
+  // Hide brush cursor when switching away from brush/eraser tools
   useEffect(() => {
-    if (!showBrushCursor) setBrushCursorPos(null);
+    if (!showBrushCursor && brushCursorRef.current) {
+      brushCursorRef.current.visible(false);
+      brushCursorLayerRef.current?.batchDraw();
+    }
   }, [showBrushCursor]);
 
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
@@ -325,9 +421,6 @@ export default function AnnotationCanvas({
     const isSelected = shape.id === selectedShapeId;
     const strokeW = (isSelected ? 2 : 1) / transform.scaleX;
 
-    // Fill is rendered at full color; the surrounding Layer applies opacity once
-    // so overlapping shapes/strokes of the same class don't compound into a
-    // darker/mismatched color.
     if (shape.kind === 'polygon') {
       return (
         <Line
@@ -408,7 +501,7 @@ export default function AnnotationCanvas({
     <div
       ref={containerRef}
       className="relative w-full h-full bg-gray-900 overflow-hidden"
-      style={{ cursor: showBrushCursor && brushCursorPos ? 'none' : undefined }}
+      style={{ cursor: showBrushCursor ? 'none' : undefined }}
     >
       <Stage
         ref={stageRef}
@@ -419,6 +512,7 @@ export default function AnnotationCanvas({
         onMouseMove={handleStageMouseMove}
         onMouseUp={handleStageMouseUp}
         onMouseLeave={handleStageMouseLeave}
+        onMouseEnter={handleStageMouseEnter}
         onDblClick={handleStageDblClick}
         onWheel={handleWheel}
         x={transform.x}
@@ -443,11 +537,10 @@ export default function AnnotationCanvas({
         </Layer>
 
         {/* Layer 1: committed shapes — cached + opacity applied once at the
-            layer so overlapping same-class shapes render a uniform class color
-            (no darker overlap). */}
+            layer so overlapping same-class shapes render a uniform class color. */}
         <Layer ref={shapesLayerRef} listening={false} opacity={fillOpacity}>
-          {shapes
-            .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
+          {displayShapes
+            .filter((s) => renderClasses.find((c) => c.classId === s.classId)?.isVisible !== false)
             .map(renderShape)}
         </Layer>
 
@@ -479,25 +572,36 @@ export default function AnnotationCanvas({
           {renderDraftShape()}
         </Layer>
 
-        {/* Layer 3: brush/eraser size preview */}
-        <Layer listening={false}>
-          {showBrushCursor && brushCursorPos && (
-            <Circle
-              x={brushCursorPos.x}
-              y={brushCursorPos.y}
-              radius={brushSize}
-              fill={tool === 'eraser' ? '#ffffff' : activeColor}
-              opacity={tool === 'eraser' ? 0.2 : 0.25}
-              stroke={tool === 'eraser' ? '#e2e8f0' : activeColor}
-              strokeWidth={2 / transform.scaleX}
-              dash={
-                tool === 'eraser'
-                  ? [5 / transform.scaleX, 4 / transform.scaleX]
-                  : undefined
-              }
-              perfectDrawEnabled={false}
-            />
-          )}
+        {/* Layer 3: in-progress brush stroke (imperatively updated, no React re-renders per move) */}
+        <Layer ref={draftStrokeLayerRef} listening={false} opacity={fillOpacity}>
+          <Line
+            ref={draftLineRef}
+            points={[]}
+            visible={false}
+            lineCap="round"
+            lineJoin="round"
+            perfectDrawEnabled={false}
+            listening={false}
+          />
+        </Layer>
+
+        {/* Layer 4: brush/eraser size cursor preview (position updated imperatively) */}
+        <Layer ref={brushCursorLayerRef} listening={false}>
+          <Circle
+            ref={brushCursorRef}
+            radius={brushSize}
+            visible={false}
+            fill={tool === 'eraser' ? '#ffffff' : activeColor}
+            opacity={tool === 'eraser' ? 0.2 : 0.25}
+            stroke={tool === 'eraser' ? '#e2e8f0' : activeColor}
+            strokeWidth={2 / transform.scaleX}
+            dash={
+              tool === 'eraser'
+                ? [5 / transform.scaleX, 4 / transform.scaleX]
+                : undefined
+            }
+            perfectDrawEnabled={false}
+          />
         </Layer>
       </Stage>
 

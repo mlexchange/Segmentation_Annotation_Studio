@@ -1,20 +1,37 @@
 /**
  * ClassManager — add/edit/delete/hide annotation classes.
  * Color and label deduplication enforced.
+ * Deleting a class removes all of its annotations (with confirmation).
  */
 import { useState } from 'react';
 import { Eye, EyeSlash, Pencil, Trash, Plus } from '@phosphor-icons/react';
 import { useClassStore, DEFAULT_COLORS, type AnnotationClass } from '@/stores/classStore';
+import { useAnnotationStore } from '@/stores/annotationStore';
+import { useToolStore } from '@/stores/toolStore';
 import { cn } from '@/lib/utils';
+
+function countShapesForClass(classId: number): number {
+  const { byImage } = useAnnotationStore.getState();
+  let total = 0;
+  for (const slices of Object.values(byImage)) {
+    for (const shapes of Object.values(slices)) {
+      total += shapes.filter((sh) => sh.classId === classId).length;
+    }
+  }
+  return total;
+}
 
 interface ClassRowProps {
   cls: AnnotationClass;
   isActive: boolean;
   onActivate: () => void;
+  onClassDeleted: (deletedClassId: number) => void;
 }
 
-function ClassRow({ cls, isActive, onActivate }: ClassRowProps) {
+function ClassRow({ cls, isActive, onActivate, onClassDeleted }: ClassRowProps) {
   const { updateClass, deleteClass, toggleVisibility } = useClassStore();
+  const removeShapesByClassId = useAnnotationStore((s) => s.removeShapesByClassId);
+  const setSelectedShapeId = useToolStore((s) => s.setSelectedShapeId);
   const [editing, setEditing] = useState(false);
   const [labelInput, setLabelInput] = useState(cls.label);
 
@@ -22,6 +39,27 @@ function ClassRow({ cls, isActive, onActivate }: ClassRowProps) {
     const trimmed = labelInput.trim();
     if (trimmed) updateClass(cls.classId, { label: trimmed });
     setEditing(false);
+  };
+
+  const handleDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const shapeCount = countShapesForClass(cls.classId);
+    const annotationNote =
+      shapeCount === 0
+        ? 'This class has no annotations.'
+        : shapeCount === 1
+          ? 'This will permanently delete 1 annotation.'
+          : `This will permanently delete ${shapeCount} annotations.`;
+
+    const confirmed = window.confirm(
+      `Do you really want to delete "${cls.label}" and its annotations?\n\n${annotationNote}`
+    );
+    if (!confirmed) return;
+
+    removeShapesByClassId(cls.classId);
+    deleteClass(cls.classId);
+    setSelectedShapeId(null);
+    onClassDeleted(cls.classId);
   };
 
   return (
@@ -65,14 +103,9 @@ function ClassRow({ cls, isActive, onActivate }: ClassRowProps) {
         <Pencil size={14} />
       </button>
       <button
-        aria-label="Delete class"
+        aria-label="Delete class and its annotations"
         className="p-0.5 hover:text-red-500"
-        onClick={(e) => {
-          e.stopPropagation();
-          if (window.confirm(`Delete class "${cls.label}"? Its shapes will be removed.`)) {
-            deleteClass(cls.classId);
-          }
-        }}
+        onClick={handleDelete}
       >
         <Trash size={14} />
       </button>
@@ -83,13 +116,24 @@ function ClassRow({ cls, isActive, onActivate }: ClassRowProps) {
 export interface ClassManagerProps {
   activeClassId: number | null;
   onActivate: (classId: number) => void;
+  onClassDeleted?: (deletedClassId: number) => void;
 }
 
-export default function ClassManager({ activeClassId, onActivate }: ClassManagerProps) {
+export default function ClassManager({ activeClassId, onActivate, onClassDeleted }: ClassManagerProps) {
   const { classes, addClass } = useClassStore();
   const [showAdd, setShowAdd] = useState(false);
   const [newLabel, setNewLabel] = useState('');
   const [newColor, setNewColor] = useState('');
+
+  const handleClassDeleted = (deletedClassId: number) => {
+    onClassDeleted?.(deletedClassId);
+    if (activeClassId === deletedClassId) {
+      const remaining = useClassStore.getState().classes;
+      if (remaining.length > 0) {
+        onActivate(remaining[0].classId);
+      }
+    }
+  };
 
   const nextColor = () => {
     const used = new Set(classes.map((c) => c.color));
@@ -162,6 +206,7 @@ export default function ClassManager({ activeClassId, onActivate }: ClassManager
             cls={cls}
             isActive={cls.classId === activeClassId}
             onActivate={() => onActivate(cls.classId)}
+            onClassDeleted={handleClassDeleted}
           />
         ))}
       </div>

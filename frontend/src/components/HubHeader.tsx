@@ -11,7 +11,7 @@ export type HubHeaderProps = {
 }
 export default function HubHeader({title="ALS COMPUTING HUB", logoUrl=alsLogo, className, titleClassName, onOpenTabSelector}: HubHeaderProps) {
     return (
-    <header className={cn("bg-white h-16 flex justify-between items-center", className)}>
+    <header className={cn("bg-sky-100 h-16 flex justify-between items-center", className)}>
         <div className="flex items-center space-x-6 ml-6">
             <img src={logoUrl} alt="ALS logo" className="h-10 aspect-square"/>
             <h1 className={cn("text-sky-950 text-2xl font-semibold", titleClassName)}>{title}</h1>

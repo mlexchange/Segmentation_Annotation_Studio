@@ -34,7 +34,7 @@ import images as images_mod
 import local_fs
 from browse_helpers import FieldMapping, build_field_mapping, tiled_distinct_values, tiled_search_items, _STUDIO_RAW_KEYS
 from cache import TTLCache
-from schemas import DraftPayload, ExportRequest, ExportSourceItem, ImageMeta, RenderOpts
+from schemas import DraftPayload, ExportRequest, ExportSourceItem, ImageMeta, RenderOpts, SaveVersionRequest
 from thumbnails import render_thumbnail
 from tiled_clients import api_key_for_uri, get_browse_container, get_tiled_client
 from tiled_config import get_tiled_api_key, get_tiled_servers
@@ -515,14 +515,102 @@ async def put_draft(
     source_key: str = Query(...),
     payload: DraftPayload = ...,
 ) -> dict:
-    """Persist a session draft for source_key and sync summary metadata to Tiled."""
+    """Persist a crash-recovery draft for source_key (autosave only).
+
+    Does NOT sync to Tiled — use POST /api/annotations/save for that.
+    """
+    body = payload.model_dump()
+    return await asyncio.to_thread(drafts_mod.save_draft, source_key, body)
+
+
+@app.get("/api/annotations/drafts")
+async def list_drafts_route() -> list[dict]:
+    """List all saved drafts with summary metadata."""
+    return await asyncio.to_thread(drafts_mod.list_drafts)
+
+
+@app.post("/api/annotations/preview-thumbnail")
+async def preview_annotation_thumbnail(
+    source_key: str = Query(...),
+    payload: DraftPayload = ...,
+) -> Response:
+    """Render a PNG preview of the annotated thumbnail without saving a version."""
+    def _run() -> bytes:
+        import annotation_thumbnails
+        png = annotation_thumbnails.render_annotated_thumbnail(source_key, payload.model_dump())
+        if not png:
+            raise HTTPException(500, "Could not render preview thumbnail")
+        return png
+
+    try:
+        png_bytes = await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Preview thumbnail failed for %s: %s", source_key, exc)
+        raise HTTPException(500, "Preview thumbnail failed") from exc
+
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/annotations/save")
+async def save_annotation_version(
+    source_key: str = Query(...),
+    body: SaveVersionRequest = ...,
+) -> dict:
+    """Create a new immutable version, generate an annotated thumbnail, and sync
+    summary metadata to Tiled.
+
+    Returns the new version number, timestamp, shape count, and whether a
+    thumbnail was generated.
+    """
     def _run() -> dict:
-        body = payload.model_dump()
-        result = drafts_mod.save_draft(source_key, body)
+        import annotation_thumbnails
+        import threading
+
+        payload = body.payload.model_dump()
+        # Persist version JSON first so the critical data lands quickly.
+        result = drafts_mod.save_version(
+            source_key,
+            payload,
+            annotated_by=body.annotated_by,
+            notes=body.notes,
+        )
+        version = result["version"]
+        saved_at = result["saved_at"]
+
+        # Thumbnail: reuse the modal preview when provided (avoids a second render).
+        has_thumbnail = False
+        png: bytes | None = None
+        if body.thumbnail_base64:
+            png = annotation_thumbnails.decode_thumbnail_base64(body.thumbnail_base64)
+        if not png:
+            try:
+                png = annotation_thumbnails.render_annotated_thumbnail(source_key, payload)
+            except Exception as exc:
+                logger.warning("Thumbnail generation failed for %s v%d: %s", source_key, version, exc)
+
+        if png:
+            try:
+                drafts_mod.save_version_thumbnail(source_key, version, png)
+                has_thumbnail = True
+                # Tiled upload is slow — run in background, don't block the save response.
+                threading.Thread(
+                    target=annotation_thumbnails.upload_thumbnail_to_tiled,
+                    args=(source_key, version, saved_at, png),
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                logger.warning("Thumbnail persist failed for %s v%d: %s", source_key, version, exc)
+        result["has_thumbnail"] = has_thumbnail
+
         try:
             import tiled_annotation_sync
-            tiled_annotation_sync.sync_annotation_metadata(source_key, body)
-            # Bust browse caches so new metadata facets appear promptly.
+            tiled_annotation_sync.sync_annotation_metadata(source_key, payload)
             _field_mapping_cache.clear()
             _column_cache.clear()
             _items_cache.clear()
@@ -533,10 +621,32 @@ async def put_draft(
     return await asyncio.to_thread(_run)
 
 
-@app.get("/api/annotations/drafts")
-async def list_drafts_route() -> list[dict]:
-    """List all saved drafts with summary metadata."""
-    return await asyncio.to_thread(drafts_mod.list_drafts)
+@app.get("/api/annotations/versions/{version}/thumbnail")
+async def get_version_thumbnail(version: int, source_key: str = Query(...)) -> Response:
+    """Return the annotated PNG thumbnail for a specific version, or 404."""
+    png = await asyncio.to_thread(drafts_mod.get_version_thumbnail, source_key, version)
+    if png is None:
+        raise HTTPException(404, "No thumbnail for this version")
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/api/annotations/versions")
+async def list_versions_route(source_key: str = Query(...)) -> list[dict]:
+    """List saved versions (metadata only, no payload) oldest-first."""
+    return await asyncio.to_thread(drafts_mod.list_versions, source_key)
+
+
+@app.get("/api/annotations/versions/{version}")
+async def get_version_route(version: int, source_key: str = Query(...)) -> dict:
+    """Return the full payload for a specific version number."""
+    doc = await asyncio.to_thread(drafts_mod.get_version, source_key, version)
+    if doc is None:
+        raise HTTPException(404, f"Version {version} not found for this source")
+    return doc
 
 
 @app.post("/api/export/coco")

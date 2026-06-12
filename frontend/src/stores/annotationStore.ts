@@ -55,6 +55,8 @@ export interface AnnotationState {
 
   addShape: (sourceKey: string, sliceIdx: number, shape: Shape) => void;
   removeShape: (sourceKey: string, sliceIdx: number, shapeId: string) => void;
+  /** Remove every shape with *classId* across all loaded samples (all slices). */
+  removeShapesByClassId: (classId: number) => void;
   appendBrushStroke: (sourceKey: string, sliceIdx: number, shapeId: string, stroke: BrushStroke) => void;
   setShapes: (sourceKey: string, sliceIdx: number, shapes: Shape[]) => void;
   setSplitForSlice: (sourceKey: string, sliceIdx: number, split: Split | 'auto') => void;
@@ -101,6 +103,24 @@ export const useAnnotationStore = create<AnnotationState>()(
               },
             },
           };
+        }),
+
+      removeShapesByClassId: (classId) =>
+        set((s) => {
+          const nextByImage: Record<string, Record<string, Shape[]>> = {};
+          for (const [sourceKey, slices] of Object.entries(s.byImage)) {
+            const nextSlices: Record<string, Shape[]> = {};
+            for (const [sliceKey, shapes] of Object.entries(slices)) {
+              const filtered = shapes.filter((sh) => sh.classId !== classId);
+              if (filtered.length > 0) {
+                nextSlices[sliceKey] = filtered;
+              }
+            }
+            if (Object.keys(nextSlices).length > 0) {
+              nextByImage[sourceKey] = nextSlices;
+            }
+          }
+          return { byImage: nextByImage };
         }),
 
       appendBrushStroke: (sourceKey, sliceIdx, shapeId, stroke) =>

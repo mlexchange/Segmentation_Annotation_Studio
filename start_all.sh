@@ -18,7 +18,6 @@ BACKEND_PID_FILE="$RUN_DIR/backend.pid"
 FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
 ENV_DIR=""
 ENV_KIND=""
-CONDA_ENV_DIR="$SCRIPT_DIR/.conda-py312"
 REQUIRED_PYTHON_MAJOR=3
 REQUIRED_PYTHON_MINOR=12
 
@@ -29,26 +28,7 @@ CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-BOOTSTRAP_PYTHON=""
-CONDA_MANAGER=""
 NPM_CMD=()
-
-python_matches_required() {
-  local python_bin="$1"
-  "$python_bin" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (${REQUIRED_PYTHON_MAJOR}, ${REQUIRED_PYTHON_MINOR}) else 1)"
-}
-
-find_conda_manager() {
-  if command -v micromamba >/dev/null 2>&1; then
-    CONDA_MANAGER="$(command -v micromamba)"
-  elif command -v mamba >/dev/null 2>&1; then
-    CONDA_MANAGER="$(command -v mamba)"
-  elif command -v conda >/dev/null 2>&1; then
-    CONDA_MANAGER="$(command -v conda)"
-  else
-    CONDA_MANAGER=""
-  fi
-}
 
 port_is_listening() {
   local port="$1"
@@ -216,78 +196,32 @@ can_run_npm() {
   "$npm_bin" --version >/dev/null 2>&1
 }
 
-select_bootstrap_python() {
-  if [ -n "${PYTHON:-}" ]; then
-    BOOTSTRAP_PYTHON="$PYTHON"
-  elif command -v python3.12 >/dev/null 2>&1; then
-    BOOTSTRAP_PYTHON="$(command -v python3.12)"
-  elif command -v python3 >/dev/null 2>&1; then
-    BOOTSTRAP_PYTHON="$(command -v python3)"
-  elif command -v python >/dev/null 2>&1; then
-    BOOTSTRAP_PYTHON="$(command -v python)"
-  else
-    echo -e "${RED}Error: Python ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} is required but no Python interpreter was found.${NC}"
+ensure_uv() {
+  if ! command -v uv >/dev/null 2>&1; then
+    echo -e "${RED}Error: uv is not installed.${NC}"
+    echo -e "${RED}Install with: curl -LsSf https://astral.sh/uv/install.sh | sh${NC}"
+    echo -e "${RED}Then open a new shell (or run: source \$HOME/.local/bin/env) and retry.${NC}"
     exit 1
   fi
-
-  if ! python_matches_required "$BOOTSTRAP_PYTHON"; then
-    echo -e "${RED}Error: Python ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} is required for the venv fallback because newer interpreters currently miss some binary wheels.${NC}"
-    echo -e "${RED}Install python3.12, use micromamba/mamba/conda, or set PYTHON=/path/to/python3.12.${NC}"
-    exit 1
-  fi
-}
-
-ensure_python_version() {
-  local python_bin="$1"
-  local env_label="$2"
-  if ! python_matches_required "$python_bin"; then
-    echo -e "${RED}Error: existing ${env_label} at $ENV_DIR uses $("$python_bin" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")') but ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} is required.${NC}"
-    echo -e "${RED}Remove $ENV_DIR and rerun, or let the script create a new managed environment.${NC}"
-    exit 1
-  fi
-}
-
-create_conda_env() {
-  ENV_DIR="$CONDA_ENV_DIR"
-  ENV_KIND="conda"
-  echo -e "${YELLOW}    Creating project conda environment at $ENV_DIR with $(basename "$CONDA_MANAGER")${NC}"
-  "$CONDA_MANAGER" create -y -p "$ENV_DIR" "python=${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}" pip
-}
-
-create_venv_env() {
-  select_bootstrap_python
-  ENV_DIR="$SCRIPT_DIR/.venv"
-  ENV_KIND="venv"
-  echo -e "${YELLOW}    Creating project virtualenv at $ENV_DIR${NC}"
-  "$BOOTSTRAP_PYTHON" -m venv "$ENV_DIR"
 }
 
 ensure_backend_env() {
-  find_conda_manager
+  ensure_uv
 
-  if [ -x "$CONDA_ENV_DIR/bin/python" ]; then
-    ENV_DIR="$CONDA_ENV_DIR"
-    ENV_KIND="conda"
-  elif [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
-    ENV_DIR="$SCRIPT_DIR/.venv"
-    ENV_KIND="venv"
-  elif [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
-    ENV_DIR="$BACKEND_DIR/.venv"
-    ENV_KIND="venv"
-  elif [ -n "$CONDA_MANAGER" ]; then
-    create_conda_env
-  else
-    create_venv_env
+  ENV_DIR="$SCRIPT_DIR/.venv"
+  ENV_KIND="venv"
+
+  if [ ! -x "$ENV_DIR/bin/python" ]; then
+    echo -e "${YELLOW}    Creating .venv with Python ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} via uv...${NC}"
+    uv venv --python "${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}" "$ENV_DIR"
   fi
 
   PYTHON="$ENV_DIR/bin/python"
   export PATH="$ENV_DIR/bin:$PATH"
-  ensure_python_version "$PYTHON" "$ENV_KIND environment"
-  PIP_CMD=("$PYTHON" -m pip)
 
   if ! "$PYTHON" -c "import tiled, uvicorn" >/dev/null 2>&1; then
-    echo -e "${YELLOW}    Installing backend dependencies into $ENV_DIR${NC}"
-    "${PIP_CMD[@]}" install \
+    echo -e "${YELLOW}    Installing backend dependencies via uv...${NC}"
+    uv pip install --python "$PYTHON" \
       "fastapi>=0.115" "uvicorn[standard]>=0.30" "tiled[all]>=0.1" \
       "numpy>=1.26" "pillow>=10.3" "python-dotenv>=1.0" "matplotlib>=3.8" \
       "pycocotools>=2.0.7" "scikit-image>=0.22" "tifffile>=2024.0" "imagecodecs"
@@ -295,27 +229,13 @@ ensure_backend_env() {
 }
 
 ensure_frontend_runtime() {
-  if [ -x "$ENV_DIR/bin/npm" ] && can_run_npm "$ENV_DIR/bin/npm"; then
-    NPM_CMD=("$ENV_DIR/bin/npm")
-    return
-  fi
-
   if command -v npm >/dev/null 2>&1 && can_run_npm "$(command -v npm)"; then
     NPM_CMD=("$(command -v npm)")
     return
   fi
 
-  if [ "$ENV_KIND" = "conda" ] && [ -n "$CONDA_MANAGER" ]; then
-    echo -e "${YELLOW}    Installing Node.js/npm into $ENV_DIR with $(basename "$CONDA_MANAGER")${NC}"
-    "$CONDA_MANAGER" install -y -p "$ENV_DIR" "nodejs>=18"
-    if [ -x "$ENV_DIR/bin/npm" ] && can_run_npm "$ENV_DIR/bin/npm"; then
-      NPM_CMD=("$ENV_DIR/bin/npm")
-      return
-    fi
-  fi
-
-  echo -e "${RED}Error: a working npm/node runtime was not found.${NC}"
-  echo -e "${RED}Install Node.js 18+ or rerun with micromamba/mamba/conda available so the script can provision it.${NC}"
+  echo -e "${RED}Error: npm / Node.js 18+ was not found on PATH.${NC}"
+  echo -e "${RED}Install Node.js from https://nodejs.org or via your package manager, then retry.${NC}"
   exit 1
 }
 

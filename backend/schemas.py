@@ -224,6 +224,22 @@ class DraftPayload(BaseModel):
     negative_slices: list[str] = Field(default_factory=list)
 
 
+class SaveVersionRequest(BaseModel):
+    """Explicit save request with optional version metadata.
+
+    Attributes:
+        payload: Current annotation session state.
+        annotated_by: Name or identifier of the person who annotated.
+        notes: Free-text notes for this version.
+        thumbnail_base64: Optional PNG from the save-modal preview (skips re-render).
+    """
+
+    payload: DraftPayload
+    annotated_by: str = ""
+    notes: str = ""
+    thumbnail_base64: str | None = None
+
+
 class ImageMeta(BaseModel):
     """Shape and dtype metadata for an opened image source.
 
