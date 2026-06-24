@@ -345,8 +345,14 @@ async def connect_summary(
         def _count() -> int:
             client = get_tiled_client(server_uri)
             container, _ = get_browse_container(client)
-            result = tiled_search_items(container, filters={}, limit=10_000)
-            return int(result.get("total", 0))
+            # An unfiltered count is just the container size — a single request.
+            # Avoid iterating every child and building per-item metadata dicts,
+            # which is O(N) HTTP round trips and stalls the connect UI.
+            try:
+                return int(len(container))
+            except Exception:
+                result = tiled_search_items(container, filters={}, limit=10_000)
+                return int(result.get("total", 0))
 
         try:
             count = await asyncio.to_thread(_count)

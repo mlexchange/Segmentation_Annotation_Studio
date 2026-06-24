@@ -29,19 +29,33 @@ def repair(dry_run: bool = False) -> int:
 
     conn = sqlite3.connect(str(CATALOG_DB))
     c = conn.cursor()
+
+    # Only repair managed assets (those stored under .tiled/data/).
+    # External assets (management='external') live at user-supplied paths and
+    # should never be rewritten here — they're intentionally outside the repo.
+    managed_asset_ids: set[int] = set(
+        row[0]
+        for row in c.execute(
+            """
+            SELECT DISTINCT a.id
+            FROM assets a
+            JOIN data_source_asset_association dsaa ON dsaa.asset_id = a.id
+            JOIN data_sources ds ON ds.id = dsaa.data_source_id
+            WHERE ds.management != 'external'
+            """
+        ).fetchall()
+    )
+
     rows = c.execute("SELECT id, data_uri FROM assets").fetchall()
 
     updated = 0
     for row_id, uri in rows:
+        if row_id not in managed_asset_ids:
+            continue  # external asset — leave it alone
         if not uri.startswith("file://localhost"):
             continue
         # Extract the path portion after the scheme+host
         file_path = Path(uri[len("file://localhost"):])
-        # The part we care about is everything from .tiled/data/ onward
-        try:
-            rel = file_path.relative_to(file_path.parts[0] + "/.tiled/data" if False else "")
-        except ValueError:
-            rel = None
 
         # Find .tiled/data/ anchor anywhere in the path
         parts = file_path.parts
@@ -52,7 +66,7 @@ def repair(dry_run: bool = False) -> int:
             )
             rel_parts = parts[idx + 1:]
         except StopIteration:
-            print(f"  [{row_id}] cannot parse URI, skipping: {uri}")
+            print(f"  [{row_id}] cannot parse managed URI, skipping: {uri}")
             continue
 
         new_path = DATA_DIR.joinpath(*rel_parts)

@@ -398,7 +398,9 @@ def _typed_query_value(raw: str) -> Any:
     except (ValueError, TypeError):
         pass
     try:
-        return float(raw)
+        fv = float(raw)
+        if str(fv) == raw:
+            return fv
     except (ValueError, TypeError):
         pass
     return raw

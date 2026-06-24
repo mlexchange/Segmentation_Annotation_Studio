@@ -7,6 +7,7 @@ two servers, so a tiny unbounded dict is fine.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from tiled_config import get_tiled_api_key, get_tiled_base, get_tiled_servers
@@ -59,9 +60,21 @@ _BROWSE_CANDIDATES: tuple[tuple[tuple[str, ...], str], ...] = (
 def get_browse_container(client: Any) -> tuple[Any, str]:
     """Return ``(container_node, path_prefix)`` for the Metadata Browser root.
 
-    Walks known beamline-ish paths in priority order and returns the first
-    container that exists and is non-empty. Falls back to the client's root.
+    Checks ``TILED_BROWSE_PATH`` env var first (slash-separated path into the
+    Tiled tree, e.g. ``20260221_135217_petiole22_``). Then walks known
+    beamline-ish paths in priority order. Falls back to the client's root.
     """
+    browse_path = (os.getenv("TILED_BROWSE_PATH") or "").strip().strip("/")
+    if browse_path:
+        try:
+            node: Any = client
+            for k in browse_path.split("/"):
+                node = node[k]
+            if len(node) > 0:
+                return node, browse_path
+        except (KeyError, TypeError):
+            pass
+
     for keys, prefix in _BROWSE_CANDIDATES:
         try:
             node: Any = client

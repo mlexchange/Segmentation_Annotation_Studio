@@ -2,6 +2,13 @@
 # start_all.sh — Start Tiled, Browse backend, and frontend together.
 # Usage: ./start_all.sh
 # Stop everything: Ctrl+C
+#
+# NOTE: Tiled runs as a PUBLIC server (anonymous read+write). No API key is
+# used. Auth posture is declared in tiled/config.yml via:
+#   authentication:
+#     allow_anonymous_access: true
+# Server binds to 127.0.0.1 (local-only). Do NOT change --host to 0.0.0.0
+# without reconsidering anonymous write access.
 
 set -e
 
@@ -285,23 +292,12 @@ set -a
 source "$BACKEND_DIR/.env"
 set +a
 
-# Generate a stable API key if TILED_API_KEY is empty or missing
-if [ -z "${TILED_API_KEY:-}" ]; then
-  TILED_API_KEY=$("$PYTHON" -c "import secrets; print(secrets.token_hex(32))")
-  # Persist it back into .env so it survives restarts
-  if grep -q "^TILED_API_KEY=" "$BACKEND_DIR/.env"; then
-    sed -i.bak "s|^TILED_API_KEY=.*|TILED_API_KEY=${TILED_API_KEY}|" "$BACKEND_DIR/.env" && rm -f "$BACKEND_DIR/.env.bak"
-  else
-    echo "TILED_API_KEY=${TILED_API_KEY}" >> "$BACKEND_DIR/.env"
-  fi
-  echo -e "${YELLOW}    Generated new TILED_API_KEY and saved to backend/.env${NC}"
-fi
-export TILED_API_KEY
-
 # ---------------------------------------------------------------------------
-# Tiled (must match backend/tiled_config.py default: port 8010)
+# Tiled — PUBLIC server, anonymous read+write (no API key).
+# Auth posture lives in tiled/config.yml (allow_anonymous_access: true).
+# (must match backend/tiled_config.py default: port 8010)
 # ---------------------------------------------------------------------------
-echo -e "${CYAN}==> Starting Tiled (port ${TILED_PORT})...${NC}"
+echo -e "${CYAN}==> Starting Tiled (port ${TILED_PORT}, public / anonymous)...${NC}"
 
 # Repair catalog asset paths in case the repo was moved or cloned to a new location.
 "$PYTHON" "$SCRIPT_DIR/backend/scripts/repair_catalog_paths.py"
@@ -314,14 +310,14 @@ fi
 mkdir -p "$SCRIPT_DIR/.tiled"
 if [ ! -f "$SCRIPT_DIR/.tiled/catalog.db" ]; then
   echo -e "${YELLOW}    Initializing Tiled catalog (first run)...${NC}"
-  (cd "$SCRIPT_DIR" && TILED_SINGLE_USER_API_KEY="$TILED_API_KEY" tiled_cmd catalog init --if-not-exists \
+  (cd "$SCRIPT_DIR" && tiled_cmd catalog init --if-not-exists \
     "sqlite+aiosqlite:///./.tiled/catalog.db") || {
     echo -e "${RED}    Tiled catalog init failed. Install: pip install 'tiled[server]'${NC}"
     exit 1
   }
 fi
 
-(cd "$SCRIPT_DIR" && TILED_SINGLE_USER_API_KEY="$TILED_API_KEY" tiled_cmd serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT") &
+(cd "$SCRIPT_DIR" && tiled_cmd serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT") &
 TILED_PID=$!
 echo "$TILED_PID" > "$TILED_PID_FILE"
 echo -e "${GREEN}    Tiled PID: $TILED_PID${NC}"
@@ -400,7 +396,7 @@ echo -e "${GREEN}    Frontend PID: $FRONTEND_PID${NC}"
 echo ""
 echo -e "${GREEN}==========================================${NC}"
   echo -e "${GREEN}  SAM3 Annotation Studio is running!${NC}"
-echo -e "${GREEN}  Tiled    : http://127.0.0.1:${TILED_PORT}${NC}"
+echo -e "${GREEN}  Tiled    : http://127.0.0.1:${TILED_PORT} (public / anonymous)${NC}"
 echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
 echo -e "${GREEN}  Backend  : http://127.0.0.1:${BACKEND_PORT}${NC}"
 echo -e "${GREEN}  Press Ctrl+C to stop all servers.${NC}"
