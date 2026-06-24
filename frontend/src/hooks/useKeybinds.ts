@@ -17,6 +17,7 @@ import { useClassStore } from '@/stores/classStore';
 const TOOL_KEYBINDS: Record<string, Tool> = {
   s: 'select',
   a: 'polygon',
+  m: 'magnetic',
   e: 'rectangle',
   w: 'ellipse',
   b: 'brush',

@@ -119,6 +119,9 @@ export interface ClassManagerProps {
   onClassDeleted?: (deletedClassId: number) => void;
 }
 
+/** Common segmentation classes offered as one-click chips. */
+const SUGGESTED_CLASSES = ['air', 'sample', 'void', 'pore', 'background', 'substrate'];
+
 export default function ClassManager({ activeClassId, onActivate, onClassDeleted }: ClassManagerProps) {
   const { classes, addClass } = useClassStore();
   const [showAdd, setShowAdd] = useState(false);
@@ -157,6 +160,18 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
     setShowAdd(false);
   };
 
+  /** One-click add (or re-activate) a suggested class. */
+  const handleQuickAdd = (label: string) => {
+    const existing = classes.find((c) => c.label.toLowerCase() === label.toLowerCase());
+    if (existing) { onActivate(existing.classId); return; }
+    const classId = addClass(label, nextColor());
+    onActivate(classId);
+  };
+
+  const suggestions = SUGGESTED_CLASSES.filter(
+    (label) => !classes.some((c) => c.label.toLowerCase() === label.toLowerCase()),
+  );
+
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between mb-1">
@@ -193,6 +208,23 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
             <button className="text-xs px-2 py-1 rounded hover:bg-gray-200" onClick={() => setShowAdd(false)}>Cancel</button>
             <button className="text-xs px-2 py-1 rounded bg-sky-600 text-white hover:bg-sky-700" onClick={handleAdd}>Add</button>
           </div>
+        </div>
+      )}
+
+      {suggestions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1 mb-1">
+          <span className="text-[10px] uppercase tracking-wide text-gray-400 mr-0.5">Quick add</span>
+          {suggestions.map((label) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => handleQuickAdd(label)}
+              className="flex items-center gap-0.5 text-xs px-1.5 py-0.5 rounded-full border border-gray-200 text-gray-600 hover:bg-sky-50 hover:border-sky-300 hover:text-sky-700 transition-colors"
+            >
+              <Plus size={10} />
+              {label}
+            </button>
+          ))}
         </div>
       )}
 

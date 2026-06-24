@@ -3,7 +3,7 @@
  * Keybinds: a=polygon, w=ellipse, e=rectangle, q=eraser, b=brush, s=select,
  *           Space=pan (hold), x=next slice, f=fit to screen, z=undo
  */
-import { Hand, Cursor, Polygon, Rectangle, Circle, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
+import { Hand, Cursor, Polygon, MagnetStraight, Rectangle, Circle, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
 import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
@@ -70,6 +70,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     { tool: 'pan',       label: 'Pan',     icon: <Hand size={18} />,        keybind: 'space' },
     { tool: 'select',    label: 'Select',  icon: <Cursor size={18} />,      keybind: 's' },
     { tool: 'polygon',   label: 'Polygon', icon: <Polygon size={18} />,     keybind: 'a' },
+    { tool: 'magnetic',  label: 'Magnetic',icon: <MagnetStraight size={18} />, keybind: 'm' },
     { tool: 'rectangle', label: 'Rect',    icon: <Rectangle size={18} />,   keybind: 'e' },
     { tool: 'ellipse',   label: 'Ellipse', icon: <Circle size={18} />,      keybind: 'w' },
     { tool: 'brush',     label: 'Brush',   icon: <PaintBucket size={18} />, keybind: 'b' },

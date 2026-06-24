@@ -13,10 +13,18 @@ export interface BrushStroke {
   mode: 'paint' | 'erase';
 }
 
+/** An erase carve-out applied to any vector shape (polygon/rect/ellipse). */
+export interface EraseStroke {
+  points: number[];
+  radius: number;
+}
+
 export interface BaseShape {
   id: string;
   classId: number;
   kind: Shape['kind'];
+  /** Optional erase carve-outs (rendered destination-out, subtracted on export). */
+  erased?: EraseStroke[];
 }
 
 export interface PolygonShape extends BaseShape {
@@ -55,9 +63,13 @@ export interface AnnotationState {
 
   addShape: (sourceKey: string, sliceIdx: number, shape: Shape) => void;
   removeShape: (sourceKey: string, sliceIdx: number, shapeId: string) => void;
+  /** Replace a single shape via an updater (used for move / vertex editing). */
+  updateShape: (sourceKey: string, sliceIdx: number, shapeId: string, updater: (shape: Shape) => Shape) => void;
   /** Remove every shape with *classId* across all loaded samples (all slices). */
   removeShapesByClassId: (classId: number) => void;
   appendBrushStroke: (sourceKey: string, sliceIdx: number, shapeId: string, stroke: BrushStroke) => void;
+  /** Append an erase carve-out to any shape (brush → erase stroke; vector → `erased`). */
+  appendEraseStroke: (sourceKey: string, sliceIdx: number, shapeId: string, stroke: EraseStroke) => void;
   setShapes: (sourceKey: string, sliceIdx: number, shapes: Shape[]) => void;
   setSplitForSlice: (sourceKey: string, sliceIdx: number, split: Split | 'auto') => void;
   toggleNegativeSlice: (sourceKey: string, sliceIdx: number) => void;
@@ -105,6 +117,21 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      updateShape: (sourceKey, sliceIdx, shapeId, updater) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: prev.map((sh) => (sh.id === shapeId ? updater(sh) : sh)),
+              },
+            },
+          };
+        }),
+
       removeShapesByClassId: (classId) =>
         set((s) => {
           const nextByImage: Record<string, Record<string, Shape[]>> = {};
@@ -137,6 +164,27 @@ export const useAnnotationStore = create<AnnotationState>()(
                     ? { ...sh, strokes: [...sh.strokes, stroke] }
                     : sh
                 ),
+              },
+            },
+          };
+        }),
+
+      appendEraseStroke: (sourceKey, sliceIdx, shapeId, stroke) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const shapes = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: shapes.map((sh) => {
+                  if (sh.id !== shapeId) return sh;
+                  if (sh.kind === 'brush') {
+                    return { ...sh, strokes: [...sh.strokes, { ...stroke, mode: 'erase' as const }] };
+                  }
+                  return { ...sh, erased: [...(sh.erased ?? []), stroke] };
+                }),
               },
             },
           };

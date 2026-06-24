@@ -15,13 +15,15 @@ import { useRef, useState, useEffect, useCallback } from 'react';
 import {
   Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Group, Circle,
 } from 'react-konva';
+import { Trash } from '@phosphor-icons/react';
 import type Konva from 'konva';
 import { v4 as uuidv4 } from 'uuid';
 import { useDatasetStore } from '@/stores/datasetStore';
-import { useAnnotationStore, type Shape, type BrushStroke } from '@/stores/annotationStore';
+import { useAnnotationStore, type Shape, type BrushStroke, type EraseStroke } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
 import { useClassStore, type AnnotationClass } from '@/stores/classStore';
 import { toImage, normalizeRect, normalizeEllipse } from '@/lib/geometry';
+import { buildCostMap, dijkstra, tracePath, imageToGrid, simplifyPath, type CostMap } from '@/lib/livewire';
 import { useImageSlice } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
 
@@ -35,6 +37,52 @@ interface AnnotationCanvasProps {
   previewShapes?: Shape[] | null;
   /** Class definitions used for preview shape colors (the version's own classes). */
   previewClasses?: AnnotationClass[] | null;
+}
+
+// ---- Point-in-shape hit testing (used by the eraser to pick a target) ----
+
+function pointInPolygon(px: number, py: number, pts: number[]): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 2; i < pts.length; j = i, i += 2) {
+    const xi = pts[i], yi = pts[i + 1];
+    const xj = pts[j], yj = pts[j + 1];
+    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * dx, cy = ay + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+
+function shapeContainsPoint(shape: Shape, x: number, y: number): boolean {
+  if (shape.kind === 'polygon') return pointInPolygon(x, y, shape.points);
+  if (shape.kind === 'rectangle') {
+    return x >= shape.x && x <= shape.x + shape.w && y >= shape.y && y <= shape.y + shape.h;
+  }
+  if (shape.kind === 'ellipse') {
+    const nx = (x - shape.cx) / (shape.rx || 1);
+    const ny = (y - shape.cy) / (shape.ry || 1);
+    return nx * nx + ny * ny <= 1;
+  }
+  if (shape.kind === 'brush') {
+    for (const st of shape.strokes) {
+      if (st.mode === 'erase') continue;
+      const p = st.points;
+      for (let i = 0; i + 3 < p.length; i += 2) {
+        if (distToSegment(x, y, p[i], p[i + 1], p[i + 2], p[i + 3]) <= st.radius) return true;
+      }
+      if (p.length >= 2 && distToSegment(x, y, p[0], p[1], p[0], p[1]) <= st.radius) return true;
+    }
+  }
+  return false;
 }
 
 export default function AnnotationCanvas({
@@ -64,13 +112,15 @@ export default function AnnotationCanvas({
     mode: 'paint' | 'erase';
     points: number[];
     radius: number;
+    /** For erase: whether the target is a brush shape or a vector shape. */
+    eraseTargetKind?: 'brush' | 'vector';
   } | null>(null);
 
   const { kind, source, serverUri, meta, currentSlice, renderOpts } = useDatasetStore();
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
-  const { byImage, addShape, appendBrushStroke } = useAnnotationStore();
+  const { byImage, addShape, appendBrushStroke, appendEraseStroke, updateShape, removeShape } = useAnnotationStore();
   const { tool, brushSize, fillOpacity, selectedShapeId, setSelectedShapeId } = useToolStore();
   const fitRequestId = useToolStore((s) => s.fitRequestId);
   const { classes } = useClassStore();
@@ -83,6 +133,17 @@ export default function AnnotationCanvas({
   // Draft rect/ellipse start
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(null);
+  // Live polygon vertex edit (select tool): { id, points } while dragging a handle.
+  const [editPoly, setEditPoly] = useState<{ id: string; points: number[] } | null>(null);
+
+  // Magnetic lasso (livewire) state. Committed = locked path; preview = live
+  // least-cost path from the current seed to the cursor.
+  const [magneticCommitted, setMagneticCommitted] = useState<number[]>([]);
+  const [magneticPreview, setMagneticPreview] = useState<number[]>([]);
+  const magneticCostRef = useRef<CostMap | null>(null);
+  const magneticBuiltForRef = useRef<HTMLImageElement | null>(null);
+  const magneticPrevRef = useRef<Int32Array | null>(null);
+  const magneticSeedRef = useRef<{ x: number; y: number } | null>(null);
   // True while a brush/eraser stroke is actively being drawn — suppresses the
   // (expensive) layer re-cache so we don't rebuild the shapes bitmap mid-stroke.
   const [isDrawing, setIsDrawing] = useState(false);
@@ -184,11 +245,35 @@ export default function AnnotationCanvas({
     return toImage(pos, transform);
   };
 
+  // Build (and cache, per rendered image) the live-wire edge cost map.
+  const ensureCostMap = (): CostMap | null => {
+    if (!imageEl || !meta) return null;
+    if (magneticCostRef.current && magneticBuiltForRef.current === imageEl) {
+      return magneticCostRef.current;
+    }
+    const cm = buildCostMap(imageEl, meta.width, meta.height);
+    magneticCostRef.current = cm;
+    magneticBuiltForRef.current = imageEl;
+    return cm;
+  };
+
+  const resetMagnetic = useCallback(() => {
+    magneticPrevRef.current = null;
+    magneticSeedRef.current = null;
+    setMagneticCommitted([]);
+    setMagneticPreview([]);
+  }, []);
+
+  // Abandon any in-progress magnetic trace when the tool or slice changes.
+  useEffect(() => {
+    resetMagnetic();
+  }, [tool, currentSlice, sourceKey, resetMagnetic]);
+
   /** Flush the buffered draft stroke to the Zustand store (one write per stroke). */
   const commitDraftStroke = () => {
     const draft = draftStrokeRef.current;
     if (!draft || !sourceKey) return;
-    const { shapeId, mode, points, radius } = draft;
+    const { shapeId, mode, points, radius, eraseTargetKind } = draft;
     draftStrokeRef.current = null;
 
     // Hide the draft line imperatively
@@ -200,17 +285,43 @@ export default function AnnotationCanvas({
     if (points.length < 2) return;
     // Duplicate single point so Konva renders it as a dot
     const finalPoints = points.length === 2 ? [...points, ...points] : points;
-    appendBrushStroke(sourceKey, currentSlice, shapeId, { points: finalPoints, radius, mode });
+    if (mode === 'erase' && eraseTargetKind === 'vector') {
+      appendEraseStroke(sourceKey, currentSlice, shapeId, { points: finalPoints, radius });
+    } else {
+      appendBrushStroke(sourceKey, currentSlice, shapeId, { points: finalPoints, radius, mode });
+    }
   };
 
   const handleStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     if (isPreviewing) return;
+
+    // Select tool: clicking empty canvas (the stage itself) clears the selection.
+    // Clicks on a shape are handled by that shape's own onClick (which selects it).
+    if (tool === 'select') {
+      if (e.target === e.target.getStage()) setSelectedShapeId(null);
+      return;
+    }
+
     if (!sourceKey || !meta || activeClassId === null) return;
     const pos = getPointerImagePos();
     if (!pos) return;
 
     if (tool === 'polygon') {
       setDraftPoly((prev) => [...prev, pos.x, pos.y]);
+    } else if (tool === 'magnetic') {
+      const cm = ensureCostMap();
+      if (cm && magneticSeedRef.current && magneticPrevRef.current) {
+        // Lock in the least-cost path from the previous seed to this click.
+        const path = tracePath(cm, magneticPrevRef.current, imageToGrid(cm, pos.x, pos.y));
+        setMagneticCommitted((prev) => [...prev, ...path.slice(2)]);
+      } else {
+        // First click (or no edge map) — straight-segment fallback.
+        setMagneticCommitted((prev) => [...prev, pos.x, pos.y]);
+      }
+      // Re-seed at the click point.
+      magneticSeedRef.current = pos;
+      magneticPrevRef.current = cm ? dijkstra(cm, imageToGrid(cm, pos.x, pos.y)) : null;
+      setMagneticPreview([]);
     } else if (tool === 'rectangle' || tool === 'ellipse') {
       setDragStart(pos);
       setDragCurrent(pos);
@@ -251,13 +362,28 @@ export default function AnnotationCanvas({
       }
     } else if (tool === 'eraser') {
       setIsDrawing(true);
-      const targetId =
-        activeBrushShapeId ??
-        shapes.filter((s) => s.kind === 'brush' && s.classId === activeClassId).slice(-1)[0]?.id ??
-        null;
-      if (targetId) {
-        draftStrokeRef.current = { shapeId: targetId, mode: 'erase', points: [pos.x, pos.y], radius: brushSize };
-        // Show a white dash to indicate erasing (destination-out not feasible in uncached layer)
+      const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
+      // Erase carves from the topmost shape under the cursor (any kind). Falls
+      // back to the active brush instance if the click isn't over a shape.
+      const visible = (s: Shape) =>
+        classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+      let target: Shape | undefined;
+      for (let i = sliceShapes.length - 1; i >= 0; i--) {
+        const s = sliceShapes[i];
+        if (visible(s) && shapeContainsPoint(s, pos.x, pos.y)) { target = s; break; }
+      }
+      if (!target && activeBrushShapeId) {
+        target = sliceShapes.find((s) => s.id === activeBrushShapeId && s.kind === 'brush');
+      }
+      if (target) {
+        draftStrokeRef.current = {
+          shapeId: target.id,
+          mode: 'erase',
+          points: [pos.x, pos.y],
+          radius: brushSize,
+          eraseTargetKind: target.kind === 'brush' ? 'brush' : 'vector',
+        };
+        // Show a white dash to indicate erasing.
         if (draftLineRef.current) {
           draftLineRef.current.stroke('#ffffff');
           draftLineRef.current.strokeWidth(brushSize * 2);
@@ -281,6 +407,18 @@ export default function AnnotationCanvas({
     }
 
     if (!sourceKey || !meta) return;
+
+    // Magnetic lasso: live least-cost path from the seed to the cursor.
+    if (tool === 'magnetic' && magneticSeedRef.current) {
+      const cm = magneticCostRef.current;
+      if (cm && magneticPrevRef.current) {
+        setMagneticPreview(tracePath(cm, magneticPrevRef.current, imageToGrid(cm, pos.x, pos.y)));
+      } else {
+        const seed = magneticSeedRef.current;
+        setMagneticPreview([seed.x, seed.y, pos.x, pos.y]);
+      }
+      return;
+    }
 
     if ((tool === 'rectangle' || tool === 'ellipse') && dragStart && e.evt.buttons === 1) {
       setDragCurrent(pos);
@@ -335,6 +473,19 @@ export default function AnnotationCanvas({
       const id = uuidv4();
       addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'polygon', points: draftPoly });
       setDraftPoly([]);
+    } else if (tool === 'magnetic' && sourceKey && activeClassId !== null) {
+      // Commit the final hovered segment, then close the traced polygon.
+      let pts = magneticCommitted;
+      const cm = magneticCostRef.current;
+      const pos = getPointerImagePos();
+      if (cm && magneticPrevRef.current && pos) {
+        pts = [...pts, ...tracePath(cm, magneticPrevRef.current, imageToGrid(cm, pos.x, pos.y)).slice(2)];
+      }
+      const simplified = simplifyPath(pts, 3);
+      if (simplified.length >= 6) {
+        addShape(sourceKey, currentSlice, { id: uuidv4(), classId: activeClassId, kind: 'polygon', points: simplified });
+      }
+      resetMagnetic();
     }
   };
 
@@ -413,6 +564,22 @@ export default function AnnotationCanvas({
     return null;
   };
 
+  /** Destination-out lines that carve erase strokes out of a vector shape. */
+  const renderErased = (erased?: EraseStroke[]) =>
+    (erased ?? []).map((st, i) => (
+      <Line
+        key={`erase-${i}`}
+        points={st.points}
+        stroke="black"
+        strokeWidth={st.radius * 2}
+        lineCap="round"
+        lineJoin="round"
+        globalCompositeOperation="destination-out"
+        perfectDrawEnabled={false}
+        listening={false}
+      />
+    ));
+
   const renderShape = (shape: Shape) => {
     const color =
       shape.id === activeBrushShapeId && activeClassId !== null
@@ -423,40 +590,43 @@ export default function AnnotationCanvas({
 
     if (shape.kind === 'polygon') {
       return (
-        <Line
-          key={shape.id}
-          points={shape.points}
-          closed
-          fill={color}
-          stroke={color}
-          strokeWidth={strokeW}
-          perfectDrawEnabled={false}
-          onClick={() => setSelectedShapeId(shape.id)}
-        />
+        <Group key={shape.id}>
+          <Line
+            points={shape.points}
+            closed
+            fill={color}
+            stroke={color}
+            strokeWidth={strokeW}
+            perfectDrawEnabled={false}
+          />
+          {renderErased(shape.erased)}
+        </Group>
       );
     }
     if (shape.kind === 'rectangle') {
       return (
-        <Rect
-          key={shape.id}
-          x={shape.x} y={shape.y} width={shape.w} height={shape.h}
-          fill={color}
-          stroke={color} strokeWidth={strokeW}
-          perfectDrawEnabled={false}
-          onClick={() => setSelectedShapeId(shape.id)}
-        />
+        <Group key={shape.id}>
+          <Rect
+            x={shape.x} y={shape.y} width={shape.w} height={shape.h}
+            fill={color}
+            stroke={color} strokeWidth={strokeW}
+            perfectDrawEnabled={false}
+          />
+          {renderErased(shape.erased)}
+        </Group>
       );
     }
     if (shape.kind === 'ellipse') {
       return (
-        <Ellipse
-          key={shape.id}
-          x={shape.cx} y={shape.cy} radiusX={shape.rx} radiusY={shape.ry}
-          fill={color}
-          stroke={color} strokeWidth={strokeW}
-          perfectDrawEnabled={false}
-          onClick={() => setSelectedShapeId(shape.id)}
-        />
+        <Group key={shape.id}>
+          <Ellipse
+            x={shape.cx} y={shape.cy} radiusX={shape.rx} radiusY={shape.ry}
+            fill={color}
+            stroke={color} strokeWidth={strokeW}
+            perfectDrawEnabled={false}
+          />
+          {renderErased(shape.erased)}
+        </Group>
       );
     }
     if (shape.kind === 'brush') {
@@ -497,11 +667,189 @@ export default function AnnotationCanvas({
     return null;
   };
 
+  // ----- Interactive selection / move / vertex-edit (select tool only) -----
+
+  const selectShape = (e: Konva.KonvaEventObject<MouseEvent>, id: string) => {
+    e.cancelBubble = true;
+    setSelectedShapeId(id);
+  };
+
+  /** Render a shape as an interactive, draggable hit target with a selection outline. */
+  const renderInteractive = (shape: Shape) => {
+    if (!sourceKey) return null;
+    const selected = shape.id === selectedShapeId;
+    const baseColor = colorForClass(shape.classId);
+    const outline = selected ? '#ffffff' : baseColor;
+    const sw = (selected ? 2.5 : 1.5) / transform.scaleX;
+    const dash = selected ? [6 / transform.scaleX, 4 / transform.scaleX] : undefined;
+    // Near-transparent fill still registers hit detection without obscuring Layer 1.
+    const hitFill = 'rgba(0,0,0,0.001)';
+    const handlers = {
+      onClick: (e: Konva.KonvaEventObject<MouseEvent>) => selectShape(e, shape.id),
+      onTap: (e: Konva.KonvaEventObject<MouseEvent>) => selectShape(e, shape.id),
+    };
+
+    if (shape.kind === 'polygon') {
+      const livePoints = editPoly?.id === shape.id ? editPoly.points : shape.points;
+      return (
+        <Group
+          key={shape.id}
+          draggable={selected}
+          {...handlers}
+          onDragEnd={(e) => {
+            // Only the Group itself moving = a whole-shape move; vertex-circle
+            // drags set their own target and are handled below.
+            if (e.target !== e.currentTarget) return;
+            const dx = e.target.x();
+            const dy = e.target.y();
+            e.target.position({ x: 0, y: 0 });
+            if (dx === 0 && dy === 0) return;
+            updateShape(sourceKey, currentSlice, shape.id, (s) =>
+              s.kind === 'polygon'
+                ? { ...s, points: s.points.map((v, i) => (i % 2 === 0 ? v + dx : v + dy)) }
+                : s,
+            );
+          }}
+        >
+          <Line
+            points={livePoints}
+            closed
+            fill={hitFill}
+            stroke={outline}
+            strokeWidth={sw}
+            dash={dash}
+          />
+          {selected &&
+            Array.from({ length: livePoints.length / 2 }, (_, vi) => (
+              <Circle
+                key={vi}
+                x={livePoints[vi * 2]}
+                y={livePoints[vi * 2 + 1]}
+                radius={5 / transform.scaleX}
+                fill="#ffffff"
+                stroke="#1e293b"
+                strokeWidth={1 / transform.scaleX}
+                draggable
+                onClick={(e) => { e.cancelBubble = true; }}
+                onDragMove={(e) => {
+                  const np = [...livePoints];
+                  np[vi * 2] = e.target.x();
+                  np[vi * 2 + 1] = e.target.y();
+                  setEditPoly({ id: shape.id, points: np });
+                }}
+                onDragEnd={(e) => {
+                  const np = [...livePoints];
+                  np[vi * 2] = e.target.x();
+                  np[vi * 2 + 1] = e.target.y();
+                  updateShape(sourceKey, currentSlice, shape.id, (s) =>
+                    s.kind === 'polygon' ? { ...s, points: np } : s,
+                  );
+                  setEditPoly(null);
+                }}
+              />
+            ))}
+        </Group>
+      );
+    }
+
+    if (shape.kind === 'rectangle') {
+      return (
+        <Rect
+          key={shape.id}
+          x={shape.x} y={shape.y} width={shape.w} height={shape.h}
+          fill={hitFill} stroke={outline} strokeWidth={sw} dash={dash}
+          draggable={selected}
+          {...handlers}
+          onDragEnd={(e) => {
+            const nx = e.target.x();
+            const ny = e.target.y();
+            updateShape(sourceKey, currentSlice, shape.id, (s) =>
+              s.kind === 'rectangle' ? { ...s, x: nx, y: ny } : s,
+            );
+          }}
+        />
+      );
+    }
+
+    if (shape.kind === 'ellipse') {
+      return (
+        <Ellipse
+          key={shape.id}
+          x={shape.cx} y={shape.cy} radiusX={shape.rx} radiusY={shape.ry}
+          fill={hitFill} stroke={outline} strokeWidth={sw} dash={dash}
+          draggable={selected}
+          {...handlers}
+          onDragEnd={(e) => {
+            const nx = e.target.x();
+            const ny = e.target.y();
+            updateShape(sourceKey, currentSlice, shape.id, (s) =>
+              s.kind === 'ellipse' ? { ...s, cx: nx, cy: ny } : s,
+            );
+          }}
+        />
+      );
+    }
+
+    if (shape.kind === 'brush') {
+      return (
+        <Group
+          key={shape.id}
+          draggable={selected}
+          {...handlers}
+          onDragEnd={(e) => {
+            const dx = e.target.x();
+            const dy = e.target.y();
+            e.target.position({ x: 0, y: 0 });
+            if (dx === 0 && dy === 0) return;
+            updateShape(sourceKey, currentSlice, shape.id, (s) =>
+              s.kind === 'brush'
+                ? {
+                    ...s,
+                    strokes: s.strokes.map((st) => ({
+                      ...st,
+                      points: st.points.map((v, i) => (i % 2 === 0 ? v + dx : v + dy)),
+                    })),
+                  }
+                : s,
+            );
+          }}
+        >
+          {shape.strokes.map((st, i) => (
+            <Line
+              key={i}
+              points={st.points}
+              stroke={selected ? outline : hitFill}
+              strokeWidth={selected ? sw : 1}
+              hitStrokeWidth={st.radius * 2}
+              dash={selected ? dash : undefined}
+              lineCap="round"
+              lineJoin="round"
+              perfectDrawEnabled={false}
+            />
+          ))}
+        </Group>
+      );
+    }
+    return null;
+  };
+
+  const showInteractive = tool === 'select' && !isPreviewing;
+  const selectedShape = sourceKey
+    ? storeShapes.find((s) => s.id === selectedShapeId) ?? null
+    : null;
+
+  const handleDeleteSelected = () => {
+    if (!sourceKey || !selectedShapeId) return;
+    removeShape(sourceKey, currentSlice, selectedShapeId);
+    setSelectedShapeId(null);
+    setEditPoly(null);
+  };
+
   return (
     <div
       ref={containerRef}
       className="relative w-full h-full bg-gray-900 overflow-hidden"
-      style={{ cursor: showBrushCursor ? 'none' : undefined }}
+      style={{ cursor: showBrushCursor ? 'none' : tool === 'magnetic' ? 'crosshair' : undefined }}
     >
       <Stage
         ref={stageRef}
@@ -544,6 +892,15 @@ export default function AnnotationCanvas({
             .map(renderShape)}
         </Layer>
 
+        {/* Interactive layer: hit targets for select/move/edit (select tool only). */}
+        {showInteractive && (
+          <Layer>
+            {storeShapes
+              .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
+              .map(renderInteractive)}
+          </Layer>
+        )}
+
         {/* Layer 2: draft polygon + drag preview */}
         <Layer opacity={fillOpacity}>
           {draftPoly.length >= 2 && (
@@ -570,6 +927,36 @@ export default function AnnotationCanvas({
             </>
           )}
           {renderDraftShape()}
+
+          {/* Magnetic lasso: committed path (solid) + live edge-traced preview (dashed) */}
+          {tool === 'magnetic' && magneticCommitted.length >= 2 && (
+            <Line
+              points={magneticCommitted}
+              stroke={activeColor}
+              strokeWidth={1.5 / transform.scaleX}
+              listening={false}
+              perfectDrawEnabled={false}
+            />
+          )}
+          {tool === 'magnetic' && magneticPreview.length >= 2 && (
+            <Line
+              points={magneticPreview}
+              stroke={activeColor}
+              strokeWidth={1.5 / transform.scaleX}
+              dash={[5 / transform.scaleX, 3 / transform.scaleX]}
+              listening={false}
+              perfectDrawEnabled={false}
+            />
+          )}
+          {tool === 'magnetic' && magneticSeedRef.current && (
+            <Circle
+              x={magneticSeedRef.current.x}
+              y={magneticSeedRef.current.y}
+              radius={4 / transform.scaleX}
+              fill={activeColor}
+              listening={false}
+            />
+          )}
         </Layer>
 
         {/* Layer 3: in-progress brush stroke (imperatively updated, no React re-renders per move) */}
@@ -604,6 +991,38 @@ export default function AnnotationCanvas({
           />
         </Layer>
       </Stage>
+
+      {/* Selection toolbar (select tool) */}
+      {showInteractive && selectedShape && (
+        <div className="absolute top-2 left-2 flex items-center gap-2 bg-slate-800/90 text-slate-100 text-xs px-3 py-1.5 rounded-md shadow-lg">
+          <span className="text-slate-300">
+            {selectedShape.kind === 'polygon'
+              ? 'Drag a vertex to edit, or drag the shape to move'
+              : 'Drag to move'}
+          </span>
+          <button
+            type="button"
+            onClick={handleDeleteSelected}
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white font-medium"
+            title="Delete selected (Del)"
+          >
+            <Trash size={13} />
+            Delete
+          </button>
+        </div>
+      )}
+
+      {showInteractive && !selectedShape && (
+        <div className="absolute top-2 left-2 bg-slate-800/80 text-slate-300 text-xs px-3 py-1.5 rounded-md pointer-events-none">
+          Click an annotation to select it
+        </div>
+      )}
+
+      {tool === 'magnetic' && !isPreviewing && (
+        <div className="absolute top-2 left-2 bg-slate-800/85 text-slate-200 text-xs px-3 py-1.5 rounded-md pointer-events-none">
+          Click along an edge to trace it · double-click to finish
+        </div>
+      )}
 
       {/* Zoom overlay */}
       <div className="absolute bottom-2 right-2 bg-black/50 text-white text-xs px-2 py-0.5 rounded pointer-events-none">

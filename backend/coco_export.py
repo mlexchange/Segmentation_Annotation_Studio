@@ -98,18 +98,33 @@ def _brush_mask(strokes: list[dict[str, Any]], h: int, w: int) -> np.ndarray:
     return mask
 
 
+def _apply_erased(mask: np.ndarray, erased: list[dict[str, Any]] | None) -> np.ndarray:
+    """Subtract erase carve-outs from a vector shape's mask (in-place-safe)."""
+    if not erased:
+        return mask
+    for stroke in erased:
+        stamp = np.zeros(mask.shape, dtype=bool)
+        _stamp_stroke(stamp, stroke["points"], stroke["radius"])
+        mask &= ~stamp
+    return mask
+
+
 def shape_to_mask(shape: dict[str, Any], h: int, w: int) -> np.ndarray:
     """Rasterize one Shape (image-pixel coords) to an (h, w) boolean mask."""
     kind = shape["kind"]
     if kind == "polygon":
-        return _polygon_mask(shape["points"], h, w)
-    if kind == "rectangle":
-        return _rect_mask(shape["x"], shape["y"], shape["w"], shape["h"], h, w)
-    if kind == "ellipse":
-        return _ellipse_mask(shape["cx"], shape["cy"], shape["rx"], shape["ry"], h, w)
-    if kind == "brush":
+        mask = _polygon_mask(shape["points"], h, w)
+    elif kind == "rectangle":
+        mask = _rect_mask(shape["x"], shape["y"], shape["w"], shape["h"], h, w)
+    elif kind == "ellipse":
+        mask = _ellipse_mask(shape["cx"], shape["cy"], shape["rx"], shape["ry"], h, w)
+    elif kind == "brush":
+        # Brush erase strokes are part of its own stroke list, not `erased`.
         return _brush_mask(shape["strokes"], h, w)
-    raise ValueError(f"Unknown shape kind: {kind!r}")
+    else:
+        raise ValueError(f"Unknown shape kind: {kind!r}")
+    # Vector shapes can carry eraser carve-outs applied after rasterization.
+    return _apply_erased(mask, shape.get("erased"))
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
  */
 import { create } from 'zustand';
 
-export type Tool = 'pan' | 'select' | 'polygon' | 'rectangle' | 'ellipse' | 'brush' | 'eraser';
+export type Tool = 'pan' | 'select' | 'polygon' | 'magnetic' | 'rectangle' | 'ellipse' | 'brush' | 'eraser';
 
 export interface ToolState {
   tool: Tool;
