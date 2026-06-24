@@ -80,7 +80,7 @@ function App() {
     <>
       <HubAppLayout
         routes={filteredRoutes}
-        headerTitle="SAM3 Annotation Studio"
+        headerTitle="Segmentation Annotation Tool"
       />
       <CustomizePages
         routes={allRoutes}

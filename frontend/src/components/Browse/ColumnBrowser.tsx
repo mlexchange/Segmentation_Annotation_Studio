@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowsClockwise, PencilSimple, Plus } from '@phosphor-icons/react';
+import { ArrowsClockwise, PencilSimple, Plus, Stack } from '@phosphor-icons/react';
 import BrowseColumn from './BrowseColumn';
 import BrowseDetailPanel from './BrowseDetailPanel';
 import ItemsColumn from './ItemsColumn';
@@ -21,6 +21,9 @@ interface ColumnBrowserProps {
 
 const DEFAULT_COLUMN_WIDTH = 220;
 const DEFAULT_ITEMS_WIDTH = 260;
+const DEFAULT_DETAIL_WIDTH = 340;
+const MIN_DETAIL_WIDTH = 280;
+const MAX_DETAIL_WIDTH = 900;
 const INITIAL_COLUMN_COUNT = 4;
 
 /** Studio facets are useful as filters but should not fill the initial column set. */
@@ -66,6 +69,7 @@ export default function ColumnBrowser({
 
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [itemsColumnWidth, setItemsColumnWidth] = useState(DEFAULT_ITEMS_WIDTH);
+  const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL_WIDTH);
   const [openStatus, setOpenStatus] = useState<string | null>(null);
 
   // Keep columnWidths in sync with the number of columns.
@@ -152,7 +156,7 @@ export default function ColumnBrowser({
 
   const activeFilterCount = Object.keys(activeFilters).length;
   const lastColumn = state.columns[state.columns.length - 1];
-  const showItems = state.columns.length > 0 && lastColumn?.selected !== null;
+  const showItems = state.showingAll || (state.columns.length > 0 && lastColumn?.selected !== null);
 
   return (
     <div className="flex flex-col h-full bg-slate-900 text-slate-200">
@@ -160,10 +164,12 @@ export default function ColumnBrowser({
         facetsLoading={state.facetsLoading}
         facetCount={state.facets.length}
         activeFilterCount={activeFilterCount}
+        showingAll={state.showingAll}
         selectedItem={state.selectedItem}
         onOpenInAnnotate={handleOpenInAnnotate}
         onRefresh={actions.refresh}
         onAddColumn={handleAddColumn}
+        onShowAll={actions.showAll}
         servers={servers}
         selectedServerUri={selectedServerUri}
         onServerChange={onServerChange}
@@ -188,12 +194,14 @@ export default function ColumnBrowser({
           ref={scrollRef}
           className="relative z-0 flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
         >
-          {state.columns.length === 0 && !state.facetsLoading && (
+          {state.columns.length === 0 && !state.showingAll && !state.facetsLoading && (
             <div className="flex items-center justify-center flex-1">
-              <p className="text-sm text-slate-500">
+              <p className="text-sm text-slate-500 text-center px-6">
                 {state.connectionStatus === 'disconnected'
                   ? 'Connect to a Tiled server to browse.'
-                  : 'Click "Add column" to start browsing.'}
+                  : state.facets.length === 0
+                    ? 'No metadata fields to filter by. Click "All samples" to view every dataset.'
+                    : 'Click "Add column" to filter, or "All samples" to view everything.'}
               </p>
             </div>
           )}
@@ -242,12 +250,23 @@ export default function ColumnBrowser({
         </div>
 
         {state.selectedItem && (
-          <DetailPanelSlot
-            item={state.selectedItem}
-            onClose={() => actions.selectItem(null)}
-            serverUri={serverUri}
-            onOpenInAnnotate={handleOpenInAnnotate}
-          />
+          <>
+            <ResizeDivider
+              key="resize-detail"
+              currentWidth={detailWidth}
+              onResize={setDetailWidth}
+              resizeRight
+              minWidth={MIN_DETAIL_WIDTH}
+              maxWidth={MAX_DETAIL_WIDTH}
+            />
+            <DetailPanelSlot
+              item={state.selectedItem}
+              width={detailWidth}
+              onClose={() => actions.selectItem(null)}
+              serverUri={serverUri}
+              onOpenInAnnotate={handleOpenInAnnotate}
+            />
+          </>
         )}
       </div>
     </div>
@@ -260,10 +279,12 @@ interface ToolbarProps {
   facetsLoading: boolean;
   facetCount: number;
   activeFilterCount: number;
+  showingAll: boolean;
   selectedItem: BrowseItem | null;
   onOpenInAnnotate: (item: BrowseItem) => void;
   onRefresh: () => void;
   onAddColumn: () => void;
+  onShowAll: () => void;
   servers: ServerInfo[];
   selectedServerUri: string;
   onServerChange: (uri: string) => void;
@@ -275,10 +296,12 @@ function Toolbar({
   facetsLoading,
   facetCount,
   activeFilterCount,
+  showingAll,
   selectedItem,
   onOpenInAnnotate,
   onRefresh,
   onAddColumn,
+  onShowAll,
   servers,
   selectedServerUri,
   onServerChange,
@@ -351,6 +374,19 @@ function Toolbar({
         </button>
         <button
           type="button"
+          onClick={onShowAll}
+          title="Show every sample without filtering"
+          className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium border transition-colors ${
+            showingAll
+              ? 'bg-slate-600 text-white border-slate-500'
+              : 'bg-slate-700 text-slate-200 border-slate-600 hover:bg-slate-600'
+          }`}
+        >
+          <Stack size={12} />
+          All samples
+        </button>
+        <button
+          type="button"
           onClick={onAddColumn}
           disabled={facetsLoading || facetCount === 0}
           className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-blue-700 text-white transition-colors disabled:opacity-40 hover:bg-blue-600"
@@ -367,16 +403,21 @@ function Toolbar({
 
 interface DetailPanelSlotProps {
   item: BrowseItem | null;
+  width: number;
   onClose: () => void;
   serverUri: string;
   onOpenInAnnotate: (item: BrowseItem) => void;
 }
 
-function DetailPanelSlot({ item, onClose, serverUri, onOpenInAnnotate }: DetailPanelSlotProps) {
+function DetailPanelSlot({ item, width, onClose, serverUri, onOpenInAnnotate }: DetailPanelSlotProps) {
   return (
-    <div className="relative z-10 flex h-full w-[min(360px,40vw)] min-w-[280px] max-w-[360px] shrink-0 flex-col border-l border-slate-700 bg-slate-900 shadow-[-4px_0_12px_rgba(0,0,0,0.25)]">
+    <div
+      className="relative z-10 flex h-full shrink-0 flex-col border-l border-slate-700 bg-slate-900 shadow-[-4px_0_12px_rgba(0,0,0,0.25)]"
+      style={{ width }}
+    >
       <BrowseDetailPanel
         item={item}
+        width={width}
         onClose={onClose}
         serverUri={serverUri}
         onOpenInAnnotate={() => onOpenInAnnotate(item)}

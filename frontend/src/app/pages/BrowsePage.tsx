@@ -78,28 +78,31 @@ export default function BrowsePage() {
         </button>
       </div>
 
-      {/* Main browser */}
-      {kind === 'tiled' && serverUri && (
-        <ColumnBrowser
-          key={`${serverUri}:${browseContainerPath ?? ''}`}
-          serverUri={serverUri}
-          containerPath={browseContainerPath}
-          servers={servers}
-          selectedServerUri={serverUri}
-          onServerChange={handleServerChange}
-          annotationFilter={annotationFilter}
-          onAnnotationFilterChange={setAnnotationFilter}
-        />
-      )}
-      {kind === 'local' && (
-        <LocalSampleBrowser
-          root={localRoot ?? ''}
-          rel={localRel ?? ''}
-          onOpenInAnnotate={openLocalFile}
-          annotationFilter={annotationFilter}
-          onAnnotationFilterChange={setAnnotationFilter}
-        />
-      )}
+      {/* Main browser — flex-1 so it fills the space under the banner and its
+          own internal scroll areas are bounded (otherwise the bottom is clipped). */}
+      <div className="flex-1 min-h-0">
+        {kind === 'tiled' && serverUri && (
+          <ColumnBrowser
+            key={`${serverUri}:${browseContainerPath ?? ''}`}
+            serverUri={serverUri}
+            containerPath={browseContainerPath}
+            servers={servers}
+            selectedServerUri={serverUri}
+            onServerChange={handleServerChange}
+            annotationFilter={annotationFilter}
+            onAnnotationFilterChange={setAnnotationFilter}
+          />
+        )}
+        {kind === 'local' && (
+          <LocalSampleBrowser
+            root={localRoot ?? ''}
+            rel={localRel ?? ''}
+            onOpenInAnnotate={openLocalFile}
+            annotationFilter={annotationFilter}
+            onAnnotationFilterChange={setAnnotationFilter}
+          />
+        )}
+      </div>
     </div>
   );
 }

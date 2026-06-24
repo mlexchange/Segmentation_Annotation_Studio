@@ -15,24 +15,28 @@ interface ToolButtonProps {
   icon: React.ReactNode;
   keybind?: string;
   activeTool: Tool;
+  disabled?: boolean;
   onSelect: (t: Tool) => void;
 }
 
-function ToolButton({ tool, label, icon, keybind, activeTool, onSelect }: ToolButtonProps) {
-  const isActive = tool === activeTool;
+function ToolButton({ tool, label, icon, keybind, activeTool, disabled, onSelect }: ToolButtonProps) {
+  const isActive = tool === activeTool && !disabled;
   return (
     <button
       role="radio"
       aria-checked={isActive}
       aria-label={`${label}${keybind ? ` (${keybind})` : ''}`}
       title={`${label}${keybind ? ` [${keybind.toUpperCase()}]` : ''}`}
+      disabled={disabled}
       onClick={() => onSelect(tool)}
       className={cn(
         'relative flex flex-col items-center justify-center gap-0.5 py-2 px-1 rounded-md text-xs w-full',
         'transition-colors border',
-        isActive
-          ? 'bg-sky-600 text-white border-sky-700'
-          : 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50 hover:border-sky-300'
+        disabled
+          ? 'bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed'
+          : isActive
+            ? 'bg-sky-600 text-white border-sky-700'
+            : 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50 hover:border-sky-300'
       )}
     >
       {icon}
@@ -51,7 +55,12 @@ function ToolButton({ tool, label, icon, keybind, activeTool, onSelect }: ToolBu
   );
 }
 
-export default function Toolbar() {
+interface ToolbarProps {
+  /** When true, drawing tools are greyed out (e.g. no class defined yet). */
+  disabled?: boolean;
+}
+
+export default function Toolbar({ disabled = false }: ToolbarProps) {
   const { tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity } = useToolStore();
   const { undo, redo } = useStore(useAnnotationStore.temporal);
   const canUndo = useStore(useAnnotationStore.temporal, (s) => s.pastStates.length > 0);
@@ -106,12 +115,18 @@ export default function Toolbar() {
       </div>
 
       <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">Tools</span>
+      {disabled && (
+        <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
+          Add a class above to start annotating.
+        </p>
+      )}
       <div role="radiogroup" aria-label="Drawing tools" className="grid grid-cols-2 gap-1">
         {tools.map((t) => (
           <ToolButton
             key={t.tool}
             {...t}
             activeTool={tool}
+            disabled={disabled}
             onSelect={setTool}
           />
         ))}

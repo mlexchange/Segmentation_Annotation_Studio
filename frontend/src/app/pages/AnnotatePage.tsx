@@ -152,7 +152,13 @@ export default function AnnotatePage() {
       <div className="flex h-full overflow-hidden">
         {/* Sidebar */}
         <div className="w-56 flex-shrink-0 border-r border-gray-200 bg-white overflow-y-auto p-3 flex flex-col gap-4">
-          <Toolbar />
+          <ClassManager
+            activeClassId={activeClassId}
+            onActivate={handleActivateClass}
+            onClassDeleted={handleClassDeleted}
+          />
+          <hr />
+          <Toolbar disabled={classes.length === 0} />
           <hr />
           <DisplayControls
             brightness={brightness}
@@ -160,12 +166,6 @@ export default function AnnotatePage() {
             onBrightnessChange={setBrightness}
             onContrastChange={setContrast}
             onReset={() => { setBrightness(0); setContrast(0); }}
-          />
-          <hr />
-          <ClassManager
-            activeClassId={activeClassId}
-            onActivate={handleActivateClass}
-            onClassDeleted={handleClassDeleted}
           />
           <hr />
           <SliceNavigator />

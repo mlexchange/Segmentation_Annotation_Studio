@@ -52,6 +52,8 @@ export interface BrowseState {
   facetsLoading: boolean;
   selectedItem: BrowseItem | null;
   connectionStatus: 'loading' | 'connected' | 'disconnected';
+  /** True when showing every sample (no column filters). */
+  showingAll: boolean;
 }
 
 const INITIAL_STATE: BrowseState = {
@@ -63,6 +65,7 @@ const INITIAL_STATE: BrowseState = {
   facetsLoading: true,
   selectedItem: null,
   connectionStatus: 'loading',
+  showingAll: false,
 };
 
 /** Build a filter dict from the first `upToIndex` selected column values. */
@@ -211,7 +214,7 @@ export function useBrowseData(
         const newCols = [...s.columns, newCol];
         const newIndex = newCols.length - 1;
         queueMicrotask(() => loadColumn(newIndex, field, buildFilters(newCols, newIndex)));
-        return { ...s, columns: newCols };
+        return { ...s, columns: newCols, showingAll: false, items: [], itemsTotal: 0 };
       });
     },
     [loadColumn],
@@ -279,8 +282,18 @@ export function useBrowseData(
     setState((s) => ({ ...s, selectedItem: item }));
   }, []);
 
+  /** Show every sample with no column filters (useful for metadata-less data). */
+  const showAll = useCallback(() => {
+    setState((s) => ({ ...s, columns: [], showingAll: true, selectedItem: null }));
+    void loadItems({});
+  }, [loadItems]);
+
   const refresh = useCallback(() => {
     const s = stateRef.current;
+    if (s.showingAll) {
+      loadItems({});
+      return;
+    }
     if (s.columns.length === 0) return;
     s.columns.forEach((col, i) => loadColumn(i, col.field, buildFilters(s.columns, i)));
     loadItems(buildFilters(s.columns, s.columns.length));
@@ -292,7 +305,7 @@ export function useBrowseData(
   // ------------------------------------------------------------------
   useEffect(() => {
     void loadFacets();
-    setState((s) => ({ ...s, columns: [], items: [], itemsTotal: 0, selectedItem: null }));
+    setState((s) => ({ ...s, columns: [], items: [], itemsTotal: 0, selectedItem: null, showingAll: false }));
     const interval = setInterval(() => {
       void loadFacets({ silent: true });
     }, FACETS_POLL_INTERVAL_MS);
@@ -300,8 +313,8 @@ export function useBrowseData(
   }, [loadFacets, serverUri, technique, serverApiKey, containerPath]);
 
   const actions = useMemo(
-    () => ({ addColumn, removeColumn, changeColumnField, selectValue, selectItem, refresh, loadFacets }),
-    [addColumn, removeColumn, changeColumnField, selectValue, selectItem, refresh, loadFacets],
+    () => ({ addColumn, removeColumn, changeColumnField, selectValue, selectItem, showAll, refresh, loadFacets }),
+    [addColumn, removeColumn, changeColumnField, selectValue, selectItem, showAll, refresh, loadFacets],
   );
 
   return { state, actions };
