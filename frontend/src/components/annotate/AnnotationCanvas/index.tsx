@@ -269,6 +269,22 @@ export default function AnnotationCanvas({
     resetMagnetic();
   }, [tool, currentSlice, sourceKey, resetMagnetic]);
 
+  // Escape cancels the entire in-progress shape (polygon vertices, magnetic
+  // trace, or rect/ellipse drag) without committing anything.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      setDraftPoly([]);
+      setDragStart(null);
+      setDragCurrent(null);
+      resetMagnetic();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [resetMagnetic]);
+
   /** Flush the buffered draft stroke to the Zustand store (one write per stroke). */
   const commitDraftStroke = () => {
     const draft = draftStrokeRef.current;
