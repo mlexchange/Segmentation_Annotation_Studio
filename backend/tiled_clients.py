@@ -85,3 +85,19 @@ def get_browse_container(client: Any) -> tuple[Any, str]:
         except (KeyError, TypeError):
             continue
     return client, ""
+
+
+def get_browse_container_for(client: Any, container_path: str | None) -> tuple[Any, str]:
+    """Return ``(container_node, path_prefix)`` for a specific browse target.
+
+    When *container_path* is given (slash-separated, e.g. ``browse/testset``),
+    navigate directly to that node. Otherwise fall back to the heuristic
+    discovery in :func:`get_browse_container`.
+    """
+    path = (container_path or "").strip().strip("/")
+    if not path:
+        return get_browse_container(client)
+    node: Any = client
+    for k in path.split("/"):
+        node = node[k]
+    return node, path

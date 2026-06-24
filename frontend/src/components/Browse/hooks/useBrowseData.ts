@@ -88,7 +88,12 @@ function buildUrl(
   return `${API_BASE}${path}?${qs.toString()}`;
 }
 
-export function useBrowseData(serverUri: string, technique: string, serverApiKey?: string) {
+export function useBrowseData(
+  serverUri: string,
+  technique: string,
+  serverApiKey?: string,
+  containerPath?: string | null,
+) {
   const [state, setState] = useState<BrowseState>(INITIAL_STATE);
 
   // Stable reference so `refresh` can read the latest columns without re-creating itself.
@@ -96,14 +101,14 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
   stateRef.current = state;
 
   // ---- server params wrapped in a stable ref so callbacks don't change identity ----
-  const paramsRef = useRef({ serverUri, technique, serverApiKey });
-  paramsRef.current = { serverUri, technique, serverApiKey };
+  const paramsRef = useRef({ serverUri, technique, serverApiKey, containerPath });
+  paramsRef.current = { serverUri, technique, serverApiKey, containerPath };
 
   // ------------------------------------------------------------------
   // API calls
   // ------------------------------------------------------------------
   const loadFacets = useCallback(async (options?: { silent?: boolean }) => {
-    const { serverUri: su, technique: tq, serverApiKey: sk } = paramsRef.current;
+    const { serverUri: su, technique: tq, serverApiKey: sk, containerPath: cp } = paramsRef.current;
     const silent = Boolean(options?.silent);
     if (!silent) {
       setState((s) => ({ ...s, facetsLoading: true }));
@@ -111,6 +116,7 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
     try {
       // 'All' can hit stale empty facet caches; force a refresh.
       const params: Record<string, string> = { technique: tq };
+      if (cp) params.container_path = cp;
       if (tq === 'All') params.refresh = 'true';
       const data = await fetchJson<{ facets?: string[] }>(buildUrl('/api/browse/facets', params, su, sk));
       setState((s) => ({
@@ -127,7 +133,7 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
 
   const loadColumn = useCallback(
     async (colIndex: number, field: string, filters: Record<string, string>) => {
-      const { serverUri: su, technique: tq, serverApiKey: sk } = paramsRef.current;
+      const { serverUri: su, technique: tq, serverApiKey: sk, containerPath: cp } = paramsRef.current;
       setState((s) => {
         if (!s.columns[colIndex]) return s;
         const cols = [...s.columns];
@@ -136,13 +142,14 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
       });
 
       try {
+        const columnParams: Record<string, string> = {
+          technique: tq,
+          field,
+          filters: JSON.stringify(filters),
+        };
+        if (cp) columnParams.container_path = cp;
         const data = await fetchJson<{ values?: BrowseValue[] }>(
-          buildUrl(
-            '/api/browse/column',
-            { technique: tq, field, filters: JSON.stringify(filters) },
-            su,
-            sk,
-          ),
+          buildUrl('/api/browse/column', columnParams, su, sk),
         );
         setState((s) => {
           if (!s.columns[colIndex] || s.columns[colIndex].field !== field) return s;
@@ -164,7 +171,7 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
   );
 
   const loadItems = useCallback(async (filters: Record<string, string>) => {
-    const { serverUri: su, technique: tq, serverApiKey: sk } = paramsRef.current;
+    const { serverUri: su, technique: tq, serverApiKey: sk, containerPath: cp } = paramsRef.current;
     setState((s) => ({ ...s, itemsLoading: true }));
     try {
       // Array-level filters (e.g. `angle_id`) need a backend refresh so the
@@ -176,6 +183,7 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
         technique: tq,
         filters: JSON.stringify(filters),
       };
+      if (cp) params.container_path = cp;
       if (shouldRefresh) params.refresh = 'true';
 
       const data = await fetchJson<{ items?: BrowseItem[]; total?: number }>(
@@ -289,7 +297,7 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
       void loadFacets({ silent: true });
     }, FACETS_POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [loadFacets, serverUri, technique, serverApiKey]);
+  }, [loadFacets, serverUri, technique, serverApiKey, containerPath]);
 
   const actions = useMemo(
     () => ({ addColumn, removeColumn, changeColumnField, selectValue, selectItem, refresh, loadFacets }),

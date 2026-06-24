@@ -20,23 +20,39 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import arrays as arrays_mod
 import drafts as drafts_mod
 import images as images_mod
+import ingest as ingest_mod
 import local_fs
-from browse_helpers import FieldMapping, build_field_mapping, tiled_distinct_values, tiled_search_items, _STUDIO_RAW_KEYS
+from browse_helpers import (
+    FieldMapping,
+    build_field_mapping,
+    distinct_from_rows,
+    scoped_metadata_rows,
+    tiled_distinct_values,
+    tiled_search_items,
+    _STUDIO_RAW_KEYS,
+)
 from cache import TTLCache
 from schemas import DraftPayload, ExportRequest, ExportSourceItem, ImageMeta, RenderOpts, SaveVersionRequest
 from thumbnails import render_thumbnail
-from tiled_clients import api_key_for_uri, get_browse_container, get_tiled_client
+from tiled_clients import (
+    api_key_for_uri,
+    get_browse_container_for,
+    get_tiled_client,
+)
 from tiled_config import get_tiled_api_key, get_tiled_servers
 
 logging.basicConfig(level=logging.INFO)
@@ -92,9 +108,11 @@ _items_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=128)
 _field_mapping_cache: TTLCache = TTLCache(ttl_seconds=_FIELD_MAPPING_TTL, max_entries=32)
 
 
-def _resolve_field_mapping(container: object, server_uri: str, technique: str) -> FieldMapping:
+def _resolve_field_mapping(
+    container: object, server_uri: str, technique: str, container_path: str = ""
+) -> FieldMapping:
     """Return a cached :class:`FieldMapping` for the given container."""
-    key = (server_uri, technique)
+    key = (server_uri, technique, container_path or "")
     cached = _field_mapping_cache.get(key)
     if cached is not None:
         return cached
@@ -127,6 +145,7 @@ async def browse_facets(
     server_uri: Optional[str] = None,
     server_api_key: Optional[str] = None,
     technique: str = Query("GIWAXS"),
+    container_path: Optional[str] = Query(None, description="Tiled container to browse"),
     refresh: bool = Query(False),  # noqa: ARG001 — kept for client API compat
 ) -> dict[str, list[str]]:
     """Return ordered list of browsable metadata fields, discovered live.
@@ -137,17 +156,27 @@ async def browse_facets(
     """
     def _discover() -> dict[str, list[str]]:
         client = get_tiled_client(server_uri, server_api_key)
-        container, _ = get_browse_container(client)
-        mapping = _resolve_field_mapping(container, server_uri or "", technique)
+        container, _ = get_browse_container_for(client, container_path)
+        mapping = _resolve_field_mapping(container, server_uri or "", technique, container_path or "")
+
+        # `container.distinct()` is catalog-global; when browsing a specific
+        # container, read its children once and compute values scoped to it.
+        # A sample is enough to detect which fields have >=2 distinct values;
+        # exact value lists are computed per-field (scoped) by /api/browse/column.
+        scoped = bool(container_path)
+        scoped_rows = scoped_metadata_rows(container, limit=300) if scoped else []
 
         def _facet_for_key(disp_key: str) -> tuple[list[str], list[str]]:
             raw_key = mapping.display_to_raw.get(disp_key, disp_key)
             min_values = 1 if raw_key in _STUDIO_RAW_KEYS else 2
-            try:
-                result = container.distinct(raw_key, counts=True)
-            except Exception:
-                return [], []
-            raw_values = result.get("metadata", {}).get(raw_key, [])
+            if scoped:
+                raw_values = distinct_from_rows(scoped_rows, raw_key)
+            else:
+                try:
+                    result = container.distinct(raw_key, counts=True)
+                except Exception:
+                    return [], []
+                raw_values = result.get("metadata", {}).get(raw_key, [])
             non_null = [
                 v for v in raw_values
                 if v.get("value") is not None
@@ -193,13 +222,14 @@ async def browse_column(
     technique: str = Query("GIWAXS"),
     field: str = Query(..., description="Display-key metadata field to group by"),
     filters: str = Query("{}", description="JSON dict of upstream display_key=value selections"),
+    container_path: Optional[str] = Query(None, description="Tiled container to browse"),
     limit: int = Query(500, ge=1, le=5000),
     refresh: bool = Query(False),
 ) -> dict:
     """Return distinct values (+ counts) for *field* via Tiled ``distinct()``."""
     filter_dict = _parse_json_filters(filters)
 
-    cache_key = ("column", server_uri or "", technique, field, filters, limit)
+    cache_key = ("column", server_uri or "", technique, container_path or "", field, filters, limit)
     if not refresh:
         cached = _column_cache.get(cache_key)
         if cached is not None:
@@ -207,8 +237,8 @@ async def browse_column(
 
     def _build() -> dict:
         client = get_tiled_client(server_uri, server_api_key)
-        container, _ = get_browse_container(client)
-        mapping = _resolve_field_mapping(container, server_uri or "", technique)
+        container, _ = get_browse_container_for(client, container_path)
+        mapping = _resolve_field_mapping(container, server_uri or "", technique, container_path or "")
         raw_key = mapping.display_to_raw.get(field, field)
         return tiled_distinct_values(
             container,
@@ -216,6 +246,7 @@ async def browse_column(
             filters=filter_dict,
             field_mapping=mapping,
             limit=limit,
+            scoped=bool(container_path),
         )
 
     try:
@@ -233,13 +264,14 @@ async def browse_items(
     server_api_key: Optional[str] = None,
     technique: str = Query("GIWAXS"),
     filters: str = Query("{}", description="JSON dict of display_key=value selections"),
+    container_path: Optional[str] = Query(None, description="Tiled container to browse"),
     limit: int = Query(500, ge=1, le=2000),
     refresh: bool = Query(False),
 ) -> dict:
     """Return sample records (path + metadata) matching *filters* via ``search()``."""
     filter_dict = _parse_json_filters(filters)
 
-    cache_key = ("items", server_uri or "", technique, filters, limit)
+    cache_key = ("items", server_uri or "", technique, container_path or "", filters, limit)
     if not refresh:
         cached = _items_cache.get(cache_key)
         if cached is not None:
@@ -247,8 +279,8 @@ async def browse_items(
 
     def _build() -> dict:
         client = get_tiled_client(server_uri, server_api_key)
-        container, prefix = get_browse_container(client)
-        mapping = _resolve_field_mapping(container, server_uri or "", technique)
+        container, prefix = get_browse_container_for(client, container_path)
+        mapping = _resolve_field_mapping(container, server_uri or "", technique, container_path or "")
         return tiled_search_items(
             container,
             filters=filter_dict,
@@ -300,25 +332,28 @@ async def browse_thumbnail(
 
 @app.get("/api/local/list")
 async def local_list(
-    rel: str = Query("", description="Relative path under LOCAL_DATA_ROOT"),
+    rel: str = Query("", description="Relative path under the granted root"),
+    root: Optional[str] = Query(None, description="Granted absolute browse root"),
 ) -> list[dict]:
-    """List directory entries under LOCAL_DATA_ROOT."""
-    return await asyncio.to_thread(local_fs.list_dir, rel)
+    """List directory entries under the granted local root."""
+    return await asyncio.to_thread(local_fs.list_dir, rel, root)
 
 
 @app.get("/api/local/samples")
 async def local_samples(
-    rel: str = Query(..., description="Relative path to a folder under LOCAL_DATA_ROOT"),
+    rel: str = Query(..., description="Relative path to a folder under the granted root"),
+    root: Optional[str] = Query(None, description="Granted absolute browse root"),
 ) -> dict:
     """Return all image files under a local folder (used by the Browse tab).
 
     Args:
-        rel: Relative folder path under ``LOCAL_DATA_ROOT``.
+        rel: Relative folder path under the granted root.
+        root: Granted absolute browse root (defaults to ``LOCAL_DATA_ROOT``).
 
     Returns:
         ``{"items": [{"name", "path"}], "total": int}``
     """
-    items = await asyncio.to_thread(local_fs.list_image_files, rel)
+    items = await asyncio.to_thread(local_fs.list_image_files, rel, root)
     return {"items": items, "total": len(items)}
 
 
@@ -327,6 +362,8 @@ async def connect_summary(
     kind: str = Query(..., description="'tiled' or 'local'"),
     server_uri: Optional[str] = None,
     rel: str = Query("", description="Local folder path (kind=local only)"),
+    root: Optional[str] = Query(None, description="Granted absolute browse root (kind=local)"),
+    container_path: Optional[str] = Query(None, description="Tiled container to browse (kind=tiled)"),
 ) -> dict:
     """Return a connection summary: sample count and display label.
 
@@ -337,14 +374,20 @@ async def connect_summary(
         ``{"kind", "label", "sample_count", "server_uri"}``
     """
     if kind == "local":
-        count = await asyncio.to_thread(local_fs.count_image_files, rel)
-        label = rel or "Local Data Root"
-        return {"kind": "local", "label": label, "sample_count": count, "server_uri": None}
+        count = await asyncio.to_thread(local_fs.count_image_files, rel, root)
+        label = (root or "Local Data Root") + (f"/{rel}" if rel else "")
+        return {
+            "kind": "local",
+            "label": label,
+            "sample_count": count,
+            "server_uri": None,
+            "local_root": root,
+        }
 
     if kind == "tiled":
         def _count() -> int:
             client = get_tiled_client(server_uri)
-            container, _ = get_browse_container(client)
+            container, _ = get_browse_container_for(client, container_path)
             # An unfiltered count is just the container size — a single request.
             # Avoid iterating every child and building per-item metadata dicts,
             # which is O(N) HTTP round trips and stalls the connect UI.
@@ -366,7 +409,15 @@ async def connect_summary(
              if (cfg.get("uri") or "").rstrip("/") == (server_uri or "").rstrip("/")),
             server_uri or "Tiled Server",
         )
-        return {"kind": "tiled", "label": label, "sample_count": count, "server_uri": server_uri}
+        if container_path:
+            label = f"{label} · {container_path}"
+        return {
+            "kind": "tiled",
+            "label": label,
+            "sample_count": count,
+            "server_uri": server_uri,
+            "container_path": container_path,
+        }
 
     raise HTTPException(400, f"Unknown kind: {kind!r}; must be 'tiled' or 'local'")
 
@@ -436,10 +487,11 @@ async def image_meta(
     source: str = Query(...),
     kind: str = Query(...),
     server_uri: Optional[str] = None,
+    root: Optional[str] = Query(None, description="Granted absolute root (kind=local)"),
 ) -> ImageMeta:
     """Return shape / dtype metadata for an image source."""
     def _run() -> ImageMeta:
-        node = arrays_mod.resolve_array(source, kind, server_uri)
+        node = arrays_mod.resolve_array(source, kind, server_uri, root)
         meta = arrays_mod.array_shape_meta(node)
         sl = arrays_mod.read_slice(node, meta, 0)
         flat = sl.ravel().astype(float)
@@ -467,6 +519,7 @@ async def image_slice(
     kind: str = Query(...),
     slice_index: int = Query(0),
     server_uri: Optional[str] = None,
+    root: Optional[str] = Query(None, description="Granted absolute root (kind=local)"),
     norm: str = Query("global"),
     scale: str = Query("linear"),
     vmin_pct: float = Query(1.0),
@@ -483,7 +536,7 @@ async def image_slice(
     }
 
     def _run() -> bytes:
-        node = arrays_mod.resolve_array(source, kind, server_uri)
+        node = arrays_mod.resolve_array(source, kind, server_uri, root)
         meta = arrays_mod.array_shape_meta(node)
         sl = arrays_mod.read_slice(node, meta, slice_index)
         global_range = None
@@ -814,6 +867,54 @@ async def import_coco(dataset_dir: str = Query(...)) -> dict:
     except Exception as exc:
         logger.error("Import failed for %s: %s", dataset_dir, exc)
         raise HTTPException(500, f"Import failed: {exc}") from exc
+
+
+@app.post("/api/ingest/upload")
+async def ingest_upload(
+    server_uri: Optional[str] = Query(None, description="Target Tiled server URI"),
+    container_path: str = Form(..., description="Target container, e.g. 'browse/myset'"),
+    files: list[UploadFile] = File(..., description="Image files to copy into Tiled"),
+) -> dict:
+    """Stream uploaded files to temp storage and start a background ingest job.
+
+    Each supported image becomes its own browsable node in *container_path* on
+    the connected Tiled server. Returns a ``job_id`` to poll for progress.
+    """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ingest_"))
+    saved: list[tuple[str, Path]] = []
+    for index, upload in enumerate(files):
+        ext = Path(upload.filename or "").suffix.lower()
+        if ext not in ingest_mod.IMAGE_EXTS:
+            await upload.close()
+            continue
+        dest = tmp_dir / f"{index:06d}{ext}"
+        # Stream in 1MB chunks — files can be 26MB+, never read() whole into memory.
+        with dest.open("wb") as out:
+            while chunk := await upload.read(1024 * 1024):
+                out.write(chunk)
+        await upload.close()
+        saved.append((upload.filename or dest.name, dest))
+
+    if not saved:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(400, "No supported image files in upload")
+
+    jid = ingest_mod.new_job(len(saved), server_uri, container_path)
+    threading.Thread(
+        target=ingest_mod.run_ingest_job,
+        args=(jid, server_uri, container_path, saved),
+        daemon=True,
+    ).start()
+    return {"job_id": jid, "total": len(saved), "container_path": container_path}
+
+
+@app.get("/api/ingest/status/{job_id}")
+async def ingest_status(job_id: str) -> dict:
+    """Return progress for an ingest job started by ``/api/ingest/upload``."""
+    job = ingest_mod.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Unknown job_id")
+    return job
 
 
 @app.get("/health")

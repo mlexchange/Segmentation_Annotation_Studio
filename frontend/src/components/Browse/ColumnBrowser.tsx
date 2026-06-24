@@ -11,6 +11,7 @@ import { ANNOTATION_FILTER_OPTIONS, type AnnotationFilter } from '@/types/annota
 
 interface ColumnBrowserProps {
   serverUri: string;
+  containerPath?: string | null;
   servers: ServerInfo[];
   selectedServerUri: string;
   onServerChange: (uri: string) => void;
@@ -52,13 +53,14 @@ function formatColumnValue(field: string, value: string): string {
 
 export default function ColumnBrowser({
   serverUri,
+  containerPath,
   servers,
   selectedServerUri,
   onServerChange,
   annotationFilter,
   onAnnotationFilterChange,
 }: ColumnBrowserProps) {
-  const { state, actions } = useBrowseData(serverUri, 'All');
+  const { state, actions } = useBrowseData(serverUri, 'All', undefined, containerPath);
   const { openTiledArray } = useOpenInAnnotate();
   const scrollRef = useRef<HTMLDivElement>(null);
 

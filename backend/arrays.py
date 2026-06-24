@@ -42,15 +42,21 @@ logger = logging.getLogger(__name__)
 _node_cache: TTLCache = TTLCache(ttl_seconds=300.0, max_entries=32)
 
 
-def resolve_array(source: str, kind: str, server_uri: str | None = None) -> Any:
+def resolve_array(
+    source: str,
+    kind: str,
+    server_uri: str | None = None,
+    root: str | None = None,
+) -> Any:
     """Return a lazily-sliceable array node for *source*.
 
-    Results are cached by ``(kind, source, server_uri)`` for 5 minutes.
+    Results are cached by ``(kind, source, server_uri, root)`` for 5 minutes.
 
     Args:
         source: Tiled path (slash-separated) or local relative path.
         kind: ``"tiled"`` or ``"local"``.
         server_uri: Tiled server URI; only used when ``kind == "tiled"``.
+        root: Granted absolute local root; only used when ``kind == "local"``.
 
     Returns:
         A Tiled array node or a NumPy-compatible array.
@@ -58,7 +64,7 @@ def resolve_array(source: str, kind: str, server_uri: str | None = None) -> Any:
     Raises:
         HTTPException: 404 if the path does not exist; 422 for unknown kind.
     """
-    key = (kind, source, server_uri or "")
+    key = (kind, source, server_uri or "", root or "")
     cached = _node_cache.get(key)
     if cached is not None:
         return cached
@@ -73,7 +79,7 @@ def resolve_array(source: str, kind: str, server_uri: str | None = None) -> Any:
             except KeyError as exc:
                 raise HTTPException(404, f"Tiled path not found: {source!r}") from exc
     elif kind == "local":
-        node = local_fs.open_array(source)
+        node = local_fs.open_array(source, root)
     else:
         raise HTTPException(422, f"Unknown source kind: {kind!r}")
 

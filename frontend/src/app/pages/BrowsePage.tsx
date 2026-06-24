@@ -16,7 +16,8 @@ import type { AnnotationFilter } from '@/types/annotationFilter';
 
 export default function BrowsePage() {
   const navigate = useNavigate();
-  const { kind, serverUri, localRoot, label, sampleCount, setConnection } = useConnectionStore();
+  const { kind, serverUri, browseContainerPath, localRoot, localRel, label, sampleCount, setConnection } =
+    useConnectionStore();
   const { openLocalFile } = useOpenInAnnotate();
 
   const [annotationFilter, setAnnotationFilter] = useState<AnnotationFilter>('all');
@@ -80,8 +81,9 @@ export default function BrowsePage() {
       {/* Main browser */}
       {kind === 'tiled' && serverUri && (
         <ColumnBrowser
-          key={serverUri}
+          key={`${serverUri}:${browseContainerPath ?? ''}`}
           serverUri={serverUri}
+          containerPath={browseContainerPath}
           servers={servers}
           selectedServerUri={serverUri}
           onServerChange={handleServerChange}
@@ -91,7 +93,8 @@ export default function BrowsePage() {
       )}
       {kind === 'local' && (
         <LocalSampleBrowser
-          localRoot={localRoot ?? ''}
+          root={localRoot ?? ''}
+          rel={localRel ?? ''}
           onOpenInAnnotate={openLocalFile}
           annotationFilter={annotationFilter}
           onAnnotationFilterChange={setAnnotationFilter}

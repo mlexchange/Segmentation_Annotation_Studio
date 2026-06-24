@@ -157,14 +157,52 @@ def _display_name(raw_key: str) -> str:
 # Distinct values
 # ---------------------------------------------------------------------------
 
+def scoped_metadata_rows(node: Any, limit: int = 5000) -> list[dict]:
+    """Read each child's metadata once for a *specific* container.
+
+    Tiled's ``container.distinct()`` aggregates across the whole catalog, not
+    just the node it's called on, so it can't be used to compute values scoped
+    to a chosen sub-container. Iterating children gives correctly-scoped data
+    at the cost of one metadata read per child.
+    """
+    rows: list[dict] = []
+    try:
+        for key in list(node)[:limit]:
+            try:
+                meta = node[key].metadata
+                rows.append(dict(meta) if meta else {})
+            except Exception:  # noqa: BLE001 — skip children that fail to open
+                continue
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("scoped_metadata_rows iteration failed: %s", exc)
+    return rows
+
+
+def distinct_from_rows(rows: list[dict], raw_key: str) -> list[dict]:
+    """Tally distinct values of *raw_key* across pre-read metadata *rows*."""
+    counts: dict[Any, int] = {}
+    for meta in rows:
+        val = meta.get(raw_key)
+        if val is None:
+            continue
+        counts[val] = counts.get(val, 0) + 1
+    return [{"value": v, "count": c} for v, c in counts.items()]
+
+
 def tiled_distinct_values(
     container_node: Any,
     raw_key: str,
     filters: Optional[dict] = None,
     field_mapping: Optional[FieldMapping] = None,
     limit: int = 500,
+    scoped: bool = False,
 ) -> dict:
-    """Call ``container.distinct(raw_key)`` with optional upstream filters.
+    """Return distinct values (+ counts) for *raw_key* under optional filters.
+
+    When *scoped* is True, values are computed by iterating the (filtered)
+    container's children so they reflect only that container — use this when
+    browsing a specific ``container_path``. Otherwise the faster but
+    catalog-global ``container.distinct()`` is used.
 
     Returns::
 
@@ -189,12 +227,15 @@ def tiled_distinct_values(
         except Exception:  # noqa: BLE001 — Tiled raises a range of errors here
             pass
 
-    try:
-        result = node.distinct(raw_key, counts=True)
-        raw_values = result.get("metadata", {}).get(raw_key, [])
-    except Exception as exc:
-        logger.warning("distinct() failed for key %r: %s", raw_key, exc)
-        raw_values = []
+    if scoped:
+        raw_values = distinct_from_rows(scoped_metadata_rows(node), raw_key)
+    else:
+        try:
+            result = node.distinct(raw_key, counts=True)
+            raw_values = result.get("metadata", {}).get(raw_key, [])
+        except Exception as exc:
+            logger.warning("distinct() failed for key %r: %s", raw_key, exc)
+            raw_values = []
 
     non_null = [entry for entry in raw_values if _is_valid_value(entry.get("value"))]
     sorted_vals = sorted(non_null, key=lambda e: (-e.get("count", 0), str(e["value"])))[:limit]
