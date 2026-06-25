@@ -884,6 +884,10 @@ export default function AnnotationCanvas({
         scaleX={transform.scaleX}
         scaleY={transform.scaleY}
         onDragEnd={(e) => {
+          // Drag events bubble: a vertex/shape drag also fires this. Only the
+          // stage itself being dragged (pan) should update the pan transform —
+          // otherwise the image jumps to the dragged node's coordinates.
+          if (e.target !== e.target.getStage()) return;
           setTransform((t) => ({ ...t, x: e.target.x(), y: e.target.y() }));
         }}
       >
