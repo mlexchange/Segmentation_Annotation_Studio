@@ -14,10 +14,14 @@ build/
 .env
 
 # Tiled catalog database (binary, regenerated on first run via start_all.sh)
-# The zarr data under .tiled/data/ IS committed so clones get demo data.
 .tiled/catalog.db
 .tiled/catalog.db-shm
 .tiled/catalog.db-wal
+
+# Tiled data written at runtime (drag-and-drop ingest, etc.).
+# Demo datasets already committed under .tiled/data/ stay tracked; new arrays
+# ingested locally are ignored. To commit a new demo dataset, use `git add -f`.
+.tiled/data/
 
 # Runtime Tiled thumbnail containers created on save
 **/*__v_thumbs/

@@ -24,11 +24,18 @@ interface IngestDropzoneProps {
   serverUri: string;
   /** Called when the user wants to browse the freshly-ingested container. */
   onBrowse?: (containerPath: string, sampleCount: number) => void;
+  /** Called to open the first ingested sample directly in the Annotate tab. */
+  onAnnotate?: (containerPath: string, firstKey: string) => void;
 }
 
 function isSupported(name: string): boolean {
   const ext = name.toLowerCase().split('.').pop() ?? '';
   return SUPPORTED_EXTS.includes(ext);
+}
+
+/** Tiled node key the backend assigns to a file = its filename stem. */
+function fileStem(name: string): string {
+  return name.replace(/\.[^.]+$/, '');
 }
 
 function sanitizeName(name: string): string {
@@ -76,13 +83,15 @@ async function collectFromDrop(dt: DataTransfer): Promise<{ files: File[]; folde
   return { files: Array.from(dt.files), folderName };
 }
 
-export default function IngestDropzone({ serverUri, onBrowse }: IngestDropzoneProps) {
+export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: IngestDropzoneProps) {
   const [dragging, setDragging] = useState(false);
   const [containerPath, setContainerPath] = useState('browse/');
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  // Node key of the first ingested sample (for "Open in Annotate").
+  const [firstKey, setFirstKey] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const stopPolling = useCallback(() => {
@@ -126,6 +135,10 @@ export default function IngestDropzone({ serverUri, onBrowse }: IngestDropzonePr
         target = `browse/${sanitizeName(suggestedName || 'dataset')}`;
         setContainerPath(target);
       }
+
+      // Remember the first sample (by name) so we can jump straight to Annotate.
+      const firstName = [...supported].map((f) => f.name).sort()[0];
+      setFirstKey(fileStem(firstName));
 
       setError(null);
       setStatus(null);
@@ -267,14 +280,27 @@ export default function IngestDropzone({ serverUri, onBrowse }: IngestDropzonePr
               ))}
             </ul>
           )}
-          {done && status.done > 0 && onBrowse && (
-            <button
-              type="button"
-              onClick={() => onBrowse(status.container_path, status.done)}
-              className="mt-1 w-full bg-sky-600 text-white rounded-md py-2 text-sm font-medium hover:bg-sky-700 transition-colors"
-            >
-              Browse this dataset
-            </button>
+          {done && status.done > 0 && (onBrowse || onAnnotate) && (
+            <div className="mt-1 flex gap-2">
+              {onBrowse && (
+                <button
+                  type="button"
+                  onClick={() => onBrowse(status.container_path, status.done)}
+                  className="flex-1 bg-sky-600 text-white rounded-md py-2 text-sm font-medium hover:bg-sky-700 transition-colors"
+                >
+                  Browse this dataset
+                </button>
+              )}
+              {onAnnotate && firstKey && (
+                <button
+                  type="button"
+                  onClick={() => onAnnotate(status.container_path, firstKey)}
+                  className="flex-1 bg-emerald-600 text-white rounded-md py-2 text-sm font-medium hover:bg-emerald-700 transition-colors"
+                >
+                  {status.done > 1 ? 'Annotate first image' : 'Open in Annotate'}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}

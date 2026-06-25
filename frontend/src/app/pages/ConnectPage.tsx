@@ -12,6 +12,7 @@ import { useQuery } from '@tanstack/react-query';
 import { PlugsConnected, Folder, HardDrives, Stack } from '@phosphor-icons/react';
 import { API_BASE } from '@/config';
 import { useConnectionStore } from '@/stores/connectionStore';
+import { useOpenInAnnotate } from '@/hooks/useOpenInAnnotate';
 import IngestDropzone from '@/components/Ingest/IngestDropzone';
 
 interface ServerInfo {
@@ -37,6 +38,7 @@ interface TiledEntry {
 export default function ConnectPage() {
   const navigate = useNavigate();
   const { setConnection } = useConnectionStore();
+  const { openTiledArray } = useOpenInAnnotate();
 
   const [mode, setMode] = useState<'tiled' | 'local'>('tiled');
 
@@ -105,6 +107,12 @@ export default function ConnectPage() {
       sampleCount: 0,
     });
     if (gotoBrowse) navigate('/browse');
+  };
+
+  // Jump straight from ingest to the Annotate tab for the first uploaded sample.
+  const annotateIngested = (containerPath: string, firstKey: string) => {
+    connectTiled(containerPath, false); // set connection context, don't navigate to Browse
+    void openTiledArray(`${containerPath}/${firstKey}`, selectedServerUri); // navigates to /annotate
   };
 
   const handleConnect = async () => {
@@ -264,6 +272,7 @@ export default function ConnectPage() {
                 <IngestDropzone
                   serverUri={selectedServerUri}
                   onBrowse={(containerPath) => connectTiled(containerPath)}
+                  onAnnotate={annotateIngested}
                 />
               </div>
             )}
