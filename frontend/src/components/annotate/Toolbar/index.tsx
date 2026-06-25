@@ -3,7 +3,7 @@
  * Keybinds: a=polygon, w=ellipse, e=rectangle, q=eraser, b=brush, s=select,
  *           Space=pan (hold), x=next slice, f=fit to screen, z=undo
  */
-import { Hand, Cursor, Polygon, MagnetStraight, Rectangle, Circle, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
+import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
 import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
@@ -61,7 +61,10 @@ interface ToolbarProps {
 }
 
 export default function Toolbar({ disabled = false }: ToolbarProps) {
-  const { tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity } = useToolStore();
+  const {
+    tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity,
+    magicTolerance, setMagicTolerance, magicMode, setMagicMode, magicSigma, setMagicSigma,
+  } = useToolStore();
   const { undo, redo } = useStore(useAnnotationStore.temporal);
   const canUndo = useStore(useAnnotationStore.temporal, (s) => s.pastStates.length > 0);
   const canRedo = useStore(useAnnotationStore.temporal, (s) => s.futureStates.length > 0);
@@ -71,6 +74,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     { tool: 'select',    label: 'Select',  icon: <Cursor size={18} />,      keybind: 's' },
     { tool: 'polygon',   label: 'Polygon', icon: <Polygon size={18} />,     keybind: 'a' },
     { tool: 'magnetic',  label: 'Magnetic',icon: <MagnetStraight size={18} />, keybind: 'm' },
+    { tool: 'magic',     label: 'Magic',   icon: <MagicWand size={18} />,   keybind: 'g' },
     { tool: 'rectangle', label: 'Rect',    icon: <Rectangle size={18} />,   keybind: 'e' },
     { tool: 'ellipse',   label: 'Ellipse', icon: <Circle size={18} />,      keybind: 'w' },
     { tool: 'brush',     label: 'Brush',   icon: <PaintBucket size={18} />, keybind: 'b' },
@@ -154,6 +158,55 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
             onChange={(e) => setBrushSize(Number(e.target.value))}
             className="w-full"
           />
+        </div>
+      )}
+
+      {tool === 'magic' && (
+        <div className="flex flex-col gap-2 mt-1">
+          <div className="grid grid-cols-2 gap-1">
+            {(['contiguous', 'global'] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMagicMode(m)}
+                className={cn(
+                  'py-1 rounded-md text-xs border transition-colors',
+                  magicMode === m
+                    ? 'bg-sky-600 text-white border-sky-700'
+                    : 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50',
+                )}
+                title={m === 'contiguous' ? 'Select the connected region you click' : 'Select all similar regions on the slice'}
+              >
+                {m === 'contiguous' ? 'Connected' : 'All similar'}
+              </button>
+            ))}
+          </div>
+          <label className="text-xs text-gray-500">
+            Tolerance: {Math.round(magicTolerance * 100)}%
+          </label>
+          <input
+            type="range"
+            min={1}
+            max={60}
+            value={Math.round(magicTolerance * 100)}
+            onChange={(e) => setMagicTolerance(Number(e.target.value) / 100)}
+            className="w-full"
+          />
+          <label className="text-xs text-gray-500">
+            Smoothing: {magicSigma.toFixed(1)}
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={5}
+            step={0.5}
+            value={magicSigma}
+            onChange={(e) => setMagicSigma(Number(e.target.value))}
+            className="w-full"
+          />
+          <p className="text-[10px] text-gray-400 leading-snug">
+            Click a region on the image. Tip: adjust contrast (Display) first for low-contrast scans.
+          </p>
         </div>
       )}
 

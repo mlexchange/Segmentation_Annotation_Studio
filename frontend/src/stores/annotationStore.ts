@@ -62,6 +62,8 @@ export interface AnnotationState {
   negativeSlices: Record<string, string[]>;
 
   addShape: (sourceKey: string, sliceIdx: number, shape: Shape) => void;
+  /** Append several shapes in one update (one undo step) — used by magic-wand. */
+  addShapes: (sourceKey: string, sliceIdx: number, shapes: Shape[]) => void;
   removeShape: (sourceKey: string, sliceIdx: number, shapeId: string) => void;
   /** Replace a single shape via an updater (used for move / vertex editing). */
   updateShape: (sourceKey: string, sliceIdx: number, shapeId: string, updater: (shape: Shape) => Shape) => void;
@@ -97,6 +99,21 @@ export const useAnnotationStore = create<AnnotationState>()(
               [sourceKey]: {
                 ...(s.byImage[sourceKey] ?? {}),
                 [sliceKey]: [...prev, shape],
+              },
+            },
+          };
+        }),
+
+      addShapes: (sourceKey, sliceIdx, shapes) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: [...prev, ...shapes],
               },
             },
           };

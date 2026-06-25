@@ -18,6 +18,7 @@ const TOOL_KEYBINDS: Record<string, Tool> = {
   s: 'select',
   a: 'polygon',
   m: 'magnetic',
+  g: 'magic',
   e: 'rectangle',
   w: 'ellipse',
   b: 'brush',

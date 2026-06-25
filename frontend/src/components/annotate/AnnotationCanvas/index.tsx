@@ -26,6 +26,7 @@ import { toImage, normalizeRect, normalizeEllipse } from '@/lib/geometry';
 import { buildCostMap, dijkstra, tracePath, imageToGrid, simplifyPath, type CostMap } from '@/lib/livewire';
 import { useImageSlice } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
+import { buildField, magicSelect, type GrayField } from '@/lib/magicwand';
 
 interface AnnotationCanvasProps {
   brightness: number;
@@ -122,8 +123,11 @@ export default function AnnotationCanvas({
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
-  const { byImage, addShape, appendBrushStroke, appendEraseStroke, updateShape, removeShape } = useAnnotationStore();
+  const { byImage, addShape, addShapes, appendBrushStroke, appendEraseStroke, updateShape, removeShape } = useAnnotationStore();
   const { tool, brushSize, fillOpacity, selectedShapeId, setSelectedShapeId } = useToolStore();
+  const magicTolerance = useToolStore((s) => s.magicTolerance);
+  const magicMode = useToolStore((s) => s.magicMode);
+  const magicSigma = useToolStore((s) => s.magicSigma);
   const fitRequestId = useToolStore((s) => s.fitRequestId);
   const { classes } = useClassStore();
 
@@ -137,6 +141,13 @@ export default function AnnotationCanvas({
   const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(null);
   // Live polygon vertex edit (select tool): { id, points } while dragging a handle.
   const [editPoly, setEditPoly] = useState<{ id: string; points: number[] } | null>(null);
+
+  // Magic-wand selection: seed click + preview polygons (image coords) before commit.
+  // Magic-wand seeds: each click is a seed; shift-click appends another so
+  // several regions can be accumulated before accepting.
+  const [magicSeeds, setMagicSeeds] = useState<Array<{ x: number; y: number }>>([]);
+  const [magicPreview, setMagicPreview] = useState<number[][]>([]);
+  const [magicLoading, setMagicLoading] = useState(false);
 
   // Magnetic lasso (livewire) state. Committed = locked path; preview = live
   // least-cost path from the current seed to the cursor.
@@ -266,25 +277,79 @@ export default function AnnotationCanvas({
     setMagneticPreview([]);
   }, []);
 
-  // Preserve in-progress polygon/lasso drafts across a transient hold-Space pan
-  // (tool flips to 'pan' then back), but abandon them on a real tool switch.
+  const resetMagic = useCallback(() => {
+    setMagicSeeds([]);
+    setMagicPreview([]);
+    setMagicLoading(false);
+  }, []);
+
+  // Build (and cache, per rendered image) the grayscale field used by the wand.
+  const magicFieldRef = useRef<GrayField | null>(null);
+  const magicFieldForRef = useRef<HTMLImageElement | null>(null);
+  const ensureMagicField = useCallback((): GrayField | null => {
+    if (!imageEl || !meta) return null;
+    if (magicFieldRef.current && magicFieldForRef.current === imageEl) return magicFieldRef.current;
+    const f = buildField(imageEl, meta.width, meta.height);
+    magicFieldRef.current = f;
+    magicFieldForRef.current = imageEl;
+    return f;
+  }, [imageEl, meta]);
+
+  // (Re)compute the preview in the browser whenever the seed or params change.
+  // Runs in a rAF so the "Selecting…" label can paint for large images.
+  useEffect(() => {
+    if (magicSeeds.length === 0) { setMagicPreview([]); return; }
+    const field = ensureMagicField();
+    if (!field) { setMagicPreview([]); return; }
+    setMagicLoading(true);
+    const id = requestAnimationFrame(() => {
+      const polys: number[][] = [];
+      for (const seed of magicSeeds) {
+        polys.push(
+          ...magicSelect(field, seed.x, seed.y, {
+            toleranceFrac: magicTolerance,
+            mode: magicMode,
+            blur: magicSigma,
+          }),
+        );
+      }
+      setMagicPreview(polys);
+      setMagicLoading(false);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [magicSeeds, magicTolerance, magicMode, magicSigma, ensureMagicField]);
+
+  const commitMagic = useCallback(() => {
+    if (!sourceKey || activeClassId === null) return;
+    // One batched add = one undo step for the whole magic selection.
+    const shapes = magicPreview
+      .filter((pts) => pts.length >= 6)
+      .map((pts) => ({ id: uuidv4(), classId: activeClassId, kind: 'polygon' as const, points: pts }));
+    if (shapes.length) addShapes(sourceKey, currentSlice, shapes);
+    resetMagic();
+  }, [sourceKey, activeClassId, magicPreview, addShapes, currentSlice, resetMagic]);
+
+  // Preserve in-progress polygon/lasso/magic drafts across a transient hold-Space
+  // pan (tool flips to 'pan' then back), but abandon them on a real tool switch.
   const prevToolRef = useRef(tool);
   useEffect(() => {
     const prev = prevToolRef.current;
     prevToolRef.current = tool;
     if (tool === 'pan' || prev === 'pan') return; // entering/leaving pan keeps the draft
     resetMagnetic();
+    resetMagic();
     setDraftPoly([]);
-  }, [tool, resetMagnetic]);
+  }, [tool, resetMagnetic, resetMagic]);
 
   // A new image/slice always invalidates any in-progress draft.
   useEffect(() => {
     resetMagnetic();
+    resetMagic();
     setDraftPoly([]);
-  }, [currentSlice, sourceKey, resetMagnetic]);
+  }, [currentSlice, sourceKey, resetMagnetic, resetMagic]);
 
   // Escape cancels the entire in-progress shape (polygon vertices, magnetic
-  // trace, or rect/ellipse drag) without committing anything.
+  // trace, magic selection, or rect/ellipse drag) without committing anything.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
@@ -294,10 +359,11 @@ export default function AnnotationCanvas({
       setDragStart(null);
       setDragCurrent(null);
       resetMagnetic();
+      resetMagic();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [resetMagnetic]);
+  }, [resetMagnetic, resetMagic]);
 
   /** Flush the buffered draft stroke to the Zustand store (one write per stroke). */
   const commitDraftStroke = () => {
@@ -338,6 +404,11 @@ export default function AnnotationCanvas({
 
     if (tool === 'polygon') {
       setDraftPoly((prev) => [...prev, pos.x, pos.y]);
+    } else if (tool === 'magic') {
+      // Seed the magic-wand selection (the effect computes the preview).
+      // Shift-click appends another region; a plain click starts fresh.
+      const seed = { x: pos.x, y: pos.y };
+      setMagicSeeds((prev) => (e.evt.shiftKey ? [...prev, seed] : [seed]));
     } else if (tool === 'magnetic') {
       const cm = ensureCostMap();
       if (cm && magneticSeedRef.current && magneticPrevRef.current) {
@@ -922,7 +993,7 @@ export default function AnnotationCanvas({
     <div
       ref={containerRef}
       className="relative w-full h-full bg-gray-900 overflow-hidden"
-      style={{ cursor: showBrushCursor ? 'none' : tool === 'magnetic' ? 'crosshair' : undefined }}
+      style={{ cursor: showBrushCursor ? 'none' : (tool === 'magnetic' || tool === 'magic') ? 'crosshair' : undefined }}
     >
       <Stage
         ref={stageRef}
@@ -1048,6 +1119,36 @@ export default function AnnotationCanvas({
               listening={false}
             />
           )}
+
+          {/* Magic-wand preview regions (kept visible while panning). */}
+          {(tool === 'magic' || tool === 'pan') &&
+            magicPreview.map((pts, i) => (
+              <Line
+                key={`magic-${i}`}
+                points={pts}
+                closed
+                fill={activeColor}
+                stroke={activeColor}
+                strokeWidth={1.5 / transform.scaleX}
+                dash={[5 / transform.scaleX, 3 / transform.scaleX]}
+                listening={false}
+                perfectDrawEnabled={false}
+              />
+            ))}
+          {/* Markers for each accumulated magic seed click. */}
+          {(tool === 'magic' || tool === 'pan') &&
+            magicSeeds.map((s, i) => (
+              <Circle
+                key={`magic-seed-${i}`}
+                x={s.x}
+                y={s.y}
+                radius={3 / transform.scaleX}
+                fill="#ffffff"
+                stroke={activeColor}
+                strokeWidth={1.5 / transform.scaleX}
+                listening={false}
+              />
+            ))}
         </Layer>
 
         {/* Layer 3: in-progress brush stroke (imperatively updated, no React re-renders per move) */}
@@ -1112,6 +1213,39 @@ export default function AnnotationCanvas({
       {tool === 'magnetic' && !isPreviewing && (
         <div className="absolute top-2 left-2 bg-slate-800/85 text-slate-200 text-xs px-3 py-1.5 rounded-md pointer-events-none">
           Click along an edge to trace it · double-click to finish
+        </div>
+      )}
+
+      {/* Magic-wand: hint before a click, Add/Cancel panel after. */}
+      {tool === 'magic' && !isPreviewing && magicSeeds.length === 0 && (
+        <div className="absolute top-2 left-2 bg-slate-800/85 text-slate-200 text-xs px-3 py-1.5 rounded-md pointer-events-none">
+          Click a region to select similar pixels · Shift-click to add more
+        </div>
+      )}
+      {tool === 'magic' && !isPreviewing && magicSeeds.length > 0 && (
+        <div className="absolute top-2 left-2 flex items-center gap-2 bg-slate-800/90 text-slate-100 text-xs px-3 py-1.5 rounded-md shadow-lg">
+          <span className="text-slate-300">
+            {magicLoading
+              ? 'Selecting…'
+              : magicPreview.length > 0
+                ? `${magicPreview.length} region${magicPreview.length === 1 ? '' : 's'} · shift-click to add`
+                : 'No match — raise tolerance'}
+          </span>
+          <button
+            type="button"
+            onClick={commitMagic}
+            disabled={magicLoading || magicPreview.length === 0}
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-medium"
+          >
+            Add
+          </button>
+          <button
+            type="button"
+            onClick={resetMagic}
+            className="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 text-white font-medium"
+          >
+            Cancel
+          </button>
         </div>
       )}
 
