@@ -13,7 +13,7 @@
  */
 import { useRef, useState, useEffect, useCallback } from 'react';
 import {
-  Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Group, Circle,
+  Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Group, Circle, Transformer,
 } from 'react-konva';
 import { Trash } from '@phosphor-icons/react';
 import type Konva from 'konva';
@@ -98,6 +98,8 @@ export default function AnnotationCanvas({
   const imageRef = useRef<Konva.Image>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const shapesLayerRef = useRef<Konva.Layer>(null);
+  // Resize handles for the selected rect/ellipse (select tool).
+  const transformerRef = useRef<Konva.Transformer>(null);
 
   // Imperative refs for lag-free brush drawing
   const draftStrokeLayerRef = useRef<Konva.Layer>(null);
@@ -784,6 +786,7 @@ export default function AnnotationCanvas({
       return (
         <Rect
           key={shape.id}
+          id={shape.id}
           x={shape.x} y={shape.y} width={shape.w} height={shape.h}
           fill={hitFill} stroke={outline} strokeWidth={sw} dash={dash}
           draggable={selected}
@@ -795,6 +798,19 @@ export default function AnnotationCanvas({
               s.kind === 'rectangle' ? { ...s, x: nx, y: ny } : s,
             );
           }}
+          onTransformEnd={(e) => {
+            // Transformer applies a scale; bake it into width/height and reset.
+            const node = e.target as Konva.Rect;
+            const nw = Math.max(1, node.width() * node.scaleX());
+            const nh = Math.max(1, node.height() * node.scaleY());
+            node.scaleX(1); node.scaleY(1);
+            node.width(nw); node.height(nh);
+            const nx = node.x();
+            const ny = node.y();
+            updateShape(sourceKey, currentSlice, shape.id, (s) =>
+              s.kind === 'rectangle' ? { ...s, x: nx, y: ny, w: nw, h: nh } : s,
+            );
+          }}
         />
       );
     }
@@ -803,6 +819,7 @@ export default function AnnotationCanvas({
       return (
         <Ellipse
           key={shape.id}
+          id={shape.id}
           x={shape.cx} y={shape.cy} radiusX={shape.rx} radiusY={shape.ry}
           fill={hitFill} stroke={outline} strokeWidth={sw} dash={dash}
           draggable={selected}
@@ -812,6 +829,18 @@ export default function AnnotationCanvas({
             const ny = e.target.y();
             updateShape(sourceKey, currentSlice, shape.id, (s) =>
               s.kind === 'ellipse' ? { ...s, cx: nx, cy: ny } : s,
+            );
+          }}
+          onTransformEnd={(e) => {
+            const node = e.target as Konva.Ellipse;
+            const nrx = Math.max(1, node.radiusX() * node.scaleX());
+            const nry = Math.max(1, node.radiusY() * node.scaleY());
+            node.scaleX(1); node.scaleY(1);
+            node.radiusX(nrx); node.radiusY(nry);
+            const ncx = node.x();
+            const ncy = node.y();
+            updateShape(sourceKey, currentSlice, shape.id, (s) =>
+              s.kind === 'ellipse' ? { ...s, cx: ncx, cy: ncy, rx: nrx, ry: nry } : s,
             );
           }}
         />
@@ -865,6 +894,22 @@ export default function AnnotationCanvas({
   const selectedShape = sourceKey
     ? storeShapes.find((s) => s.id === selectedShapeId) ?? null
     : null;
+
+  // Attach the resize Transformer to the selected rect/ellipse (by Konva id).
+  const selectedResizable =
+    selectedShape?.kind === 'rectangle' || selectedShape?.kind === 'ellipse';
+  useEffect(() => {
+    const tr = transformerRef.current;
+    const stage = stageRef.current;
+    if (!tr || !stage) return;
+    if (showInteractive && selectedShape && selectedResizable) {
+      const node = stage.findOne('#' + selectedShape.id);
+      tr.nodes(node ? [node] : []);
+    } else {
+      tr.nodes([]);
+    }
+    tr.getLayer()?.batchDraw();
+  }, [showInteractive, selectedShape, selectedResizable, displayShapes, transform]);
 
   const handleDeleteSelected = () => {
     if (!sourceKey || !selectedShapeId) return;
@@ -930,6 +975,19 @@ export default function AnnotationCanvas({
             {storeShapes
               .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
               .map(renderInteractive)}
+            <Transformer
+              ref={transformerRef}
+              rotateEnabled={false}
+              flipEnabled={false}
+              ignoreStroke
+              anchorSize={8}
+              anchorStroke="#38bdf8"
+              anchorFill="#ffffff"
+              borderStroke="#38bdf8"
+              boundBoxFunc={(oldBox, newBox) =>
+                newBox.width < 5 || newBox.height < 5 ? oldBox : newBox
+              }
+            />
           </Layer>
         )}
 

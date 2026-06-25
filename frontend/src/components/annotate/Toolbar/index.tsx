@@ -149,7 +149,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
           <input
             type="range"
             min={1}
-            max={100}
+            max={500}
             value={brushSize}
             onChange={(e) => setBrushSize(Number(e.target.value))}
             className="w-full"
