@@ -129,16 +129,20 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
         setError('No supported image files (TIFF, PNG, JPG, NPY).');
         return;
       }
-      // Default the container name from the dropped folder if still unset.
+      const sortedNames = [...supported].map((f) => f.name).sort();
+
+      // Default the destination name: dropped-folder name → single file's stem →
+      // generic 'dataset'. The user can still override the field before/after.
       let target = containerPath.trim();
       if (!target || target === 'browse/') {
-        target = `browse/${sanitizeName(suggestedName || 'dataset')}`;
+        const base =
+          suggestedName || (supported.length === 1 ? fileStem(sortedNames[0]) : 'dataset');
+        target = `browse/${sanitizeName(base)}`;
         setContainerPath(target);
       }
 
       // Remember the first sample (by name) so we can jump straight to Annotate.
-      const firstName = [...supported].map((f) => f.name).sort()[0];
-      setFirstKey(fileStem(firstName));
+      setFirstKey(fileStem(sortedNames[0]));
 
       setError(null);
       setStatus(null);
@@ -166,7 +170,8 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
     [containerPath, serverUri, poll],
   );
 
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const dirInputRef = useRef<HTMLInputElement | null>(null);
 
   const onDrop = useCallback(
     async (e: React.DragEvent) => {
@@ -200,7 +205,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
       <div
         role="button"
         tabIndex={0}
-        onClick={() => !uploading && inputRef.current?.click()}
+        onClick={() => !uploading && fileInputRef.current?.click()}
         onDragEnter={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -221,27 +226,56 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
           dragging ? 'border-sky-400 bg-sky-400/10' : 'border-white/20 bg-white/5 hover:border-white/40'
         }`}
       >
+        {/* One picker for individual files, one for a whole folder. */}
         <input
-          ref={inputRef}
+          ref={fileInputRef}
           type="file"
           multiple
+          accept=".tif,.tiff,.png,.jpg,.jpeg,.npy"
+          onChange={onPick}
+          disabled={uploading}
+          className="hidden"
+        />
+        <input
+          ref={dirInputRef}
+          type="file"
           // @ts-expect-error — non-standard but widely supported for folder selection
           webkitdirectory=""
           onChange={onPick}
           disabled={uploading}
           className="hidden"
         />
-        <div className="flex flex-col items-center gap-2 pointer-events-none">
-          <UploadSimple size={28} className="text-sky-300" />
-          <p className="text-sm text-sky-100 font-medium">
-            {uploading ? 'Uploading…' : 'Drag a folder of images here'}
+        <div className="flex flex-col items-center gap-2">
+          <UploadSimple size={28} className="text-sky-300 pointer-events-none" />
+          <p className="text-sm text-sky-100 font-medium pointer-events-none">
+            {uploading ? 'Uploading…' : 'Drag an image file or folder of images here'}
           </p>
-          <p className="text-xs text-sky-300/70">or click to choose a folder (TIFF, PNG, JPG, NPY)</p>
+          {!uploading && (
+            <p className="text-xs text-sky-300/70">
+              or{' '}
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
+                className="underline hover:text-sky-200"
+              >
+                choose files
+              </button>
+              {' · '}
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); dirInputRef.current?.click(); }}
+                className="underline hover:text-sky-200"
+              >
+                choose a folder
+              </button>
+            </p>
+          )}
+          <p className="text-[10px] text-sky-300/50 pointer-events-none">TIFF, PNG, JPG, NPY</p>
         </div>
       </div>
 
       <label className="block text-xs text-sky-300/80">
-        Target container
+        Save uploaded images to
         <input
           type="text"
           value={containerPath}
@@ -249,6 +283,10 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
           placeholder="browse/my_dataset"
           className="mt-1 w-full border border-white/20 rounded-md px-2 py-1.5 text-sm font-mono bg-white/10 text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
         />
+        <span className="block mt-1 text-[11px] text-sky-300/55">
+          Destination path on the server (created if new). Auto-filled from the dropped
+          file/folder — edit if you want.
+        </span>
       </label>
 
       {status && (

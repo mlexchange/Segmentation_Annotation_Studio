@@ -206,8 +206,12 @@ export default function ConnectPage() {
             {selectedServerUri && (
               <div className="space-y-2">
                 <label className="flex items-center gap-2 text-sm font-medium text-sky-100">
-                  <Stack size={15} /> Browse container <span className="text-sky-300/60 font-normal">(optional)</span>
+                  <Stack size={15} /> Dataset to view <span className="text-sky-300/60 font-normal">(optional)</span>
                 </label>
+                <p className="text-xs text-sky-300/70">
+                  Which collection on the server the <span className="font-medium">Browse</span> tab will show.
+                  Most people can leave this blank — it auto-detects, and ingesting below fills it in for you.
+                </p>
                 <div className="flex flex-wrap items-center gap-1 text-sm">
                   <button
                     className="px-2 py-0.5 rounded hover:bg-white/10 text-sky-200 font-medium"
@@ -258,11 +262,11 @@ export default function ConnectPage() {
                     </div>
                   )}
                 </div>
-                <p className="text-xs text-sky-300/70">
-                  {selectedContainer
-                    ? <>Browsing <span className="font-mono text-sky-200">{selectedContainer}</span></>
-                    : 'Leave unset to auto-discover the default browse container.'}
-                </p>
+                {selectedContainer && (
+                  <p className="text-xs text-emerald-300/80">
+                    Browse will show <span className="font-mono">{selectedContainer}</span>
+                  </p>
+                )}
               </div>
             )}
 
