@@ -2,6 +2,7 @@
  * AnnotatePage — react-konva canvas workspace with sidebar tools.
  */
 import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router';
 import { DownloadSimple, FloppyDisk, ClockCounterClockwise, CircleDashed } from '@phosphor-icons/react';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
@@ -23,6 +24,7 @@ import SaveModal from '@/components/annotate/SaveModal';
 import type { SaveDraftPayload } from '@/hooks/useSave';
 
 export default function AnnotatePage() {
+  const navigate = useNavigate();
   const { source, kind, serverUri, meta } = useDatasetStore();
   const { removeShape } = useAnnotationStore();
   const { selectedShapeId, setSelectedShapeId } = useToolStore();
@@ -135,8 +137,15 @@ export default function AnnotatePage() {
 
   if (!meta) {
     return (
-      <div className="flex h-full items-center justify-center text-sky-200">
-        <p>No sample loaded. Go to Browse to pick a sample.</p>
+      <div className="flex h-full flex-col items-center justify-center gap-4 text-sky-200">
+        <p>No sample loaded. Pick a sample to annotate.</p>
+        <button
+          type="button"
+          onClick={() => navigate('/browse')}
+          className="px-4 py-2 rounded-md bg-sky-600 text-white text-sm font-medium hover:bg-sky-700 transition-colors"
+        >
+          Go to Browse
+        </button>
       </div>
     );
   }

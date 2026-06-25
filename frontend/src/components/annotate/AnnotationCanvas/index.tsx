@@ -264,10 +264,22 @@ export default function AnnotationCanvas({
     setMagneticPreview([]);
   }, []);
 
-  // Abandon any in-progress magnetic trace when the tool or slice changes.
+  // Preserve in-progress polygon/lasso drafts across a transient hold-Space pan
+  // (tool flips to 'pan' then back), but abandon them on a real tool switch.
+  const prevToolRef = useRef(tool);
+  useEffect(() => {
+    const prev = prevToolRef.current;
+    prevToolRef.current = tool;
+    if (tool === 'pan' || prev === 'pan') return; // entering/leaving pan keeps the draft
+    resetMagnetic();
+    setDraftPoly([]);
+  }, [tool, resetMagnetic]);
+
+  // A new image/slice always invalidates any in-progress draft.
   useEffect(() => {
     resetMagnetic();
-  }, [tool, currentSlice, sourceKey, resetMagnetic]);
+    setDraftPoly([]);
+  }, [currentSlice, sourceKey, resetMagnetic]);
 
   // Escape cancels the entire in-progress shape (polygon vertices, magnetic
   // trace, or rect/ellipse drag) without committing anything.
@@ -948,8 +960,9 @@ export default function AnnotationCanvas({
           )}
           {renderDraftShape()}
 
-          {/* Magnetic lasso: committed path (solid) + live edge-traced preview (dashed) */}
-          {tool === 'magnetic' && magneticCommitted.length >= 2 && (
+          {/* Magnetic lasso: committed path (solid) + live edge-traced preview (dashed).
+              Kept visible while panning (tool flips to 'pan') so the trace survives. */}
+          {(tool === 'magnetic' || tool === 'pan') && magneticCommitted.length >= 2 && (
             <Line
               points={magneticCommitted}
               stroke={activeColor}
@@ -968,7 +981,7 @@ export default function AnnotationCanvas({
               perfectDrawEnabled={false}
             />
           )}
-          {tool === 'magnetic' && magneticSeedRef.current && (
+          {(tool === 'magnetic' || tool === 'pan') && magneticSeedRef.current && (
             <Circle
               x={magneticSeedRef.current.x}
               y={magneticSeedRef.current.y}
