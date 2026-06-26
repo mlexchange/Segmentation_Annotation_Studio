@@ -344,15 +344,15 @@ export default function AnnotationCanvas({
   }, [imageEl, meta]);
 
   // (Re)compute the preview in the browser whenever the seed or params change.
-  // Runs in a rAF so the "Selecting…" label can paint for large images.
+  // Magic sliders already debounce their store commits (DebouncedSlider), so a
+  // rAF here keeps clicks snappy while still coalescing to one run per frame and
+  // letting the "Selecting…" label paint for large images.
   useEffect(() => {
     if (magicSeeds.length === 0) { setMagicPreview([]); return; }
     const field = ensureMagicField();
     if (!field) { setMagicPreview([]); return; }
     setMagicLoading(true);
-    // Debounce: dragging the tolerance/edge sliders fires rapidly; coalesce so
-    // we run one full-field computation after the user pauses (~100ms).
-    const timer = window.setTimeout(() => {
+    const id = requestAnimationFrame(() => {
       const polys: number[][] = [];
       for (const seed of magicSeeds) {
         polys.push(
@@ -366,8 +366,8 @@ export default function AnnotationCanvas({
       }
       setMagicPreview(polys);
       setMagicLoading(false);
-    }, 100);
-    return () => window.clearTimeout(timer);
+    });
+    return () => cancelAnimationFrame(id);
   }, [magicSeeds, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField]);
 
   const commitMagic = useCallback(() => {

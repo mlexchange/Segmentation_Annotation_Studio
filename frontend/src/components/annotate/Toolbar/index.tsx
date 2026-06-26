@@ -8,6 +8,7 @@ import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { cn } from '@/lib/utils';
+import DebouncedSlider from '@/components/common/DebouncedSlider';
 
 interface ToolButtonProps {
   tool: Tool;
@@ -182,43 +183,32 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
               </button>
             ))}
           </div>
-          <label className="text-xs text-gray-500">
-            Tolerance: {Math.round(magicTolerance * 100)}%
-          </label>
-          <input
-            type="range"
+          <DebouncedSlider
+            label="Tolerance"
+            format={(v) => `${v}%`}
             min={1}
             max={60}
             value={Math.round(magicTolerance * 100)}
-            onChange={(e) => setMagicTolerance(Number(e.target.value) / 100)}
-            className="w-full"
+            onChange={(v) => setMagicTolerance(v / 100)}
           />
           {magicMode === 'contiguous' && (
-            <>
-              <label className="text-xs text-gray-500">
-                Edge stop: {Math.round(magicEdgeStop * 100)}%
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={Math.round(magicEdgeStop * 100)}
-                onChange={(e) => setMagicEdgeStop(Number(e.target.value) / 100)}
-                className="w-full"
-              />
-            </>
+            <DebouncedSlider
+              label="Edge stop"
+              format={(v) => `${v}%`}
+              min={0}
+              max={100}
+              value={Math.round(magicEdgeStop * 100)}
+              onChange={(v) => setMagicEdgeStop(v / 100)}
+            />
           )}
-          <label className="text-xs text-gray-500">
-            Edge smoothing: {magicSigma.toFixed(1)}
-          </label>
-          <input
-            type="range"
+          <DebouncedSlider
+            label="Edge smoothing"
+            format={(v) => v.toFixed(1)}
             min={0}
             max={5}
             step={0.5}
             value={magicSigma}
-            onChange={(e) => setMagicSigma(Number(e.target.value))}
-            className="w-full"
+            onChange={setMagicSigma}
           />
           <p className="text-[10px] text-gray-400 leading-snug">
             Click a region on the image. For voids that leak, raise <b>Edge stop</b>; for
@@ -228,16 +218,13 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
       )}
 
       <div className="flex flex-col gap-1">
-        <label className="text-xs text-gray-500">
-          Annotation opacity: {Math.round(fillOpacity * 100)}%
-        </label>
-        <input
-          type="range"
+        <DebouncedSlider
+          label="Annotation opacity"
+          format={(v) => `${v}%`}
           min={0}
           max={100}
           value={Math.round(fillOpacity * 100)}
-          onChange={(e) => setFillOpacity(Number(e.target.value) / 100)}
-          className="w-full"
+          onChange={(v) => setFillOpacity(v / 100)}
         />
       </div>
     </div>

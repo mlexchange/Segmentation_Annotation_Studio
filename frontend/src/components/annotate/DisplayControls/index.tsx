@@ -3,6 +3,7 @@
  * Does NOT affect exported pixel values — that is governed by RenderOpts.
  */
 import { ArrowCounterClockwise } from '@phosphor-icons/react';
+import DebouncedSlider from '@/components/common/DebouncedSlider';
 
 export interface DisplayControlsProps {
   brightness: number;
@@ -34,32 +35,26 @@ export default function DisplayControls({
       </div>
 
       <div className="flex flex-col gap-0.5">
-        <label className="text-xs text-gray-500">
-          Brightness: {brightness > 0 ? '+' : ''}{brightness}
-        </label>
-        <input
-          type="range"
+        <DebouncedSlider
+          label="Brightness"
+          format={(v) => `${v > 0 ? '+' : ''}${v}`}
           min={-1}
           max={1}
           step={0.05}
           value={brightness}
-          onChange={(e) => onBrightnessChange(Number(e.target.value))}
-          className="w-full"
+          onChange={onBrightnessChange}
         />
       </div>
 
       <div className="flex flex-col gap-0.5">
-        <label className="text-xs text-gray-500">
-          Contrast: {contrast > 0 ? '+' : ''}{contrast}
-        </label>
-        <input
-          type="range"
+        <DebouncedSlider
+          label="Contrast"
+          format={(v) => `${v > 0 ? '+' : ''}${v}`}
           min={-100}
           max={100}
           step={1}
           value={contrast}
-          onChange={(e) => onContrastChange(Number(e.target.value))}
-          className="w-full"
+          onChange={onContrastChange}
         />
       </div>
     </div>

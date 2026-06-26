@@ -7,6 +7,7 @@
  */
 import { ArrowCounterClockwise, X, CaretLeft, CaretRight } from '@phosphor-icons/react';
 import type { VersionMeta } from '@/hooks/useSave';
+import DebouncedSlider from '@/components/common/DebouncedSlider';
 
 interface Props {
   versions: VersionMeta[];
@@ -106,14 +107,15 @@ export default function VersionPreviewBar({
 
           <span className="text-xs text-gray-400 w-8 text-right tabular-nums">v{min}</span>
 
-          <input
-            type="range"
+          <DebouncedSlider
             min={min}
             max={max}
             step={1}
             value={current}
-            onChange={(e) => onChange(Number(e.target.value))}
+            onChange={onChange}
+            debounceMs={150}
             className="flex-1 accent-sky-500 cursor-pointer"
+            ariaLabel="Preview version"
           />
 
           <span className="text-xs text-gray-400 w-8 tabular-nums">v{max}</span>
