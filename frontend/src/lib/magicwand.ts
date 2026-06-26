@@ -21,9 +21,17 @@ export interface GrayField {
 
 const MAX_POLYGONS = 300;
 
-/** Sobel gradient magnitude, normalised by its 99th percentile to ~[0,1]. */
-function gradientField(gray: Float32Array, gw: number, gh: number): Float32Array {
+/** Sobel gradient magnitude, normalised to ~[0,1] so the edge threshold is
+ * dataset-independent.
+ *
+ * Normalisation matters a lot for uniform (fully white/black) regions: a naive
+ * sampled percentile lands near 0 there (edges are sparse), which would blow up
+ * faint interior rendering noise into "walls" and trap the flood at the seed.
+ * We instead use a full-array histogram percentile with a floor relative to the
+ * strongest edge, so interior noise stays ~0 and real boundaries stay ~1. */
+export function gradientField(gray: Float32Array, gw: number, gh: number): Float32Array {
   const grad = new Float32Array(gw * gh);
+  let maxRaw = 0;
   for (let y = 1; y < gh - 1; y++) {
     for (let x = 1; x < gw - 1; x++) {
       const i = y * gw + x;
@@ -33,17 +41,28 @@ function gradientField(gray: Float32Array, gw: number, gh: number): Float32Array
       const gy =
         -gray[i - gw - 1] - 2 * gray[i - gw] - gray[i - gw + 1] +
         gray[i + gw - 1] + 2 * gray[i + gw] + gray[i + gw + 1];
-      grad[i] = Math.hypot(gx, gy);
+      const m = Math.hypot(gx, gy);
+      grad[i] = m;
+      if (m > maxRaw) maxRaw = m;
     }
   }
-  // Normalise by the 99th percentile so the threshold is dataset-independent.
+  if (maxRaw < 1e-6) return grad; // perfectly uniform → no edges, no walls
+
+  // 99th-percentile via a 256-bin histogram over ALL pixels (robust + O(n)).
   const n = grad.length;
-  const step = Math.max(1, Math.floor(n / 10000));
-  const s: number[] = [];
-  for (let i = 0; i < n; i += step) s.push(grad[i]);
-  s.sort((a, b) => a - b);
-  const p99 = s[Math.floor(s.length * 0.99)] || s[s.length - 1] || 1;
-  const inv = 1 / (p99 || 1);
+  const bins = new Int32Array(256);
+  const toBin = 255 / maxRaw;
+  for (let i = 0; i < n; i++) bins[(grad[i] * toBin) | 0]++;
+  const target = 0.99 * n;
+  let cum = 0;
+  let p99 = maxRaw;
+  for (let b = 0; b < 256; b++) {
+    cum += bins[b];
+    if (cum >= target) { p99 = (b / 255) * maxRaw; break; }
+  }
+  // Floor at 20% of the max edge so a uniform region (p99≈0) doesn't over-wall.
+  const denom = Math.max(p99, 0.2 * maxRaw);
+  const inv = 1 / denom;
   for (let i = 0; i < n; i++) grad[i] = Math.min(1, grad[i] * inv);
   return grad;
 }

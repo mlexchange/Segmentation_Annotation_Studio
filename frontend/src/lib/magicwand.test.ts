@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { magicSelect, type GrayField } from './magicwand';
+import { magicSelect, gradientField, type GrayField } from './magicwand';
 
 /** 40x40 grid (scale 1): background 0 with two value-200 blocks. */
 function twoBlocks(): GrayField {
@@ -57,6 +57,28 @@ describe('magicwand', () => {
     const walled = magicSelect(field, 5, 5, { toleranceFrac: 0.5, mode: 'contiguous', smooth: 0, edgeStop: 0.5, minRegion: 8 });
     expect(walled.length).toBe(1);
     expect(Math.max(...walled[0].filter((_, i) => i % 2 === 0))).toBeLessThan(21);
+  });
+
+  it('fills a uniform region with edgeStop on (noise must not wall the flood)', () => {
+    // Left half uniform (100, with faint noise), right half 200, sharp edge at x=30.
+    const gw = 60, gh = 40;
+    const gray = new Float32Array(gw * gh);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) gray[y * gw + x] = x < 30 ? 100 : 200;
+    }
+    gray[20 * gw + 10] = 104; // a faint interior "noise" pixel
+    gray[15 * gw + 18] = 97;
+    const field: GrayField = { gw, gh, scale: 1, gray, grad: gradientField(gray, gw, gh) };
+
+    // Seed in the uniform left region with the edge barrier active.
+    const polys = magicSelect(field, 10, 20, {
+      toleranceFrac: 0.2, mode: 'contiguous', smooth: 0, edgeStop: 0.3, minRegion: 8,
+    });
+    expect(polys.length).toBe(1);
+    const xs = polys[0].filter((_, i) => i % 2 === 0);
+    // Should fill most of the left region (not get trapped at the seed) and not cross x=30.
+    expect(Math.max(...xs)).toBeGreaterThan(20);
+    expect(Math.max(...xs)).toBeLessThan(31);
   });
 
   it('scales polygon coordinates back to image space', () => {
