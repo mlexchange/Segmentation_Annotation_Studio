@@ -65,6 +65,8 @@ export interface AnnotationState {
   /** Append several shapes in one update (one undo step) — used by magic-wand. */
   addShapes: (sourceKey: string, sliceIdx: number, shapes: Shape[]) => void;
   removeShape: (sourceKey: string, sliceIdx: number, shapeId: string) => void;
+  /** Remove several shapes in one update (one undo step). */
+  removeShapes: (sourceKey: string, sliceIdx: number, shapeIds: string[]) => void;
   /** Replace a single shape via an updater (used for move / vertex editing). */
   updateShape: (sourceKey: string, sliceIdx: number, shapeId: string, updater: (shape: Shape) => Shape) => void;
   /** Remove every shape with *classId* across all loaded samples (all slices). */
@@ -129,6 +131,22 @@ export const useAnnotationStore = create<AnnotationState>()(
               [sourceKey]: {
                 ...(s.byImage[sourceKey] ?? {}),
                 [sliceKey]: prev.filter((sh) => sh.id !== shapeId),
+              },
+            },
+          };
+        }),
+
+      removeShapes: (sourceKey, sliceIdx, shapeIds) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          const drop = new Set(shapeIds);
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: prev.filter((sh) => !drop.has(sh.id)),
               },
             },
           };

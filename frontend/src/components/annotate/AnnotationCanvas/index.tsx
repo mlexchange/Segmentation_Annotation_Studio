@@ -28,6 +28,11 @@ import { useImageSlice } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { buildField, magicSelect, type GrayField } from '@/lib/magicwand';
 
+// macOS labels the Alt key "Option" (⌥). e.altKey is true for it either way,
+// so only the on-screen label needs to differ.
+const IS_MAC = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
+const REMOVE_KEY_LABEL = IS_MAC ? 'Option' : 'Alt';
+
 interface AnnotationCanvasProps {
   brightness: number;
   contrast: number;
@@ -86,6 +91,42 @@ function shapeContainsPoint(shape: Shape, x: number, y: number): boolean {
   return false;
 }
 
+interface BBox { x: number; y: number; w: number; h: number; }
+
+/** Axis-aligned bounding box of a shape in image pixels (for marquee hit-testing). */
+function shapeBBox(shape: Shape): BBox | null {
+  if (shape.kind === 'rectangle') return { x: shape.x, y: shape.y, w: shape.w, h: shape.h };
+  if (shape.kind === 'ellipse') {
+    return { x: shape.cx - shape.rx, y: shape.cy - shape.ry, w: 2 * shape.rx, h: 2 * shape.ry };
+  }
+  if (shape.kind === 'polygon') {
+    const xs = shape.points.filter((_, i) => i % 2 === 0);
+    const ys = shape.points.filter((_, i) => i % 2 === 1);
+    if (!xs.length) return null;
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }
+  if (shape.kind === 'brush') {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, r = 0;
+    for (const st of shape.strokes) {
+      r = Math.max(r, st.radius);
+      for (let i = 0; i + 1 < st.points.length; i += 2) {
+        minX = Math.min(minX, st.points[i]); maxX = Math.max(maxX, st.points[i]);
+        minY = Math.min(minY, st.points[i + 1]); maxY = Math.max(maxY, st.points[i + 1]);
+      }
+    }
+    if (!isFinite(minX)) return null;
+    return { x: minX - r, y: minY - r, w: maxX - minX + 2 * r, h: maxY - minY + 2 * r };
+  }
+  return null;
+}
+
+/** True if two AABBs overlap. */
+function bboxIntersects(a: BBox, b: BBox): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
 export default function AnnotationCanvas({
   brightness,
   contrast,
@@ -123,11 +164,14 @@ export default function AnnotationCanvas({
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
-  const { byImage, addShape, addShapes, appendBrushStroke, appendEraseStroke, updateShape, removeShape } = useAnnotationStore();
-  const { tool, brushSize, fillOpacity, selectedShapeId, setSelectedShapeId } = useToolStore();
+  const { byImage, addShape, addShapes, appendBrushStroke, appendEraseStroke, updateShape, removeShapes } = useAnnotationStore();
+  const { tool, brushSize, fillOpacity, selectedShapeIds, setSelectedShapeId, setSelectedShapeIds } = useToolStore();
+  // Single-selection id — drives move/resize/vertex editing (those need exactly one).
+  const selectedId = selectedShapeIds.length === 1 ? selectedShapeIds[0] : null;
   const magicTolerance = useToolStore((s) => s.magicTolerance);
   const magicMode = useToolStore((s) => s.magicMode);
   const magicSigma = useToolStore((s) => s.magicSigma);
+  const magicEdgeStop = useToolStore((s) => s.magicEdgeStop);
   const fitRequestId = useToolStore((s) => s.fitRequestId);
   const { classes } = useClassStore();
 
@@ -143,6 +187,10 @@ export default function AnnotationCanvas({
   const [editPoly, setEditPoly] = useState<{ id: string; points: number[] } | null>(null);
 
   // Magic-wand selection: seed click + preview polygons (image coords) before commit.
+  // Marquee rubber-band (select tool): drag a box to select multiple shapes.
+  const [marqueeStart, setMarqueeStart] = useState<{ x: number; y: number } | null>(null);
+  const [marqueeRect, setMarqueeRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+
   // Magic-wand seeds: each click is a seed; shift-click appends another so
   // several regions can be accumulated before accepting.
   const [magicSeeds, setMagicSeeds] = useState<Array<{ x: number; y: number }>>([]);
@@ -302,22 +350,25 @@ export default function AnnotationCanvas({
     const field = ensureMagicField();
     if (!field) { setMagicPreview([]); return; }
     setMagicLoading(true);
-    const id = requestAnimationFrame(() => {
+    // Debounce: dragging the tolerance/edge sliders fires rapidly; coalesce so
+    // we run one full-field computation after the user pauses (~100ms).
+    const timer = window.setTimeout(() => {
       const polys: number[][] = [];
       for (const seed of magicSeeds) {
         polys.push(
           ...magicSelect(field, seed.x, seed.y, {
             toleranceFrac: magicTolerance,
             mode: magicMode,
-            blur: magicSigma,
+            smooth: magicSigma,
+            edgeStop: magicEdgeStop,
           }),
         );
       }
       setMagicPreview(polys);
       setMagicLoading(false);
-    });
-    return () => cancelAnimationFrame(id);
-  }, [magicSeeds, magicTolerance, magicMode, magicSigma, ensureMagicField]);
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [magicSeeds, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField]);
 
   const commitMagic = useCallback(() => {
     if (!sourceKey || activeClassId === null) return;
@@ -358,6 +409,8 @@ export default function AnnotationCanvas({
       setDraftPoly([]);
       setDragStart(null);
       setDragCurrent(null);
+      setMarqueeStart(null);
+      setMarqueeRect(null);
       resetMagnetic();
       resetMagic();
     };
@@ -391,10 +444,14 @@ export default function AnnotationCanvas({
   const handleStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     if (isPreviewing) return;
 
-    // Select tool: clicking empty canvas (the stage itself) clears the selection.
-    // Clicks on a shape are handled by that shape's own onClick (which selects it).
+    // Select tool: pressing on empty canvas begins a marquee (rubber-band).
+    // Whether it becomes a box-select or a deselect is decided on mouse-up.
+    // Clicks on a shape are handled by that shape's own onClick (selectShape).
     if (tool === 'select') {
-      if (e.target === e.target.getStage()) setSelectedShapeId(null);
+      if (e.target === e.target.getStage()) {
+        const p = getPointerImagePos();
+        if (p) { setMarqueeStart(p); setMarqueeRect(null); }
+      }
       return;
     }
 
@@ -406,9 +463,25 @@ export default function AnnotationCanvas({
       setDraftPoly((prev) => [...prev, pos.x, pos.y]);
     } else if (tool === 'magic') {
       // Seed the magic-wand selection (the effect computes the preview).
-      // Shift-click appends another region; a plain click starts fresh.
+      //  • Alt-click  → drop the nearest seed (remove a bad region)
+      //  • Shift-click → append another region
+      //  • plain click → start fresh
       const seed = { x: pos.x, y: pos.y };
-      setMagicSeeds((prev) => (e.evt.shiftKey ? [...prev, seed] : [seed]));
+      if (e.evt.altKey) {
+        setMagicSeeds((prev) => {
+          if (prev.length === 0) return prev;
+          let bestI = 0, bestD = Infinity;
+          prev.forEach((s, i) => {
+            const d = (s.x - pos.x) ** 2 + (s.y - pos.y) ** 2;
+            if (d < bestD) { bestD = d; bestI = i; }
+          });
+          return prev.filter((_, i) => i !== bestI);
+        });
+      } else if (e.evt.shiftKey) {
+        setMagicSeeds((prev) => [...prev, seed]);
+      } else {
+        setMagicSeeds([seed]);
+      }
     } else if (tool === 'magnetic') {
       const cm = ensureCostMap();
       if (cm && magneticSeedRef.current && magneticPrevRef.current) {
@@ -507,6 +580,12 @@ export default function AnnotationCanvas({
       brushCursorLayerRef.current?.batchDraw();
     }
 
+    // Marquee rubber-band: update the box while dragging on empty canvas.
+    if (tool === 'select' && marqueeStart && e.evt.buttons === 1) {
+      setMarqueeRect(normalizeRect(marqueeStart.x, marqueeStart.y, pos.x - marqueeStart.x, pos.y - marqueeStart.y));
+      return;
+    }
+
     if (!sourceKey || !meta) return;
 
     // Magnetic lasso: live least-cost path from the seed to the cursor.
@@ -539,6 +618,28 @@ export default function AnnotationCanvas({
 
   const handleStageMouseUp = () => {
     if (isPreviewing) return;
+
+    // Finish a marquee: a real drag box-selects intersecting shapes; a bare
+    // click (no box) clears the selection.
+    if (tool === 'select' && marqueeStart) {
+      const rect = marqueeRect;
+      if (rect && rect.w > 3 && rect.h > 3 && sourceKey) {
+        const ids = storeShapes
+          .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
+          .filter((s) => {
+            const bb = shapeBBox(s);
+            return bb && bboxIntersects(bb, rect);
+          })
+          .map((s) => s.id);
+        setSelectedShapeIds(ids);
+      } else {
+        setSelectedShapeIds([]);
+      }
+      setMarqueeStart(null);
+      setMarqueeRect(null);
+      return;
+    }
+
     if (isDrawing) {
       commitDraftStroke();
       setIsDrawing(false);
@@ -686,7 +787,7 @@ export default function AnnotationCanvas({
       shape.id === activeBrushShapeId && activeClassId !== null
         ? colorForClass(activeClassId)
         : colorForClass(shape.classId);
-    const isSelected = shape.id === selectedShapeId;
+    const isSelected = selectedShapeIds.includes(shape.id);
     const strokeW = (isSelected ? 2 : 1) / transform.scaleX;
 
     if (shape.kind === 'polygon') {
@@ -772,13 +873,24 @@ export default function AnnotationCanvas({
 
   const selectShape = (e: Konva.KonvaEventObject<MouseEvent>, id: string) => {
     e.cancelBubble = true;
-    setSelectedShapeId(id);
+    // Shift-click toggles the shape in/out of the current multi-selection.
+    if (e.evt.shiftKey) {
+      setSelectedShapeIds(
+        selectedShapeIds.includes(id)
+          ? selectedShapeIds.filter((sid) => sid !== id)
+          : [...selectedShapeIds, id],
+      );
+    } else {
+      setSelectedShapeId(id);
+    }
   };
 
   /** Render a shape as an interactive, draggable hit target with a selection outline. */
   const renderInteractive = (shape: Shape) => {
     if (!sourceKey) return null;
-    const selected = shape.id === selectedShapeId;
+    const selected = selectedShapeIds.includes(shape.id);
+    // Move/resize/vertex editing require exactly one selected shape.
+    const single = selectedId === shape.id;
     const baseColor = colorForClass(shape.classId);
     const outline = selected ? '#ffffff' : baseColor;
     const sw = (selected ? 2.5 : 1.5) / transform.scaleX;
@@ -795,7 +907,7 @@ export default function AnnotationCanvas({
       return (
         <Group
           key={shape.id}
-          draggable={selected}
+          draggable={single}
           {...handlers}
           onDragEnd={(e) => {
             // Only the Group itself moving = a whole-shape move; vertex-circle
@@ -820,7 +932,7 @@ export default function AnnotationCanvas({
             strokeWidth={sw}
             dash={dash}
           />
-          {selected &&
+          {single &&
             Array.from({ length: livePoints.length / 2 }, (_, vi) => (
               <Circle
                 key={vi}
@@ -860,7 +972,7 @@ export default function AnnotationCanvas({
           id={shape.id}
           x={shape.x} y={shape.y} width={shape.w} height={shape.h}
           fill={hitFill} stroke={outline} strokeWidth={sw} dash={dash}
-          draggable={selected}
+          draggable={single}
           {...handlers}
           onDragEnd={(e) => {
             const nx = e.target.x();
@@ -893,7 +1005,7 @@ export default function AnnotationCanvas({
           id={shape.id}
           x={shape.cx} y={shape.cy} radiusX={shape.rx} radiusY={shape.ry}
           fill={hitFill} stroke={outline} strokeWidth={sw} dash={dash}
-          draggable={selected}
+          draggable={single}
           {...handlers}
           onDragEnd={(e) => {
             const nx = e.target.x();
@@ -922,7 +1034,7 @@ export default function AnnotationCanvas({
       return (
         <Group
           key={shape.id}
-          draggable={selected}
+          draggable={single}
           {...handlers}
           onDragEnd={(e) => {
             const dx = e.target.x();
@@ -962,8 +1074,9 @@ export default function AnnotationCanvas({
   };
 
   const showInteractive = tool === 'select' && !isPreviewing;
-  const selectedShape = sourceKey
-    ? storeShapes.find((s) => s.id === selectedShapeId) ?? null
+  // The single selected shape (resize/transform only applies to one).
+  const selectedShape = sourceKey && selectedId
+    ? storeShapes.find((s) => s.id === selectedId) ?? null
     : null;
 
   // Attach the resize Transformer to the selected rect/ellipse (by Konva id).
@@ -983,8 +1096,8 @@ export default function AnnotationCanvas({
   }, [showInteractive, selectedShape, selectedResizable, displayShapes, transform]);
 
   const handleDeleteSelected = () => {
-    if (!sourceKey || !selectedShapeId) return;
-    removeShape(sourceKey, currentSlice, selectedShapeId);
+    if (!sourceKey || selectedShapeIds.length === 0) return;
+    removeShapes(sourceKey, currentSlice, selectedShapeIds);
     setSelectedShapeId(null);
     setEditPoly(null);
   };
@@ -1059,6 +1172,19 @@ export default function AnnotationCanvas({
                 newBox.width < 5 || newBox.height < 5 ? oldBox : newBox
               }
             />
+            {marqueeRect && (
+              <Rect
+                x={marqueeRect.x}
+                y={marqueeRect.y}
+                width={marqueeRect.w}
+                height={marqueeRect.h}
+                fill="rgba(56,189,248,0.12)"
+                stroke="#38bdf8"
+                strokeWidth={1 / transform.scaleX}
+                dash={[4 / transform.scaleX, 3 / transform.scaleX]}
+                listening={false}
+              />
+            )}
           </Layer>
         )}
 
@@ -1185,12 +1311,14 @@ export default function AnnotationCanvas({
       </Stage>
 
       {/* Selection toolbar (select tool) */}
-      {showInteractive && selectedShape && (
+      {showInteractive && selectedShapeIds.length > 0 && (
         <div className="absolute top-2 left-2 flex items-center gap-2 bg-slate-800/90 text-slate-100 text-xs px-3 py-1.5 rounded-md shadow-lg">
           <span className="text-slate-300">
-            {selectedShape.kind === 'polygon'
-              ? 'Drag a vertex to edit, or drag the shape to move'
-              : 'Drag to move'}
+            {selectedShapeIds.length > 1
+              ? `${selectedShapeIds.length} selected`
+              : selectedShape?.kind === 'polygon'
+                ? 'Drag a vertex to edit, or drag the shape to move'
+                : 'Drag to move or resize'}
           </span>
           <button
             type="button"
@@ -1199,14 +1327,14 @@ export default function AnnotationCanvas({
             title="Delete selected (Del)"
           >
             <Trash size={13} />
-            Delete
+            Delete{selectedShapeIds.length > 1 ? ` (${selectedShapeIds.length})` : ''}
           </button>
         </div>
       )}
 
-      {showInteractive && !selectedShape && (
+      {showInteractive && selectedShapeIds.length === 0 && (
         <div className="absolute top-2 left-2 bg-slate-800/80 text-slate-300 text-xs px-3 py-1.5 rounded-md pointer-events-none">
-          Click an annotation to select it
+          Click a shape to select · drag a box to select many · shift-click to add
         </div>
       )}
 
@@ -1219,7 +1347,7 @@ export default function AnnotationCanvas({
       {/* Magic-wand: hint before a click, Add/Cancel panel after. */}
       {tool === 'magic' && !isPreviewing && magicSeeds.length === 0 && (
         <div className="absolute top-2 left-2 bg-slate-800/85 text-slate-200 text-xs px-3 py-1.5 rounded-md pointer-events-none">
-          Click a region to select similar pixels · Shift-click to add more
+          Click a region · Shift-click to add more · {REMOVE_KEY_LABEL}-click to remove one
         </div>
       )}
       {tool === 'magic' && !isPreviewing && magicSeeds.length > 0 && (
@@ -1228,7 +1356,7 @@ export default function AnnotationCanvas({
             {magicLoading
               ? 'Selecting…'
               : magicPreview.length > 0
-                ? `${magicPreview.length} region${magicPreview.length === 1 ? '' : 's'} · shift-click to add`
+                ? `${magicPreview.length} region${magicPreview.length === 1 ? '' : 's'} · shift-add · ${REMOVE_KEY_LABEL.toLowerCase()}-remove`
                 : 'No match — raise tolerance'}
           </span>
           <button
@@ -1239,6 +1367,16 @@ export default function AnnotationCanvas({
           >
             Add
           </button>
+          {magicSeeds.length > 1 && (
+            <button
+              type="button"
+              onClick={() => setMagicSeeds((prev) => prev.slice(0, -1))}
+              className="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 text-white font-medium"
+              title="Remove the last clicked region"
+            >
+              Undo last
+            </button>
+          )}
           <button
             type="button"
             onClick={resetMagic}

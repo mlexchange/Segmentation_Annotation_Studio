@@ -26,8 +26,8 @@ import type { SaveDraftPayload } from '@/hooks/useSave';
 export default function AnnotatePage() {
   const navigate = useNavigate();
   const { source, kind, serverUri, meta } = useDatasetStore();
-  const { removeShape } = useAnnotationStore();
-  const { selectedShapeId, setSelectedShapeId } = useToolStore();
+  const { removeShapes } = useAnnotationStore();
+  const { selectedShapeIds, setSelectedShapeId } = useToolStore();
   const { classes } = useClassStore();
 
   const [activeClassId, setActiveClassId] = useState<number | null>(null);
@@ -103,8 +103,8 @@ export default function AnnotatePage() {
     : null;
 
   const handleDeleteSelected = () => {
-    if (!sourceKey || !selectedShapeId) return;
-    removeShape(sourceKey, currentSlice, selectedShapeId);
+    if (!sourceKey || selectedShapeIds.length === 0) return;
+    removeShapes(sourceKey, currentSlice, selectedShapeIds);
     setSelectedShapeId(null);
   };
 

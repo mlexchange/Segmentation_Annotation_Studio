@@ -64,6 +64,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
   const {
     tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity,
     magicTolerance, setMagicTolerance, magicMode, setMagicMode, magicSigma, setMagicSigma,
+    magicEdgeStop, setMagicEdgeStop,
   } = useToolStore();
   const { undo, redo } = useStore(useAnnotationStore.temporal);
   const canUndo = useStore(useAnnotationStore.temporal, (s) => s.pastStates.length > 0);
@@ -192,8 +193,23 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
             onChange={(e) => setMagicTolerance(Number(e.target.value) / 100)}
             className="w-full"
           />
+          {magicMode === 'contiguous' && (
+            <>
+              <label className="text-xs text-gray-500">
+                Edge stop: {Math.round(magicEdgeStop * 100)}%
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(magicEdgeStop * 100)}
+                onChange={(e) => setMagicEdgeStop(Number(e.target.value) / 100)}
+                className="w-full"
+              />
+            </>
+          )}
           <label className="text-xs text-gray-500">
-            Smoothing: {magicSigma.toFixed(1)}
+            Edge smoothing: {magicSigma.toFixed(1)}
           </label>
           <input
             type="range"
@@ -205,7 +221,8 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
             className="w-full"
           />
           <p className="text-[10px] text-gray-400 leading-snug">
-            Click a region on the image. Tip: adjust contrast (Display) first for low-contrast scans.
+            Click a region on the image. For voids that leak, raise <b>Edge stop</b>; for
+            low-contrast scans, adjust contrast (Display) first.
           </p>
         </div>
       )}

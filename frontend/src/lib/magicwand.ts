@@ -15,16 +15,48 @@ export interface GrayField {
   /** Image pixels per grid cell (downsample factor). */
   scale: number;
   gray: Float32Array;
+  /** Sobel gradient magnitude normalised to ~[0,1] (edge barrier for flood). */
+  grad?: Float32Array;
 }
 
 const MAX_POLYGONS = 300;
 
-/** Build a downsampled grayscale field from an image (long side ≤ maxDim). */
+/** Sobel gradient magnitude, normalised by its 99th percentile to ~[0,1]. */
+function gradientField(gray: Float32Array, gw: number, gh: number): Float32Array {
+  const grad = new Float32Array(gw * gh);
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      const i = y * gw + x;
+      const gx =
+        -gray[i - gw - 1] - 2 * gray[i - 1] - gray[i + gw - 1] +
+        gray[i - gw + 1] + 2 * gray[i + 1] + gray[i + gw + 1];
+      const gy =
+        -gray[i - gw - 1] - 2 * gray[i - gw] - gray[i - gw + 1] +
+        gray[i + gw - 1] + 2 * gray[i + gw] + gray[i + gw + 1];
+      grad[i] = Math.hypot(gx, gy);
+    }
+  }
+  // Normalise by the 99th percentile so the threshold is dataset-independent.
+  const n = grad.length;
+  const step = Math.max(1, Math.floor(n / 10000));
+  const s: number[] = [];
+  for (let i = 0; i < n; i += step) s.push(grad[i]);
+  s.sort((a, b) => a - b);
+  const p99 = s[Math.floor(s.length * 0.99)] || s[s.length - 1] || 1;
+  const inv = 1 / (p99 || 1);
+  for (let i = 0; i < n; i++) grad[i] = Math.min(1, grad[i] * inv);
+  return grad;
+}
+
+/** Build a grayscale + gradient field from an image (long side ≤ maxDim).
+ *
+ * 1600 keeps a 2560px slice at half-resolution (scale 2) — plenty of detail for
+ * the edge-aware flood while keeping the per-click work ~4x cheaper than full res. */
 export function buildField(
   image: HTMLImageElement,
   imgW: number,
   imgH: number,
-  maxDim = 1400,
+  maxDim = 1600,
 ): GrayField | null {
   const scale = Math.max(1, Math.ceil(Math.max(imgW, imgH) / maxDim));
   const gw = Math.max(1, Math.floor(imgW / scale));
@@ -45,7 +77,7 @@ export function buildField(
   for (let i = 0; i < gw * gh; i++) {
     gray[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
   }
-  return { gw, gh, scale, gray };
+  return { gw, gh, scale, gray, grad: gradientField(gray, gw, gh) };
 }
 
 /** Robust intensity spread (2nd–98th percentile) for tolerance scaling. */
@@ -119,6 +151,24 @@ function simplify(pts: Array<[number, number]>, tol: number): Array<[number, num
   return pts.filter((_, i) => keep[i]);
 }
 
+/** Chaikin corner-cutting: rounds a closed polygon (more iterations = smoother). */
+function chaikin(pts: Array<[number, number]>, iterations: number): Array<[number, number]> {
+  let p = pts;
+  for (let it = 0; it < iterations; it++) {
+    if (p.length < 3) break;
+    const out: Array<[number, number]> = [];
+    const n = p.length;
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = p[i];
+      const [x1, y1] = p[(i + 1) % n];
+      out.push([0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1]);
+      out.push([0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1]);
+    }
+    p = out;
+  }
+  return p;
+}
+
 const NBR: Array<[number, number]> = [
   [-1, 0], [-1, -1], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1],
 ]; // clockwise starting from West
@@ -164,9 +214,11 @@ function traceContour(
 interface SelectOpts {
   toleranceFrac: number;
   mode: 'contiguous' | 'global';
-  blur?: number;       // approx Gaussian radius (0 = off)
+  /** 0–~5 edge smoothing: denoises the field, then rounds the contour. */
+  smooth?: number;
+  /** 0–1 edge barrier (contiguous only): higher = flood stops at weaker edges. */
+  edgeStop?: number;
   minRegion?: number;  // min component size in grid pixels
-  simplifyTol?: number;
 }
 
 /**
@@ -176,14 +228,25 @@ export function magicSelect(
   field: GrayField,
   seedXimg: number,
   seedYimg: number,
-  { toleranceFrac, mode, blur = 0, minRegion = 12, simplifyTol = 1.2 }: SelectOpts,
+  { toleranceFrac, mode, smooth = 0, edgeStop = 0, minRegion = 12 }: SelectOpts,
 ): number[][] {
-  const { gw, gh, scale } = field;
-  const gray = blur > 0 ? boxBlur(field.gray, gw, gh, blur) : field.gray;
+  const { gw, gh, scale, grad } = field;
+  // Smoothing drives three things: a pre-blur (denoise so the boundary is less
+  // ragged), Douglas–Peucker tolerance, and Chaikin rounding of the outline.
+  const blurR = Math.min(Math.round(smooth), 3);
+  const chaikinIters = Math.min(Math.round(smooth), 4);
+  const dpTol = 1 + smooth * 0.6;
+  const gray = blurR > 0 ? boxBlur(field.gray, gw, gh, blurR) : field.gray;
   const sx = Math.max(0, Math.min(gw - 1, Math.floor(seedXimg / scale)));
   const sy = Math.max(0, Math.min(gh - 1, Math.floor(seedYimg / scale)));
   const seedVal = gray[sy * gw + sx];
   const tolAbs = Math.max(0, toleranceFrac) * spread(field.gray);
+
+  // Edge barrier: pixels whose normalised gradient exceeds this are walls the
+  // flood won't cross — keeps a void's selection bounded by its rim instead of
+  // leaking across a soft/ringy edge. Disabled when edgeStop is 0 or no grad.
+  const wallLimit = edgeStop > 0 ? 1 - edgeStop : Infinity;
+  const isWall = (i: number) => grad !== undefined && grad[i] >= wallLimit;
 
   const mask = new Uint8Array(gw * gh);
   if (mode === 'global') {
@@ -191,12 +254,15 @@ export function magicSelect(
       if (Math.abs(gray[i] - seedVal) <= tolAbs) mask[i] = 1;
     }
   } else {
-    // Flood fill from the seed (4-connected), staying within tol of the seed value.
-    const stack = [sy * gw + sx];
+    // Flood fill from the seed (4-connected): stay within tol of the seed value
+    // and don't expand into edge (wall) pixels. The seed itself is always kept.
+    const seedIdx = sy * gw + sx;
+    const stack = [seedIdx];
     while (stack.length) {
       const idx = stack.pop()!;
       if (mask[idx]) continue;
       if (Math.abs(gray[idx] - seedVal) > tolAbs) continue;
+      if (idx !== seedIdx && isWall(idx)) continue;
       mask[idx] = 1;
       const x = idx % gw, y = (idx / gw) | 0;
       if (x > 0) stack.push(idx - 1);
@@ -235,7 +301,8 @@ export function magicSelect(
   for (let lbl = 1; lbl < next; lbl++) {
     if (sizes[lbl] < minRegion) continue;
     let contour = traceContour(labels, gw, gh, lbl, starts[lbl]);
-    contour = simplify(contour, simplifyTol);
+    contour = simplify(contour, dpTol);     // drop staircase collinear points
+    contour = chaikin(contour, chaikinIters); // round the remaining corners
     if (contour.length < 3) continue;
     const flat: number[] = [];
     for (const [x, y] of contour) {
