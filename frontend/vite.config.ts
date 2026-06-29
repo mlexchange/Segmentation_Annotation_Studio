@@ -4,6 +4,11 @@ import tsconfigPaths from 'vite-tsconfig-paths';
 
 export default defineConfig({
   plugins: [react(), tsconfigPaths()],
+  // Transformers.js bundles onnxruntime-web (wasm/webgpu); let it load its own
+  // assets at runtime rather than having Vite pre-bundle/optimize it.
+  optimizeDeps: { exclude: ['@huggingface/transformers'] },
+  // The SAM worker is an ES module worker (`new Worker(url, { type: 'module' })`).
+  worker: { format: 'es' },
   server: {
     host: '127.0.0.1',
     port: 5173,

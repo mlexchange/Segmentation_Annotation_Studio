@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { magicSelect, gradientField, type GrayField } from './magicwand';
+import { magicSelect, maskToPolygons, gradientField, type GrayField } from './magicwand';
 
 /** 40x40 grid (scale 1): background 0 with two value-200 blocks. */
 function twoBlocks(): GrayField {
@@ -89,5 +89,44 @@ describe('magicwand', () => {
     // block A spans grid x∈[4,14) → image x∈[~16,~58); coords should exceed grid range.
     const xs = polys[0].filter((_, i) => i % 2 === 0);
     expect(Math.max(...xs)).toBeGreaterThan(20);
+  });
+});
+
+/** Build a w×h binary mask with `fill` setting rectangular blocks to 1. */
+function maskWith(w: number, h: number, blocks: Array<[number, number, number, number]>): Uint8Array {
+  const m = new Uint8Array(w * h);
+  for (const [x0, y0, bw, bh] of blocks) {
+    for (let y = y0; y < y0 + bh; y++) for (let x = x0; x < x0 + bw; x++) m[y * w + x] = 1;
+  }
+  return m;
+}
+
+describe('maskToPolygons (shared by SAM + classic)', () => {
+  it('returns one polygon for one blob', () => {
+    const mask = maskWith(40, 40, [[5, 5, 12, 12]]);
+    const polys = maskToPolygons(mask, 40, 40, { minRegion: 8 });
+    expect(polys.length).toBe(1);
+    expect(polys[0].length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('returns two polygons for two disjoint blobs', () => {
+    const mask = maskWith(40, 40, [[4, 4, 10, 10], [26, 26, 10, 10]]);
+    const polys = maskToPolygons(mask, 40, 40, { minRegion: 8 });
+    expect(polys.length).toBe(2);
+  });
+
+  it('drops components smaller than minRegion', () => {
+    const mask = maskWith(40, 40, [[4, 4, 12, 12]]);
+    mask[38 * 40 + 38] = 1; // 1px speck
+    const polys = maskToPolygons(mask, 40, 40, { minRegion: 12 });
+    expect(polys.length).toBe(1);
+  });
+
+  it('maps coordinates to image space via scale', () => {
+    const mask = maskWith(40, 40, [[4, 4, 10, 10]]);
+    const polys = maskToPolygons(mask, 40, 40, { minRegion: 8, scale: 4 });
+    const xs = polys[0].filter((_, i) => i % 2 === 0);
+    // grid x∈[4,14) → image x∈[~18,~58): max should clear the raw grid range.
+    expect(Math.max(...xs)).toBeGreaterThan(40);
   });
 });

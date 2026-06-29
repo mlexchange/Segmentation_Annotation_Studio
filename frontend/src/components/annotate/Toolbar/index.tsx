@@ -9,6 +9,11 @@ import { useToolStore, type Tool } from '@/stores/toolStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { cn } from '@/lib/utils';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
+import { useSam } from '@/hooks/useSam';
+
+// macOS labels the Alt key "Option" (⌥); the key name only differs on screen.
+const IS_MAC = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
+const REMOVE_KEY_LABEL = IS_MAC ? 'Option' : 'Alt';
 
 interface ToolButtonProps {
   tool: Tool;
@@ -65,8 +70,10 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
   const {
     tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity,
     magicTolerance, setMagicTolerance, magicMode, setMagicMode, magicSigma, setMagicSigma,
-    magicEdgeStop, setMagicEdgeStop,
+    magicEdgeStop, setMagicEdgeStop, magicEngine, setMagicEngine,
+    samDetail, setSamDetail, samThreshold, setSamThreshold,
   } = useToolStore();
+  const sam = useSam(tool === 'magic' && magicEngine === 'sam');
   const { undo, redo } = useStore(useAnnotationStore.temporal);
   const canUndo = useStore(useAnnotationStore.temporal, (s) => s.pastStates.length > 0);
   const canRedo = useStore(useAnnotationStore.temporal, (s) => s.futureStates.length > 0);
@@ -165,55 +172,141 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
 
       {tool === 'magic' && (
         <div className="flex flex-col gap-2 mt-1">
+          {/* Engine selector + status badge */}
           <div className="grid grid-cols-2 gap-1">
-            {(['contiguous', 'global'] as const).map((m) => (
+            {([['sam', 'Smart (AI)'], ['classic', 'Classic']] as const).map(([eng, label]) => (
               <button
-                key={m}
+                key={eng}
                 type="button"
-                onClick={() => setMagicMode(m)}
+                onClick={() => setMagicEngine(eng)}
+                disabled={eng === 'sam' && !sam.supported}
                 className={cn(
                   'py-1 rounded-md text-xs border transition-colors',
-                  magicMode === m
+                  magicEngine === eng
                     ? 'bg-sky-600 text-white border-sky-700'
-                    : 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50',
+                    : 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50 disabled:opacity-40 disabled:cursor-not-allowed',
                 )}
-                title={m === 'contiguous' ? 'Select the connected region you click' : 'Select all similar regions on the slice'}
+                title={eng === 'sam'
+                  ? 'Segment Anything — click an object, no tuning'
+                  : 'Threshold flood-fill — pick by brightness similarity'}
               >
-                {m === 'contiguous' ? 'Connected' : 'All similar'}
+                {label}
               </button>
             ))}
           </div>
-          <DebouncedSlider
-            label="Tolerance"
-            format={(v) => `${v}%`}
-            min={1}
-            max={60}
-            value={Math.round(magicTolerance * 100)}
-            onChange={(v) => setMagicTolerance(v / 100)}
-          />
-          {magicMode === 'contiguous' && (
-            <DebouncedSlider
-              label="Edge stop"
-              format={(v) => `${v}%`}
-              min={0}
-              max={100}
-              value={Math.round(magicEdgeStop * 100)}
-              onChange={(v) => setMagicEdgeStop(v / 100)}
-            />
+
+          {magicEngine === 'sam' ? (
+            <>
+              <p className="text-[10px] text-gray-500 leading-snug">
+                {sam.status === 'loading-model'
+                  ? 'Loading model… (first time only)'
+                  : sam.status === 'encoding'
+                    ? 'Encoding slice…'
+                    : sam.status === 'ready'
+                      ? `SAM ready · ${sam.backend === 'webgpu' ? 'WebGPU' : 'CPU'}`
+                      : sam.webgpu
+                        ? 'Drag a box around an object, or click it.'
+                        : 'No WebGPU — SAM will run on CPU (slower).'}
+              </p>
+              <label className="text-xs text-gray-500">Detail</label>
+              <div className="grid grid-cols-4 gap-1">
+                {(['auto', 'fine', 'medium', 'coarse'] as const).map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => setSamDetail(d)}
+                    className={cn(
+                      'py-1 rounded-md text-[11px] border transition-colors capitalize',
+                      samDetail === d
+                        ? 'bg-sky-600 text-white border-sky-700'
+                        : 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50',
+                    )}
+                    title={d === 'auto'
+                      ? 'Highest-confidence mask'
+                      : `Pick SAM's ${d} mask (${d === 'fine' ? 'smallest' : d === 'coarse' ? 'largest' : 'mid'} region)`}
+                  >
+                    {d}
+                  </button>
+                ))}
+              </div>
+              <DebouncedSlider
+                label="Tightness"
+                format={(v) => (v === 0 ? '0' : `${v > 0 ? '+' : ''}${v.toFixed(1)}`)}
+                min={-6}
+                max={6}
+                step={0.5}
+                value={samThreshold}
+                onChange={setSamThreshold}
+              />
+              <DebouncedSlider
+                label="Edge smoothing"
+                format={(v) => v.toFixed(1)}
+                min={0}
+                max={5}
+                step={0.5}
+                value={magicSigma}
+                onChange={setMagicSigma}
+              />
+              <p className="text-[10px] text-gray-400 leading-snug">
+                Drag a box around the object (most reliable), or click it. Shift-click adds to the
+                object; <b>{REMOVE_KEY_LABEL}-click drops a "not" point (red)</b> to remove an area
+                SAM grabbed by mistake. Grabs too much? Lower <b>Detail</b> or raise <b>Tightness</b>.
+                Adjust Display brightness/contrast to re-encode what SAM sees.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-1">
+                {(['contiguous', 'global'] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setMagicMode(m)}
+                    className={cn(
+                      'py-1 rounded-md text-xs border transition-colors',
+                      magicMode === m
+                        ? 'bg-sky-600 text-white border-sky-700'
+                        : 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50',
+                    )}
+                    title={m === 'contiguous' ? 'Select the connected region you click' : 'Select all similar regions on the slice'}
+                  >
+                    {m === 'contiguous' ? 'Connected' : 'All similar'}
+                  </button>
+                ))}
+              </div>
+              <DebouncedSlider
+                label="Tolerance"
+                format={(v) => `${v}%`}
+                min={1}
+                max={60}
+                value={Math.round(magicTolerance * 100)}
+                onChange={(v) => setMagicTolerance(v / 100)}
+              />
+              {magicMode === 'contiguous' && (
+                <DebouncedSlider
+                  label="Edge stop"
+                  format={(v) => `${v}%`}
+                  min={0}
+                  max={100}
+                  value={Math.round(magicEdgeStop * 100)}
+                  onChange={(v) => setMagicEdgeStop(v / 100)}
+                />
+              )}
+              <DebouncedSlider
+                label="Edge smoothing"
+                format={(v) => v.toFixed(1)}
+                min={0}
+                max={5}
+                step={0.5}
+                value={magicSigma}
+                onChange={setMagicSigma}
+              />
+              <p className="text-[10px] text-gray-400 leading-snug">
+                Click a region on the image. For voids that leak, raise <b>Edge stop</b>; for
+                low-contrast scans, adjust contrast (Display) first.
+              </p>
+            </>
           )}
-          <DebouncedSlider
-            label="Edge smoothing"
-            format={(v) => v.toFixed(1)}
-            min={0}
-            max={5}
-            step={0.5}
-            value={magicSigma}
-            onChange={setMagicSigma}
-          />
-          <p className="text-[10px] text-gray-400 leading-snug">
-            Click a region on the image. For voids that leak, raise <b>Edge stop</b>; for
-            low-contrast scans, adjust contrast (Display) first.
-          </p>
         </div>
       )}
 

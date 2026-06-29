@@ -240,56 +240,33 @@ interface SelectOpts {
   minRegion?: number;  // min component size in grid pixels
 }
 
+interface MaskPolyOpts {
+  /** Min component size, in mask pixels, to keep. */
+  minRegion?: number;
+  /** 0–~5: Douglas–Peucker tolerance + Chaikin rounding strength on the outline. */
+  smooth?: number;
+  /** Mask pixels per output image pixel (1 if the mask is already image-resolution). */
+  scale?: number;
+}
+
 /**
- * Select similar pixels from `seed` and return polygons in IMAGE coordinates.
+ * Convert a binary mask into simplified, smoothed polygon contours in IMAGE
+ * coordinates. Shared by the classic wand (`magicSelect`) and the SAM engine,
+ * which both produce a `Uint8Array` mask and want editable polygon shapes.
+ *
+ * Labels 4-connected components, Moore-neighbor traces each, simplifies the
+ * staircase with Douglas–Peucker, then rounds corners with Chaikin. Components
+ * smaller than `minRegion` are dropped; output is capped at `MAX_POLYGONS`
+ * (largest first).
  */
-export function magicSelect(
-  field: GrayField,
-  seedXimg: number,
-  seedYimg: number,
-  { toleranceFrac, mode, smooth = 0, edgeStop = 0, minRegion = 12 }: SelectOpts,
+export function maskToPolygons(
+  mask: Uint8Array,
+  gw: number,
+  gh: number,
+  { minRegion = 12, smooth = 0, scale = 1 }: MaskPolyOpts = {},
 ): number[][] {
-  const { gw, gh, scale, grad } = field;
-  // Smoothing drives three things: a pre-blur (denoise so the boundary is less
-  // ragged), Douglas–Peucker tolerance, and Chaikin rounding of the outline.
-  const blurR = Math.min(Math.round(smooth), 3);
   const chaikinIters = Math.min(Math.round(smooth), 4);
   const dpTol = 1 + smooth * 0.6;
-  const gray = blurR > 0 ? boxBlur(field.gray, gw, gh, blurR) : field.gray;
-  const sx = Math.max(0, Math.min(gw - 1, Math.floor(seedXimg / scale)));
-  const sy = Math.max(0, Math.min(gh - 1, Math.floor(seedYimg / scale)));
-  const seedVal = gray[sy * gw + sx];
-  const tolAbs = Math.max(0, toleranceFrac) * spread(field.gray);
-
-  // Edge barrier: pixels whose normalised gradient exceeds this are walls the
-  // flood won't cross — keeps a void's selection bounded by its rim instead of
-  // leaking across a soft/ringy edge. Disabled when edgeStop is 0 or no grad.
-  const wallLimit = edgeStop > 0 ? 1 - edgeStop : Infinity;
-  const isWall = (i: number) => grad !== undefined && grad[i] >= wallLimit;
-
-  const mask = new Uint8Array(gw * gh);
-  if (mode === 'global') {
-    for (let i = 0; i < mask.length; i++) {
-      if (Math.abs(gray[i] - seedVal) <= tolAbs) mask[i] = 1;
-    }
-  } else {
-    // Flood fill from the seed (4-connected): stay within tol of the seed value
-    // and don't expand into edge (wall) pixels. The seed itself is always kept.
-    const seedIdx = sy * gw + sx;
-    const stack = [seedIdx];
-    while (stack.length) {
-      const idx = stack.pop()!;
-      if (mask[idx]) continue;
-      if (Math.abs(gray[idx] - seedVal) > tolAbs) continue;
-      if (idx !== seedIdx && isWall(idx)) continue;
-      mask[idx] = 1;
-      const x = idx % gw, y = (idx / gw) | 0;
-      if (x > 0) stack.push(idx - 1);
-      if (x < gw - 1) stack.push(idx + 1);
-      if (y > 0) stack.push(idx - gw);
-      if (y < gh - 1) stack.push(idx + gw);
-    }
-  }
 
   // Label 4-connected components; remember each one's first (topmost-left) pixel.
   const labels = new Int32Array(gw * gh).fill(0);
@@ -332,4 +309,56 @@ export function magicSelect(
 
   polys.sort((a, b) => b.area - a.area);
   return polys.slice(0, MAX_POLYGONS).map((p) => p.flat);
+}
+
+/**
+ * Select similar pixels from `seed` and return polygons in IMAGE coordinates.
+ */
+export function magicSelect(
+  field: GrayField,
+  seedXimg: number,
+  seedYimg: number,
+  { toleranceFrac, mode, smooth = 0, edgeStop = 0, minRegion = 12 }: SelectOpts,
+): number[][] {
+  const { gw, gh, scale, grad } = field;
+  // Smoothing drives a pre-blur (denoise so the boundary is less ragged) here;
+  // the Douglas–Peucker + Chaikin contour smoothing happens in maskToPolygons.
+  const blurR = Math.min(Math.round(smooth), 3);
+  const gray = blurR > 0 ? boxBlur(field.gray, gw, gh, blurR) : field.gray;
+  const sx = Math.max(0, Math.min(gw - 1, Math.floor(seedXimg / scale)));
+  const sy = Math.max(0, Math.min(gh - 1, Math.floor(seedYimg / scale)));
+  const seedVal = gray[sy * gw + sx];
+  const tolAbs = Math.max(0, toleranceFrac) * spread(field.gray);
+
+  // Edge barrier: pixels whose normalised gradient exceeds this are walls the
+  // flood won't cross — keeps a void's selection bounded by its rim instead of
+  // leaking across a soft/ringy edge. Disabled when edgeStop is 0 or no grad.
+  const wallLimit = edgeStop > 0 ? 1 - edgeStop : Infinity;
+  const isWall = (i: number) => grad !== undefined && grad[i] >= wallLimit;
+
+  const mask = new Uint8Array(gw * gh);
+  if (mode === 'global') {
+    for (let i = 0; i < mask.length; i++) {
+      if (Math.abs(gray[i] - seedVal) <= tolAbs) mask[i] = 1;
+    }
+  } else {
+    // Flood fill from the seed (4-connected): stay within tol of the seed value
+    // and don't expand into edge (wall) pixels. The seed itself is always kept.
+    const seedIdx = sy * gw + sx;
+    const stack = [seedIdx];
+    while (stack.length) {
+      const idx = stack.pop()!;
+      if (mask[idx]) continue;
+      if (Math.abs(gray[idx] - seedVal) > tolAbs) continue;
+      if (idx !== seedIdx && isWall(idx)) continue;
+      mask[idx] = 1;
+      const x = idx % gw, y = (idx / gw) | 0;
+      if (x > 0) stack.push(idx - 1);
+      if (x < gw - 1) stack.push(idx + 1);
+      if (y > 0) stack.push(idx - gw);
+      if (y < gh - 1) stack.push(idx + gw);
+    }
+  }
+
+  return maskToPolygons(mask, gw, gh, { minRegion, smooth, scale });
 }

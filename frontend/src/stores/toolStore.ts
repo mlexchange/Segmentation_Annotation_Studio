@@ -6,6 +6,10 @@ import { create } from 'zustand';
 export type Tool = 'pan' | 'select' | 'polygon' | 'magnetic' | 'magic' | 'rectangle' | 'ellipse' | 'brush' | 'eraser';
 
 export type MagicMode = 'contiguous' | 'global';
+/** Magic-selection engine: SAM (learned object prior) or the classic wand. */
+export type MagicEngine = 'sam' | 'classic';
+/** SAM mask granularity — which of SAM's 3 multimask outputs to keep. */
+export type SamDetail = 'auto' | 'fine' | 'medium' | 'coarse';
 
 export interface ToolState {
   tool: Tool;
@@ -19,6 +23,12 @@ export interface ToolState {
   magicSigma: number;
   /** Edge barrier strength (0–1) for the contiguous magic wand. */
   magicEdgeStop: number;
+  /** Active magic engine. Defaults to SAM; auto-falls back to 'classic'. */
+  magicEngine: MagicEngine;
+  /** SAM mask granularity (which multimask output to keep). */
+  samDetail: SamDetail;
+  /** SAM mask-logit threshold: >0 tightens the selection, <0 grows it. */
+  samThreshold: number;
   /** Bumped to request the canvas re-fit the image to the viewport (F shortcut). */
   fitRequestId: number;
   setTool: (tool: Tool) => void;
@@ -31,6 +41,9 @@ export interface ToolState {
   setMagicMode: (m: MagicMode) => void;
   setMagicSigma: (s: number) => void;
   setMagicEdgeStop: (e: number) => void;
+  setMagicEngine: (e: MagicEngine) => void;
+  setSamDetail: (d: SamDetail) => void;
+  setSamThreshold: (t: number) => void;
   requestFit: () => void;
 }
 
@@ -43,6 +56,9 @@ export const useToolStore = create<ToolState>((set) => ({
   magicMode: 'contiguous',
   magicSigma: 1,
   magicEdgeStop: 0.3,
+  magicEngine: 'sam',
+  samDetail: 'auto',
+  samThreshold: 0,
   fitRequestId: 0,
   setTool: (tool) => set({ tool, selectedShapeIds: [] }),
   setBrushSize: (brushSize) => set({ brushSize }),
@@ -53,5 +69,8 @@ export const useToolStore = create<ToolState>((set) => ({
   setMagicMode: (magicMode) => set({ magicMode }),
   setMagicSigma: (magicSigma) => set({ magicSigma }),
   setMagicEdgeStop: (magicEdgeStop) => set({ magicEdgeStop }),
+  setMagicEngine: (magicEngine) => set({ magicEngine }),
+  setSamDetail: (samDetail) => set({ samDetail }),
+  setSamThreshold: (samThreshold) => set({ samThreshold }),
   requestFit: () => set((s) => ({ fitRequestId: s.fitRequestId + 1 })),
 }));

@@ -26,7 +26,9 @@ import { toImage, normalizeRect, normalizeEllipse } from '@/lib/geometry';
 import { buildCostMap, dijkstra, tracePath, imageToGrid, simplifyPath, type CostMap } from '@/lib/livewire';
 import { useImageSlice } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
-import { buildField, magicSelect, type GrayField } from '@/lib/magicwand';
+import { buildField, magicSelect, maskToPolygons, type GrayField } from '@/lib/magicwand';
+import { useSam } from '@/hooks/useSam';
+import { renderAdjusted } from '@/lib/sam/adjust';
 
 // macOS labels the Alt key "Option" (⌥). e.altKey is true for it either way,
 // so only the on-screen label needs to differ.
@@ -93,38 +95,85 @@ function shapeContainsPoint(shape: Shape, x: number, y: number): boolean {
 
 interface BBox { x: number; y: number; w: number; h: number; }
 
-/** Axis-aligned bounding box of a shape in image pixels (for marquee hit-testing). */
-function shapeBBox(shape: Shape): BBox | null {
-  if (shape.kind === 'rectangle') return { x: shape.x, y: shape.y, w: shape.w, h: shape.h };
-  if (shape.kind === 'ellipse') {
-    return { x: shape.cx - shape.rx, y: shape.cy - shape.ry, w: 2 * shape.rx, h: 2 * shape.ry };
-  }
-  if (shape.kind === 'polygon') {
-    const xs = shape.points.filter((_, i) => i % 2 === 0);
-    const ys = shape.points.filter((_, i) => i % 2 === 1);
-    if (!xs.length) return null;
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
-    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-  }
-  if (shape.kind === 'brush') {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, r = 0;
-    for (const st of shape.strokes) {
-      r = Math.max(r, st.radius);
-      for (let i = 0; i + 1 < st.points.length; i += 2) {
-        minX = Math.min(minX, st.points[i]); maxX = Math.max(maxX, st.points[i]);
-        minY = Math.min(minY, st.points[i + 1]); maxY = Math.max(maxY, st.points[i + 1]);
-      }
-    }
-    if (!isFinite(minX)) return null;
-    return { x: minX - r, y: minY - r, w: maxX - minX + 2 * r, h: maxY - minY + 2 * r };
-  }
-  return null;
-}
-
 /** True if two AABBs overlap. */
 function bboxIntersects(a: BBox, b: BBox): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+/** True if segments AB and CD intersect. */
+function segIntersects(
+  ax: number, ay: number, bx: number, by: number,
+  cx: number, cy: number, dx: number, dy: number,
+): boolean {
+  const d = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx);
+  if (d === 0) return false; // parallel/collinear — endpoint cases caught elsewhere
+  const t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / d;
+  const u = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / d;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+}
+
+/**
+ * True if a shape's actual geometry overlaps the marquee rect — NOT just its
+ * bounding box. A bbox test wrongly selects a concave/edge-hugging shape (e.g. a
+ * C-shape or perimeter stroke) when the marquee is drawn in its empty middle.
+ */
+function shapeIntersectsRect(shape: Shape, r: BBox): boolean {
+  const corners: Array<[number, number]> = [
+    [r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h],
+  ];
+  const inRect = (x: number, y: number) =>
+    x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+
+  if (shape.kind === 'rectangle') {
+    return bboxIntersects({ x: shape.x, y: shape.y, w: shape.w, h: shape.h }, r);
+  }
+
+  if (shape.kind === 'ellipse') {
+    const rx = shape.rx || 1, ry = shape.ry || 1;
+    // Closest point on the rect to the ellipse center, normalised into the unit
+    // circle — handles overlap, rect-inside-ellipse, and center-in-rect.
+    const clx = Math.max(r.x, Math.min(shape.cx, r.x + r.w));
+    const cly = Math.max(r.y, Math.min(shape.cy, r.y + r.h));
+    if (((clx - shape.cx) / rx) ** 2 + ((cly - shape.cy) / ry) ** 2 <= 1) return true;
+    for (const [x, y] of corners) {
+      if (((x - shape.cx) / rx) ** 2 + ((y - shape.cy) / ry) ** 2 <= 1) return true;
+    }
+    return false;
+  }
+
+  if (shape.kind === 'polygon') {
+    const p = shape.points;
+    if (p.length < 6) return false;
+    for (let i = 0; i < p.length; i += 2) if (inRect(p[i], p[i + 1])) return true;
+    for (const [x, y] of corners) if (pointInPolygon(x, y, p)) return true;
+    for (let i = 0; i < p.length; i += 2) {
+      const ax = p[i], ay = p[i + 1];
+      const bx = p[(i + 2) % p.length], by = p[(i + 3) % p.length];
+      for (let k = 0; k < 4; k++) {
+        const [c1x, c1y] = corners[k];
+        const [c2x, c2y] = corners[(k + 1) % 4];
+        if (segIntersects(ax, ay, bx, by, c1x, c1y, c2x, c2y)) return true;
+      }
+    }
+    return false;
+  }
+
+  if (shape.kind === 'brush') {
+    for (const st of shape.strokes) {
+      if (st.mode === 'erase') continue;
+      const pts = st.points;
+      for (let i = 0; i + 1 < pts.length; i += 2) if (inRect(pts[i], pts[i + 1])) return true;
+      // A stroke has width: a rect corner within `radius` of a segment counts.
+      for (let i = 0; i + 3 < pts.length; i += 2) {
+        for (const [x, y] of corners) {
+          if (distToSegment(x, y, pts[i], pts[i + 1], pts[i + 2], pts[i + 3]) <= st.radius) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  return false;
 }
 
 export default function AnnotationCanvas({
@@ -172,6 +221,10 @@ export default function AnnotationCanvas({
   const magicMode = useToolStore((s) => s.magicMode);
   const magicSigma = useToolStore((s) => s.magicSigma);
   const magicEdgeStop = useToolStore((s) => s.magicEdgeStop);
+  const magicEngine = useToolStore((s) => s.magicEngine);
+  const setMagicEngine = useToolStore((s) => s.setMagicEngine);
+  const samDetail = useToolStore((s) => s.samDetail);
+  const samThreshold = useToolStore((s) => s.samThreshold);
   const fitRequestId = useToolStore((s) => s.fitRequestId);
   const { classes } = useClassStore();
 
@@ -191,11 +244,16 @@ export default function AnnotationCanvas({
   const [marqueeStart, setMarqueeStart] = useState<{ x: number; y: number } | null>(null);
   const [marqueeRect, setMarqueeRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
 
-  // Magic-wand seeds: each click is a seed; shift-click appends another so
-  // several regions can be accumulated before accepting.
-  const [magicSeeds, setMagicSeeds] = useState<Array<{ x: number; y: number }>>([]);
+  // Magic seeds: each click is a prompt point. label 1 = positive (grow the
+  // object / region), 0 = negative (carve back out — SAM only). The classic
+  // wand ignores the label and treats each as a fresh seed.
+  const [magicSeeds, setMagicSeeds] = useState<Array<{ x: number; y: number; label: 0 | 1 }>>([]);
   const [magicPreview, setMagicPreview] = useState<number[][]>([]);
   const [magicLoading, setMagicLoading] = useState(false);
+  // SAM box prompt (image coords): committed box + live drag preview.
+  const [magicBox, setMagicBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [magicBoxDraft, setMagicBoxDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const magicDragStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Magnetic lasso (livewire) state. Committed = locked path; preview = live
   // least-cost path from the current seed to the cursor.
@@ -218,6 +276,39 @@ export default function AnnotationCanvas({
     img.onload = () => setImageEl(img);
     img.src = sliceUrl;
   }, [sliceUrl]);
+
+  // SAM (in-browser Segment Anything) — the smart magic engine. Only spun up
+  // while the magic tool is active and the SAM engine is selected.
+  const samActive = tool === 'magic' && magicEngine === 'sam';
+  const sam = useSam(samActive);
+
+  // If SAM can't load or encode at all (no WebGPU/WASM, model fetch failed),
+  // silently fall back to the classic wand so the tool always works.
+  useEffect(() => {
+    if ((sam.status === 'unsupported' || sam.error) && magicEngine === 'sam') {
+      setMagicEngine('classic');
+    }
+  }, [sam.status, sam.error, magicEngine, setMagicEngine]);
+
+  // SAM sees the brightness/contrast-adjusted image (windowing a low-contrast
+  // slice greatly helps), so the encode is keyed on those — adjusting them
+  // re-encodes. Building the source is deferred so it only runs on a real encode.
+  const samEncodeKey = imageEl && meta
+    ? `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}`
+    : null;
+  const makeSamSource = useCallback(
+    () => renderAdjusted(imageEl!, meta!.width, meta!.height, brightness, contrast),
+    [imageEl, meta, brightness, contrast],
+  );
+
+  // Proactively encode the slice when SAM is active so the first click is fast.
+  // Deliberately NOT keyed on sam.status — ensureEncoded is idempotent and
+  // keying on status would re-fire every encoding→ready transition.
+  useEffect(() => {
+    if (samActive && samEncodeKey) {
+      sam.ensureEncoded(samEncodeKey, makeSamSource).catch(() => { /* fallback handled by sam.error */ });
+    }
+  }, [samActive, samEncodeKey, makeSamSource, sam.ensureEncoded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!imageRef.current) return;
@@ -329,6 +420,9 @@ export default function AnnotationCanvas({
     setMagicSeeds([]);
     setMagicPreview([]);
     setMagicLoading(false);
+    setMagicBox(null);
+    setMagicBoxDraft(null);
+    magicDragStartRef.current = null;
   }, []);
 
   // Build (and cache, per rendered image) the grayscale field used by the wand.
@@ -343,12 +437,47 @@ export default function AnnotationCanvas({
     return f;
   }, [imageEl, meta]);
 
-  // (Re)compute the preview in the browser whenever the seed or params change.
-  // Magic sliders already debounce their store commits (DebouncedSlider), so a
-  // rAF here keeps clicks snappy while still coalescing to one run per frame and
-  // letting the "Selecting…" label paint for large images.
+  // (Re)compute the preview whenever the seeds or params change.
+  // SAM engine: encode the slice (cached) then decode the point prompts into a
+  // mask → polygons. Classic engine: client-side flood/threshold via magicSelect.
+  // Magic sliders already debounce their store commits (DebouncedSlider).
   useEffect(() => {
+    if (magicEngine === 'sam') {
+      if ((magicSeeds.length === 0 && !magicBox) || !imageEl || !meta) { setMagicPreview([]); return; }
+      let cancelled = false;
+      setMagicLoading(true);
+      (async () => {
+        const ready = samEncodeKey ? await sam.ensureEncoded(samEncodeKey, makeSamSource) : false;
+        if (cancelled) return;
+        if (!ready) { setMagicLoading(false); return; } // status flips → classic
+        const points = magicSeeds.map((s) => ({
+          x: s.x / meta.width, y: s.y / meta.height, label: s.label,
+        }));
+        const box = magicBox
+          ? {
+              x0: magicBox.x / meta.width, y0: magicBox.y / meta.height,
+              x1: (magicBox.x + magicBox.w) / meta.width, y1: (magicBox.y + magicBox.h) / meta.height,
+            }
+          : null;
+        const res = await sam.segment(points, box, samDetail, samThreshold);
+        if (cancelled) return;
+        if (res) {
+          const scale = res.width > 0 ? meta.width / res.width : 1;
+          setMagicPreview(
+            maskToPolygons(res.mask, res.width, res.height, {
+              smooth: magicSigma, scale, minRegion: 25,
+            }),
+          );
+        } else {
+          setMagicPreview([]);
+        }
+        setMagicLoading(false);
+      })();
+      return () => { cancelled = true; };
+    }
+
     if (magicSeeds.length === 0) { setMagicPreview([]); return; }
+    // Classic wand — synchronous, coalesced to one run per frame.
     const field = ensureMagicField();
     if (!field) { setMagicPreview([]); return; }
     setMagicLoading(true);
@@ -368,7 +497,7 @@ export default function AnnotationCanvas({
       setMagicLoading(false);
     });
     return () => cancelAnimationFrame(id);
-  }, [magicSeeds, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField]);
+  }, [magicSeeds, magicBox, samDetail, samThreshold, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const commitMagic = useCallback(() => {
     if (!sourceKey || activeClassId === null) return;
@@ -462,12 +591,24 @@ export default function AnnotationCanvas({
     if (tool === 'polygon') {
       setDraftPoly((prev) => [...prev, pos.x, pos.y]);
     } else if (tool === 'magic') {
-      // Seed the magic-wand selection (the effect computes the preview).
-      //  • Alt-click  → drop the nearest seed (remove a bad region)
-      //  • Shift-click → append another region
-      //  • plain click → start fresh
-      const seed = { x: pos.x, y: pos.y };
-      if (e.evt.altKey) {
+      // Seed the magic selection (the effect computes the preview).
+      // SAM engine:
+      //  • plain click → new positive point (start the object)
+      //  • Shift-click → add a positive point (extend the object)
+      //  • Alt/Option-click → add a negative point (carve a leak back out)
+      // Classic wand keeps its original meaning (Alt removes the nearest seed).
+      if (magicEngine === 'sam') {
+        // Shift/Alt-click refine with points; a plain press starts a box drag
+        // (resolved to a box prompt or a single point on mouse-up).
+        if (e.evt.altKey) {
+          setMagicSeeds((prev) => (prev.length === 0 && !magicBox ? prev : [...prev, { x: pos.x, y: pos.y, label: 0 }]));
+        } else if (e.evt.shiftKey) {
+          setMagicSeeds((prev) => [...prev, { x: pos.x, y: pos.y, label: 1 }]);
+        } else {
+          magicDragStartRef.current = { x: pos.x, y: pos.y };
+          setMagicBoxDraft(null);
+        }
+      } else if (e.evt.altKey) {
         setMagicSeeds((prev) => {
           if (prev.length === 0) return prev;
           let bestI = 0, bestD = Infinity;
@@ -478,9 +619,9 @@ export default function AnnotationCanvas({
           return prev.filter((_, i) => i !== bestI);
         });
       } else if (e.evt.shiftKey) {
-        setMagicSeeds((prev) => [...prev, seed]);
+        setMagicSeeds((prev) => [...prev, { x: pos.x, y: pos.y, label: 1 }]);
       } else {
-        setMagicSeeds([seed]);
+        setMagicSeeds([{ x: pos.x, y: pos.y, label: 1 }]);
       }
     } else if (tool === 'magnetic') {
       const cm = ensureCostMap();
@@ -588,6 +729,13 @@ export default function AnnotationCanvas({
 
     if (!sourceKey || !meta) return;
 
+    // SAM box prompt: live rubber-band while dragging.
+    if (tool === 'magic' && magicEngine === 'sam' && magicDragStartRef.current && e.evt.buttons === 1) {
+      const s = magicDragStartRef.current;
+      setMagicBoxDraft(normalizeRect(s.x, s.y, pos.x - s.x, pos.y - s.y));
+      return;
+    }
+
     // Magnetic lasso: live least-cost path from the seed to the cursor.
     if (tool === 'magnetic' && magneticSeedRef.current) {
       const cm = magneticCostRef.current;
@@ -626,10 +774,7 @@ export default function AnnotationCanvas({
       if (rect && rect.w > 3 && rect.h > 3 && sourceKey) {
         const ids = storeShapes
           .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
-          .filter((s) => {
-            const bb = shapeBBox(s);
-            return bb && bboxIntersects(bb, rect);
-          })
+          .filter((s) => shapeIntersectsRect(s, rect))
           .map((s) => s.id);
         setSelectedShapeIds(ids);
       } else {
@@ -637,6 +782,23 @@ export default function AnnotationCanvas({
       }
       setMarqueeStart(null);
       setMarqueeRect(null);
+      return;
+    }
+
+    // SAM magic: resolve the press into a box prompt (real drag) or a point.
+    if (tool === 'magic' && magicEngine === 'sam' && magicDragStartRef.current) {
+      const start = magicDragStartRef.current;
+      magicDragStartRef.current = null;
+      const up = getPointerImagePos() ?? start;
+      const box = normalizeRect(start.x, start.y, up.x - start.x, up.y - start.y);
+      setMagicBoxDraft(null);
+      if (box.w > 4 && box.h > 4) {
+        setMagicBox(box);
+        setMagicSeeds([]); // a box replaces any accumulated points
+      } else {
+        setMagicSeeds([{ x: start.x, y: start.y, label: 1 }]);
+        setMagicBox(null);
+      }
       return;
     }
 
@@ -1246,6 +1408,21 @@ export default function AnnotationCanvas({
             />
           )}
 
+          {/* SAM box prompt: committed box (solid) + live drag (dashed). */}
+          {(tool === 'magic' || tool === 'pan') && (magicBox || magicBoxDraft) && (() => {
+            const b = magicBoxDraft ?? magicBox!;
+            return (
+              <Rect
+                x={b.x} y={b.y} width={b.w} height={b.h}
+                stroke="#38bdf8"
+                strokeWidth={1.5 / transform.scaleX}
+                dash={magicBoxDraft ? [6 / transform.scaleX, 4 / transform.scaleX] : undefined}
+                listening={false}
+                perfectDrawEnabled={false}
+              />
+            );
+          })()}
+
           {/* Magic-wand preview regions (kept visible while panning). */}
           {(tool === 'magic' || tool === 'pan') &&
             magicPreview.map((pts, i) => (
@@ -1261,16 +1438,17 @@ export default function AnnotationCanvas({
                 perfectDrawEnabled={false}
               />
             ))}
-          {/* Markers for each accumulated magic seed click. */}
+          {/* Markers for each accumulated magic prompt: white dot = positive
+              (include), red ring = negative (exclude, SAM only). */}
           {(tool === 'magic' || tool === 'pan') &&
             magicSeeds.map((s, i) => (
               <Circle
                 key={`magic-seed-${i}`}
                 x={s.x}
                 y={s.y}
-                radius={3 / transform.scaleX}
-                fill="#ffffff"
-                stroke={activeColor}
+                radius={3.5 / transform.scaleX}
+                fill={s.label === 0 ? '#ef4444' : '#ffffff'}
+                stroke={s.label === 0 ? '#ffffff' : activeColor}
                 strokeWidth={1.5 / transform.scaleX}
                 listening={false}
               />
@@ -1344,20 +1522,34 @@ export default function AnnotationCanvas({
         </div>
       )}
 
-      {/* Magic-wand: hint before a click, Add/Cancel panel after. */}
-      {tool === 'magic' && !isPreviewing && magicSeeds.length === 0 && (
+      {/* Magic: hint before a click, Add/Cancel panel after. */}
+      {tool === 'magic' && !isPreviewing && magicSeeds.length === 0 && !magicBox && (
         <div className="absolute top-2 left-2 bg-slate-800/85 text-slate-200 text-xs px-3 py-1.5 rounded-md pointer-events-none">
-          Click a region · Shift-click to add more · {REMOVE_KEY_LABEL}-click to remove one
+          {magicEngine === 'sam'
+            ? sam.status === 'loading-model'
+              ? 'Loading SAM model…'
+              : sam.status === 'encoding'
+                ? 'Encoding slice…'
+                : `Drag a box or click an object · Shift-click to add to it · ${REMOVE_KEY_LABEL}-click to exclude a region`
+            : `Click a region · Shift-click to add more · ${REMOVE_KEY_LABEL}-click to remove one`}
         </div>
       )}
-      {tool === 'magic' && !isPreviewing && magicSeeds.length > 0 && (
+      {tool === 'magic' && !isPreviewing && (magicSeeds.length > 0 || magicBox) && (
         <div className="absolute top-2 left-2 flex items-center gap-2 bg-slate-800/90 text-slate-100 text-xs px-3 py-1.5 rounded-md shadow-lg">
           <span className="text-slate-300">
-            {magicLoading
-              ? 'Selecting…'
-              : magicPreview.length > 0
-                ? `${magicPreview.length} region${magicPreview.length === 1 ? '' : 's'} · shift-add · ${REMOVE_KEY_LABEL.toLowerCase()}-remove`
-                : 'No match — raise tolerance'}
+            {magicEngine === 'sam' && sam.status === 'loading-model'
+              ? 'Loading SAM model…'
+              : magicEngine === 'sam' && sam.status === 'encoding'
+                ? 'Encoding slice…'
+                : magicLoading
+                  ? magicEngine === 'sam' ? 'Segmenting…' : 'Selecting…'
+                  : magicPreview.length > 0
+                    ? magicEngine === 'sam'
+                      ? `${magicPreview.length} region${magicPreview.length === 1 ? '' : 's'} · Shift-click adds · ${REMOVE_KEY_LABEL}-click marks "not" (red) to exclude`
+                      : `${magicPreview.length} region${magicPreview.length === 1 ? '' : 's'} · shift-add · ${REMOVE_KEY_LABEL.toLowerCase()}-remove`
+                    : magicEngine === 'sam'
+                      ? 'No object — try another point'
+                      : 'No match — raise tolerance'}
           </span>
           <button
             type="button"
