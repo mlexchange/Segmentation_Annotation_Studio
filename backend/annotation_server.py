@@ -29,10 +29,12 @@ from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import arrays as arrays_mod
 import drafts as drafts_mod
+import export_jobs
 import images as images_mod
 import ingest as ingest_mod
 import local_fs
@@ -756,20 +758,66 @@ async def export_coco(payload: ExportRequest) -> dict:
             negative_slices=payload.negative_slices,
         )]
 
-    def _run() -> dict:
-        from coco_export import build_export_plan, write_coco_split
-        import images as images_mod_local
-        import arrays as arrays_mod_local
+    # Dry run = counts only. Resolve splits from the payload without touching
+    # Tiled, reading slices, sampling stats, or rasterizing — so the preview is
+    # instant. Returned synchronously (no job).
+    if payload.dry_run:
+        from coco_export import _resolve_split
+        summary: dict = {"skipped_zero_area": 0, "splits": {}}
+        for item in source_items:
+            neg_keys = {str(k) for k in item.negative_slices}
+            all_keys = list(set(item.slices.keys()) | neg_keys)
+            resolved = _resolve_split(
+                all_keys,
+                {str(k): v for k, v in item.split_by_slice.items()},
+                payload.auto_split,
+            )
+            for k in all_keys:
+                split = resolved.get(k, "train")
+                bucket = summary["splits"].setdefault(split, {"n_images": 0, "n_annotations": 0})
+                bucket["n_images"] += 1
+                bucket["n_annotations"] += len(item.slices.get(k, []))
+        return summary
 
-        # Merged splits accumulator across all sources.
+    # Real export runs on a background thread; the UI polls /api/export/status
+    # for phase/progress/log lines and downloads the .zip when done.
+    jid = export_jobs.new_job(str(out_root))
+    threading.Thread(
+        target=_run_export_job,
+        args=(jid, source_items, payload, out_root),
+        daemon=True,
+    ).start()
+    return {"job_id": jid, "dataset_path": str(out_root)}
+
+
+def _run_export_job(
+    jid: str,
+    source_items: "list[ExportSourceItem]",
+    payload: "ExportRequest",
+    out_root: Path,
+) -> None:
+    """Background worker: render+rasterize all sources, write the dataset tree
+    (images + masks + COCO), zip it for download, then sync Tiled metadata."""
+    from coco_export import build_export_plan, write_coco_split
+    import images as images_mod_local
+    import arrays as arrays_mod_local
+
+    try:
+        export_jobs.update(jid, state="running", phase="reading")
+        total = sum(
+            len(set(item.slices.keys()) | {str(k) for k in item.negative_slices})
+            for item in source_items
+        )
+        export_jobs.set_total(jid, total)
+
         merged_splits: dict[str, dict] = {}
         skipped_total = 0
         merged_categories: list[dict] = []
         merged_info: dict = {}
 
         for item in source_items:
+            export_jobs.log(jid, f"Reading {item.source} …")
             node = arrays_mod_local.resolve_array(item.source, item.kind, item.server_uri)
-            # Build a temporary single-source payload object for reuse of build_export_plan.
             tmp = ExportRequest(
                 kind=item.kind,
                 source=item.source,
@@ -781,76 +829,97 @@ async def export_coco(payload: ExportRequest) -> dict:
                 render=payload.render,
                 auto_split=payload.auto_split,
             )
+
+            def _cb(message: str, _jid: str = jid) -> None:
+                export_jobs.bump(_jid, 1)
+                export_jobs.log(_jid, message)
+
             plan = build_export_plan(
                 node, tmp,
                 render_slice_fn=images_mod_local.render_slice,
                 array_shape_meta_fn=arrays_mod_local.array_shape_meta,
                 read_slice_fn=arrays_mod_local.read_slice,
                 sample_global_stats_fn=images_mod_local._sample_global_stats,
+                progress_cb=_cb,
+                include_polygons=payload.include_polygons,
             )
             skipped_total += plan["skipped_zero_area"]
             if not merged_categories:
                 merged_categories = plan["categories"]
                 merged_info = plan["info"]
             for split_name, split_data in plan["splits"].items():
-                if split_name not in merged_splits:
-                    merged_splits[split_name] = {"images": [], "annotations": []}
-                merged_splits[split_name]["images"].extend(split_data["images"])
-                merged_splits[split_name]["annotations"].extend(split_data["annotations"])
+                bucket = merged_splits.setdefault(split_name, {"images": [], "annotations": []})
+                bucket["images"].extend(split_data["images"])
+                bucket["annotations"].extend(split_data["annotations"])
 
-        summary: dict = {"skipped_zero_area": skipped_total, "splits": {}}
-        if payload.dry_run:
-            for split_name, split_data in merged_splits.items():
-                summary["splits"][split_name] = {
-                    "n_images": len(split_data["images"]),
-                    "n_annotations": len(split_data["annotations"]),
-                }
-            return summary
-
+        # Write files AND build the download .zip in one pass. ZIP_STORED: the
+        # PNGs are already compressed, so re-deflating them is wasted CPU.
+        import zipfile
+        export_jobs.update(jid, phase="writing")
+        zip_path = f"{out_root}.zip"
         written: dict = {}
-        for split_name, split_data in merged_splits.items():
-            split_dir = out_root / split_name
-            result = write_coco_split(
-                split_dir,
-                images=split_data["images"],
-                categories=merged_categories,
-                annotations=split_data["annotations"],
-                mode=payload.mode,
-                info=merged_info,
-            )
-            written[split_name] = result
-        summary["written"] = written
-        summary["dataset_path"] = str(out_root)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
+            for split_name, split_data in merged_splits.items():
+                export_jobs.log(jid, f"Writing split '{split_name}' ({len(split_data['images'])} images + masks)…")
+                written[split_name] = write_coco_split(
+                    out_root / split_name,
+                    images=split_data["images"],
+                    categories=merged_categories,
+                    annotations=split_data["annotations"],
+                    mode=payload.mode,
+                    info=merged_info,
+                    zf=zf,
+                    arc_prefix=f"{split_name}/",
+                )
 
-        # Sync annotation flags back onto source Tiled nodes for Browse discovery.
+        export_jobs.update(jid, phase="syncing")
         import tiled_annotation_sync
-        from source_keys import parse_source_key
-
         for item in source_items:
             if item.kind != "tiled":
                 continue
             sk = f"tiled:{item.server_uri or ''}:{item.source}"
             try:
                 tiled_annotation_sync.sync_annotation_metadata(
-                    sk,
-                    {
-                        "classes": payload.classes,
-                        "slices": item.slices,
-                    },
+                    sk, {"classes": payload.classes, "slices": item.slices},
                 )
             except Exception as sync_exc:
                 logger.warning("Export Tiled sync failed for %s: %s", sk, sync_exc)
 
-        return summary
-
-    try:
-        result = await asyncio.to_thread(_run)
-        return result
+        result = {
+            "skipped_zero_area": skipped_total,
+            "written": written,
+            "dataset_path": str(out_root),
+            "zip_available": True,
+            "splits": {
+                k: {"n_images": len(v["images"]), "n_annotations": len(v["annotations"])}
+                for k, v in merged_splits.items()
+            },
+        }
+        export_jobs.update(jid, zip_path=zip_path, result=result, phase="done", state="done")
+        export_jobs.log(jid, "Export complete.")
     except FileExistsError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except Exception as exc:
-        logger.error("Export failed: %s", exc)
-        raise HTTPException(500, f"Export failed: {exc}") from exc
+        export_jobs.update(jid, state="error", phase="error", error=f"{exc} (use overwrite or merge)")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Export job failed: %s", exc)
+        export_jobs.update(jid, state="error", phase="error", error=str(exc))
+
+
+@app.get("/api/export/status/{job_id}")
+async def export_status(job_id: str) -> dict:
+    """Poll an export job's progress (state, phase, done/total, log, result)."""
+    job = export_jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Unknown job_id")
+    return job
+
+
+@app.get("/api/export/download/{job_id}")
+async def export_download(job_id: str) -> Response:
+    """Stream the finished export .zip (browser save dialog picks the location)."""
+    zp = export_jobs.zip_path(job_id)
+    if not zp or not Path(zp).exists():
+        raise HTTPException(404, "Export zip not ready")
+    return FileResponse(zp, media_type="application/zip", filename=Path(zp).name)
 
 
 @app.post("/api/import/coco")

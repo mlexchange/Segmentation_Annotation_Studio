@@ -1,0 +1,79 @@
+"""In-memory job registry for COCO/mask exports.
+
+Mirrors the ingest job pattern (ingest.py): export runs on a background thread
+and reports phase/progress/log lines that the UI polls via
+``/api/export/status/{job_id}``. Kept deliberately simple — a process-local dict
+guarded by a lock; jobs are ephemeral and fine to lose on restart.
+"""
+from __future__ import annotations
+
+import threading
+import uuid
+from typing import Any
+
+_jobs: dict[str, dict[str, Any]] = {}
+_lock = threading.Lock()
+_MAX_LOG = 200
+
+
+def new_job(dataset_path: str) -> str:
+    """Register a new export job and return its id."""
+    jid = uuid.uuid4().hex
+    with _lock:
+        _jobs[jid] = {
+            "state": "pending",   # pending | running | done | error
+            "phase": "queued",
+            "done": 0,
+            "total": 0,
+            "log": [],
+            "result": None,
+            "error": None,
+            "dataset_path": dataset_path,
+            "zip_path": None,     # internal; surfaced as result.zip_available
+        }
+    return jid
+
+
+def get_job(jid: str) -> dict | None:
+    """Return a snapshot copy of the job (without the internal zip_path)."""
+    with _lock:
+        job = _jobs.get(jid)
+        if not job:
+            return None
+        snap = dict(job)
+        snap.pop("zip_path", None)
+        return snap
+
+
+def zip_path(jid: str) -> str | None:
+    with _lock:
+        job = _jobs.get(jid)
+        return job.get("zip_path") if job else None
+
+
+def update(jid: str, **kw: Any) -> None:
+    with _lock:
+        if jid in _jobs:
+            _jobs[jid].update(kw)
+
+
+def set_total(jid: str, total: int) -> None:
+    with _lock:
+        if jid in _jobs:
+            _jobs[jid]["total"] = total
+
+
+def bump(jid: str, n: int = 1) -> None:
+    with _lock:
+        if jid in _jobs:
+            _jobs[jid]["done"] += n
+
+
+def log(jid: str, message: str) -> None:
+    with _lock:
+        job = _jobs.get(jid)
+        if not job:
+            return
+        job["log"].append(message)
+        if len(job["log"]) > _MAX_LOG:
+            del job["log"][: len(job["log"]) - _MAX_LOG]

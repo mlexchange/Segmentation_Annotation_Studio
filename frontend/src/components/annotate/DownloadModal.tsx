@@ -3,12 +3,12 @@
  */
 import { useMemo, useState } from 'react';
 import { DownloadSimple, X, CheckCircle, WarningCircle } from '@phosphor-icons/react';
-import { API_BASE } from '@/config';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
 import { useRatingStore } from '@/stores/ratingStore';
 import { buildSourceKey } from '@/lib/sourceKey';
+import { useExportJob } from '@/hooks/useExportJob';
 
 interface DownloadModalProps {
   onClose: () => void;
@@ -64,8 +64,9 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
   const ratings = useRatingStore((s) => s.ratings);
 
   const [scope, setScope] = useState<Scope>('current');
-  const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [message, setMessage] = useState('');
+  const [includePolygons, setIncludePolygons] = useState(false);
+  const { state: job, start, downloadUrl } = useExportJob();
+  const status = job.status;
 
   /** Preview count of samples that would be exported for the selected scope. */
   const previewCount = useMemo(() => {
@@ -115,36 +116,20 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
       });
   };
 
-  const handleExport = async () => {
-    setStatus('running');
-    setMessage('');
+  const handleExport = () => {
+    let sources;
     try {
-      const sources = buildSources();
-      if (sources.length === 0) throw new Error('No samples match the selected scope.');
-
-      const res = await fetch(`${API_BASE}/api/export/coco`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sources, classes, mode: 'merge' }),
-      });
-
-      if (!res.ok) throw new Error(await res.text());
-      const result = await res.json();
-
-      setStatus('done');
-      setMessage(
-        `Exported ${sources.length} sample${sources.length !== 1 ? 's' : ''} to ${result.dataset_path ?? 'disk'}.` +
-          (result.written
-            ? '  ' + Object.entries(result.written)
-                .map(([split, r]: [string, any]) => `${split}: ${r.n_images ?? 0} images`)
-                .join(', ')
-            : ''),
-      );
+      sources = buildSources();
     } catch (e) {
-      setStatus('error');
-      setMessage(String(e));
+      // buildSources throws only for an empty/invalid scope; surface inline.
+      window.alert(String(e));
+      return;
     }
+    if (sources.length === 0) { window.alert('No samples match the selected scope.'); return; }
+    start({ sources, classes, mode: 'merge', include_polygons: includePolygons });
   };
+
+  const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -196,6 +181,21 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
           </div>
         </div>
 
+        {/* Options */}
+        {status === 'idle' && (
+          <label className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includePolygons}
+              onChange={(e) => setIncludePolygons(e.target.checked)}
+              className="mt-0.5 accent-sky-500"
+            />
+            <span>
+              Include polygon copy in COCO <span className="text-slate-500">(slower; RLE masks are always exact — only needed for some external viewers)</span>
+            </span>
+          </label>
+        )}
+
         {/* Preview count */}
         {status === 'idle' && (
           <p className="text-xs text-slate-400 text-right">
@@ -205,17 +205,40 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
           </p>
         )}
 
-        {/* Status messages */}
+        {/* Live progress: phase + bar + scrolling backend log */}
+        {(status === 'running' || status === 'done') && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs text-slate-300">
+              <span className="capitalize">{job.phase || 'working'}…</span>
+              {job.total > 0 && <span className="tabular-nums">{job.done}/{job.total} slices</span>}
+            </div>
+            <div className="h-1.5 w-full rounded bg-slate-700 overflow-hidden">
+              <div
+                className={`h-full transition-all ${status === 'done' ? 'bg-green-500' : 'bg-sky-500'}`}
+                style={{ width: status === 'done' ? '100%' : `${Math.max(5, pct)}%` }}
+              />
+            </div>
+            {job.log.length > 0 && (
+              <div className="max-h-28 overflow-y-auto rounded bg-slate-900/70 border border-slate-700 p-2 text-[11px] font-mono text-slate-400 leading-relaxed">
+                {job.log.slice(-12).map((line, i) => <div key={i}>{line}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+
         {status === 'done' && (
           <div className="flex items-start gap-2 text-sm text-green-300">
             <CheckCircle size={16} className="mt-0.5 shrink-0" />
-            <span>{message}</span>
+            <span>
+              Saved to <span className="font-mono">{String(job.result?.dataset_path ?? 'server')}</span> (Tiled).
+              {' '}Use <b>Download .zip</b> to save images + masks to your computer.
+            </span>
           </div>
         )}
         {status === 'error' && (
           <div className="flex items-start gap-2 text-sm text-red-400">
             <WarningCircle size={16} className="mt-0.5 shrink-0" />
-            <span>{message}</span>
+            <span>{job.error ?? 'Export failed.'}</span>
           </div>
         )}
 
@@ -228,7 +251,16 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
           >
             {status === 'done' ? 'Close' : 'Cancel'}
           </button>
-          {status !== 'done' && (
+          {status === 'done' && downloadUrl ? (
+            <a
+              href={downloadUrl}
+              download
+              className="px-4 py-2 text-sm rounded-md bg-sky-600 text-white hover:bg-sky-500 transition-colors flex items-center gap-2"
+            >
+              <DownloadSimple size={15} />
+              Download .zip
+            </a>
+          ) : status !== 'done' && (
             <button
               type="button"
               onClick={handleExport}

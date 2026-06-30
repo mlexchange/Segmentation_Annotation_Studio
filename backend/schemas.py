@@ -198,6 +198,9 @@ class ExportRequest(BaseModel):
     sources: list[ExportSourceItem] = Field(default_factory=list)
     mode: Literal["fail", "overwrite", "merge"] = "merge"
     dry_run: bool = False
+    # Include the (costly) polygon copy in COCO segmentation_poly. RLE is always
+    # written and is exact; polygons are opt-in for external viewers.
+    include_polygons: bool = False
     render: RenderOpts = Field(default_factory=RenderOpts)
     classes: list[AnnotationClass] = Field(default_factory=list)
     slices: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)

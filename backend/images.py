@@ -43,6 +43,8 @@ def _sample_global_stats(node: Any, meta: dict[str, Any]) -> tuple[float, float]
     Returns:
         ``(vmin, vmax)`` floats across all sampled slices.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     from arrays import read_slice
 
     cache_key = ("global_stats", id(node))
@@ -50,14 +52,21 @@ def _sample_global_stats(node: Any, meta: dict[str, Any]) -> tuple[float, float]
     if cached is not None:
         return cached
 
+    # Sample fewer slices, read them concurrently, and spatially subsample each
+    # (every 4th pixel) — min/max are robust to this and the cost drops sharply.
+    # Result still spans the whole volume, so it matches the viewer's contrast.
     n = meta["n_slices"]
-    indices = list(range(0, n, max(1, n // 64)))[:64]
-    values: list[float] = []
-    for i in indices:
-        sl = read_slice(node, meta, i).astype(np.float64)
-        values.extend([float(np.nanmin(sl)), float(np.nanmax(sl))])
+    samples = 24
+    indices = list(range(0, n, max(1, n // samples)))[:samples] or [0]
 
-    result: tuple[float, float] = (min(values), max(values))
+    def _minmax(i: int) -> tuple[float, float]:
+        sl = np.asarray(read_slice(node, meta, i))[::4, ::4].astype(np.float64)
+        return float(np.nanmin(sl)), float(np.nanmax(sl))
+
+    with ThreadPoolExecutor(max_workers=min(8, len(indices))) as ex:
+        pairs = list(ex.map(_minmax, indices))
+
+    result: tuple[float, float] = (min(p[0] for p in pairs), max(p[1] for p in pairs))
     _stats_cache.set(cache_key, result)
     return result
 

@@ -115,6 +115,93 @@ def test_rle_json_serializable() -> None:
     assert isinstance(restored["segmentation"]["counts"], str)
 
 
+def test_mask_export_writes_semantic_and_per_class(tmp_path) -> None:
+    """build_export_plan emits label-map + per-class masks; write_coco_split lays them out."""
+    import numpy as np
+    from PIL import Image
+    from coco_export import build_export_plan, write_coco_split
+    from schemas import ExportRequest, AnnotationClass, RenderOpts
+
+    h, w = 40, 40
+    poly = {"id": "s1", "kind": "polygon", "classId": 7, "points": [5, 5, 25, 5, 25, 25, 5, 25]}
+    payload = ExportRequest(
+        kind="local", source="vol", server_uri=None,
+        slices={"0": [poly]}, split_by_slice={"0": "train"}, negative_slices=[],
+        classes=[AnnotationClass(classId=7, label="air", color="#ff0000")],
+        render=RenderOpts(norm="slice"),
+        auto_split={"ratios": [1, 0, 0], "seed": 1},
+    )
+    meta = {"height": h, "width": w, "n_slices": 1}
+    plan = build_export_plan(
+        object(), payload,
+        render_slice_fn=lambda arr, opts, gr: np.zeros((h, w, 3), dtype=np.uint8),
+        array_shape_meta_fn=lambda n: meta,
+        read_slice_fn=lambda n, m, i: np.zeros((h, w), dtype=np.uint8),
+        sample_global_stats_fn=lambda n, m: (0.0, 1.0),
+    )
+    img = plan["splits"]["train"]["images"][0]
+    fname = img["file_name"]
+    assert img.get("label_png_bytes")
+    assert "air" in img["class_masks"]
+
+    # Polygons are opt-in: default off → segmentation_poly empty, RLE always set.
+    ann0 = plan["splits"]["train"]["annotations"][0]
+    assert ann0["segmentation_poly"] == []
+    assert isinstance(ann0["segmentation"]["counts"], str) and ann0["segmentation"]["counts"]
+
+    import zipfile
+    zip_path = tmp_path / "ds.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
+        write_coco_split(
+            tmp_path / "train",
+            images=plan["splits"]["train"]["images"],
+            categories=plan["categories"],
+            annotations=plan["splits"]["train"]["annotations"],
+            mode="overwrite", info=plan["info"],
+            zf=zf, arc_prefix="train/",
+        )
+    assert (tmp_path / "train" / fname).exists()
+    assert (tmp_path / "train" / "masks" / "semantic" / fname).exists()
+    assert (tmp_path / "train" / "masks" / "air" / fname).exists()
+    assert (tmp_path / "train" / "masks" / "legend.json").exists()
+    sem = np.array(Image.open(tmp_path / "train" / "masks" / "semantic" / fname))
+    assert int(sem.max()) == 1  # single class → category id 1 in the label map
+
+    # The zip mirrors the tree (STORED) and carries images, masks, and COCO.
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+        assert f"train/{fname}" in names
+        assert f"train/masks/semantic/{fname}" in names
+        assert f"train/masks/air/{fname}" in names
+        assert "train/_annotations.coco.json" in names
+        assert all(zi.compress_type == zipfile.ZIP_STORED for zi in zf.infolist())
+
+
+def test_export_polygons_opt_in() -> None:
+    """include_polygons=True populates segmentation_poly (reusing polygon points)."""
+    import numpy as np
+    from coco_export import build_export_plan
+    from schemas import ExportRequest, AnnotationClass, RenderOpts
+
+    h, w = 30, 30
+    poly = {"id": "s1", "kind": "polygon", "classId": 1, "points": [4, 4, 20, 4, 20, 20, 4, 20]}
+    payload = ExportRequest(
+        kind="local", source="vol", slices={"0": [poly]}, split_by_slice={"0": "train"},
+        classes=[AnnotationClass(classId=1, label="air", color="#fff")],
+        render=RenderOpts(norm="slice"), include_polygons=True,
+    )
+    plan = build_export_plan(
+        object(), payload,
+        render_slice_fn=lambda a, o, g: np.zeros((h, w, 3), np.uint8),
+        array_shape_meta_fn=lambda n: {"height": h, "width": w, "n_slices": 1},
+        read_slice_fn=lambda n, m, i: np.zeros((h, w), np.uint8),
+        sample_global_stats_fn=lambda n, m: (0.0, 1.0),
+        include_polygons=True,
+    )
+    ann0 = plan["splits"]["train"]["annotations"][0]
+    assert ann0["segmentation_poly"] == [poly["points"]]  # reused, not re-traced
+
+
 def test_zero_area_polygon_skipped() -> None:
     """A 1-px degenerate polygon produces zero area."""
     from coco_export import _polygon_mask
