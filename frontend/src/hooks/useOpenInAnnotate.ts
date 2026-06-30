@@ -11,11 +11,13 @@ import { loadDraft } from '@/hooks/useDraftSync';
 import { buildSourceKey } from '@/lib/sourceKey';
 import type { Shape } from '@/stores/annotationStore';
 
-/** Merge a loaded draft into the stores for the given sourceKey. */
+/** Merge a loaded draft into the stores for the given sourceKey.
+ *  Types are derived from each store's STATE (`getState`) rather than the
+ *  hook's overloaded return type, which TS resolves to `unknown`. */
 async function applyDraft(
   sourceKey: string,
-  setClasses: (classes: Parameters<ReturnType<typeof useClassStore>['setClasses']>[0]) => void,
-  mergeSourceDraft: ReturnType<typeof useAnnotationStore>['mergeSourceDraft'],
+  setClasses: ReturnType<typeof useClassStore.getState>['setClasses'],
+  mergeSourceDraft: ReturnType<typeof useAnnotationStore.getState>['mergeSourceDraft'],
 ) {
   const draft = await loadDraft(sourceKey);
   if (!draft?.payload) return;

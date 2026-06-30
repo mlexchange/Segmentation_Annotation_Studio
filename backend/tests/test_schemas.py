@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from schemas import BrushShape, BrushStroke, EllipseShape, PolygonShape, RectShape, RenderOpts
 
 

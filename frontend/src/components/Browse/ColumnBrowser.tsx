@@ -422,6 +422,7 @@ interface DetailPanelSlotProps {
 
 /** Fixed-width container that hosts the BrowseDetailPanel for the selected sample. */
 function DetailPanelSlot({ item, width, onClose, serverUri, onOpenInAnnotate }: DetailPanelSlotProps) {
+  if (!item) return null; // nothing selected → render no panel
   return (
     <div
       className="relative z-10 flex h-full shrink-0 flex-col border-l border-slate-700 bg-slate-900 shadow-[-4px_0_12px_rgba(0,0,0,0.25)]"

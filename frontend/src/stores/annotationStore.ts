@@ -272,11 +272,13 @@ export const useAnnotationStore = create<AnnotationState>()(
       loadFromDraft: (draft) =>
         set({ byImage: draft.byImage, splitBySlice: draft.splitBySlice, negativeSlices: draft.negativeSlices }),
 
-      /** Merges one sample's data into the store, leaving other samples untouched. */
+      /** Merges one sample's data into the store, leaving other samples untouched.
+       *  The draft's split map arrives loosely typed (JSON); its values are always
+       *  'train' | 'valid' | 'test' | 'auto', so we narrow it here. */
       mergeSourceDraft: (sourceKey, slices, splitMap, negSlices) =>
         set((s) => ({
           byImage: { ...s.byImage, [sourceKey]: slices },
-          splitBySlice: { ...s.splitBySlice, [sourceKey]: splitMap },
+          splitBySlice: { ...s.splitBySlice, [sourceKey]: splitMap as Record<string, Split | 'auto'> },
           negativeSlices: { ...s.negativeSlices, [sourceKey]: negSlices },
         })),
 

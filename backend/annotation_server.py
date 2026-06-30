@@ -48,7 +48,7 @@ from browse_helpers import (
     _STUDIO_RAW_KEYS,
 )
 from cache import TTLCache
-from schemas import DraftPayload, ExportRequest, ExportSourceItem, ImageMeta, RenderOpts, SaveVersionRequest
+from schemas import DraftPayload, ExportRequest, ExportSourceItem, ImageMeta, SaveVersionRequest
 from thumbnails import render_thumbnail
 from tiled_clients import (
     api_key_for_uri,

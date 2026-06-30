@@ -143,10 +143,14 @@ function ItemRow({ item, isSelected, onSelect, onOpenInAnnotate, serverUri }: It
 
   return (
     <div className={`flex items-center transition-colors border-b border-slate-800 ${background}`}>
-      <button
-        type="button"
+      {/* Selectable area is a role="button" div, not a <button>, because it
+          contains StarRating's own buttons (button-in-button is invalid DOM). */}
+      <div
+        role="button"
+        tabIndex={0}
         onClick={onSelect}
-        className="flex-1 flex flex-col px-2 py-1.5 text-left min-w-0"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } }}
+        className="flex-1 flex flex-col px-2 py-1.5 text-left min-w-0 cursor-pointer"
       >
         <span className={`text-xs font-medium truncate ${isSelected ? 'text-white' : 'text-slate-200'}`}>
           {item.sample}
@@ -164,7 +168,7 @@ function ItemRow({ item, isSelected, onSelect, onOpenInAnnotate, serverUri }: It
             </span>
           )}
         </div>
-      </button>
+      </div>
       <button
         type="button"
         onClick={(e) => {

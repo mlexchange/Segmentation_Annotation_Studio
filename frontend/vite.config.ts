@@ -1,4 +1,5 @@
-import { defineConfig } from 'vite';
+// `vitest/config` re-exports Vite's defineConfig with the `test` option typed.
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import tsconfigPaths from 'vite-tsconfig-paths';
 

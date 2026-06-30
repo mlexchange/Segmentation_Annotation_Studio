@@ -43,7 +43,7 @@ if (USE_LOCAL_MODEL) {
   env.allowRemoteModels = false;
   env.localModelPath = '/models/';
 }
-env.backends.onnx.wasm.numThreads = 1;
+if (env.backends?.onnx?.wasm) env.backends.onnx.wasm.numThreads = 1;
 
 interface PromptPoint { x: number; y: number; label: 0 | 1 }
 type Box = { x0: number; y0: number; x1: number; y1: number };
