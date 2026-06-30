@@ -22,6 +22,7 @@ interface DebouncedSliderProps {
   ariaLabel?: string;
 }
 
+/** Range input with instant local feedback and a debounced `onChange` commit. */
 export default function DebouncedSlider({
   value,
   min,
@@ -45,6 +46,7 @@ export default function DebouncedSlider({
 
   useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
 
+  /** Update the local value immediately and (re)arm the debounced onChange commit. */
   const handle = (next: number) => {
     setLocal(next); // instant thumb + label feedback
     if (timer.current !== null) window.clearTimeout(timer.current);

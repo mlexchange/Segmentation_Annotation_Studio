@@ -41,6 +41,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   label: null,
   sampleCount: null,
 
+  /** Records the active data-source connection; unspecified fields default to null. */
   setConnection: ({
     kind,
     serverUri = null,
@@ -52,6 +53,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   }) =>
     set({ kind, serverUri, browseContainerPath, localRoot, localRel, label, sampleCount }),
 
+  /** Resets all connection fields to null (disconnect). */
   clearConnection: () =>
     set({
       kind: null,

@@ -25,6 +25,11 @@ const TOOL_KEYBINDS: Record<string, Tool> = {
   q: 'eraser',
 };
 
+/**
+ * Installs global keydown/keyup listeners for the annotation workspace (tools,
+ * slice nav, undo/redo, class select). Ignores keys typed in form fields.
+ * Invokes the supplied callbacks for class activation, brush, delete, and cancel.
+ */
 export function useKeybinds(
   activeClassId: number | null,
   onActivateClass: (id: number) => void,

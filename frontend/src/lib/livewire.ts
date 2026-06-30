@@ -71,6 +71,7 @@ export function buildCostMap(
   return { gw, gh, scale, cost };
 }
 
+/** Map image-pixel (x,y) to a clamped flat grid index into the cost map. */
 export function imageToGrid(cm: CostMap, x: number, y: number): number {
   const gx = Math.max(0, Math.min(cm.gw - 1, Math.floor(x / cm.scale)));
   const gy = Math.max(0, Math.min(cm.gh - 1, Math.floor(y / cm.scale)));
@@ -81,7 +82,9 @@ export function imageToGrid(cm: CostMap, x: number, y: number): number {
 class MinHeap {
   private ids: number[] = [];
   private keys: number[] = [];
+  /** Number of entries in the heap. */
   get size() { return this.ids.length; }
+  /** Insert `id` with priority `key`, sifting up to restore the min-heap. */
   push(id: number, key: number) {
     this.ids.push(id);
     this.keys.push(key);
@@ -93,6 +96,7 @@ class MinHeap {
       i = p;
     }
   }
+  /** Remove and return the id with the smallest key, sifting down to repair. */
   pop(): number {
     const n = this.ids.length;
     const top = this.ids[0];
@@ -114,6 +118,7 @@ class MinHeap {
     }
     return top;
   }
+  /** Swap the entries at heap positions `a` and `b`. */
   private swap(a: number, b: number) {
     [this.ids[a], this.ids[b]] = [this.ids[b], this.ids[a]];
     [this.keys[a], this.keys[b]] = [this.keys[b], this.keys[a]];

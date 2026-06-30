@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils";
 
 import { RouteItem } from "@/types/navigationRouterTypes";
 
+/** Fallback shown for unmatched routes; offers a button back to the first available page. */
 function NotFoundFallback({ routes }: { routes: RouteItem[] }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -30,6 +31,10 @@ export type HubMainContentProps = {
     className?: string;
 }
 
+/**
+ * HubMainContent — renders the active route inside the main area, applying full-bleed
+ * layout for routes flagged isBackgroundTransparent and a 404 fallback otherwise.
+ */
 export default function HubMainContent({ routes, className }: HubMainContentProps) {
     const location = useLocation();
     const fullBleed = routes.some(

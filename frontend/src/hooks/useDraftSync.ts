@@ -8,6 +8,11 @@ import { useClassStore } from '@/stores/classStore';
 
 const DEBOUNCE_MS = 1500;
 
+/**
+ * Autosaves the current annotation stores for `sourceKey` to the draft endpoint,
+ * debounced 1.5s on change, and flushes via sendBeacon on page unload. No-op when
+ * sourceKey is null.
+ */
 export function useDraftSync(sourceKey: string | null) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const byImage = useAnnotationStore((s) => s.byImage);

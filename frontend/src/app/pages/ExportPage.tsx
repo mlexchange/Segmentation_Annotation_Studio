@@ -10,6 +10,7 @@ import { API_BASE } from '@/config';
 
 type Split = 'train' | 'valid' | 'test' | 'auto';
 
+/** Renders the COCO export page: split table, dry-run preview, and write/download actions. */
 export default function ExportPage() {
   const { source, kind, serverUri, meta, renderOpts } = useDatasetStore();
   const { byImage, splitBySlice, negativeSlices, setSplitForSlice } = useAnnotationStore();
@@ -43,6 +44,7 @@ export default function ExportPage() {
     );
   }
 
+  /** Assembles the COCO export request body (render opts, classes, slices, splits) for the current sample. */
   const buildPayload = (dryRun: boolean) => ({
     out_dir: outDir,
     kind,
@@ -65,6 +67,7 @@ export default function ExportPage() {
     negative_slices: negSlices,
   });
 
+  /** POSTs a dry-run export to the backend and stores the preview/status. */
   const handleDryRun = async () => {
     if (!outDir) { setStatus('Please enter an output directory.'); return; }
     setStatus('Running dry run…');
@@ -81,6 +84,7 @@ export default function ExportPage() {
     } catch (e) { setStatus(`Failed: ${e}`); }
   };
 
+  /** Starts the real export job (writes the dataset to the backend). */
   const handleWrite = () => {
     setStatus('');
     start(buildPayload(false));

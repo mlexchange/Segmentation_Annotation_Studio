@@ -7,6 +7,7 @@ import { useDatasetStore } from '@/stores/datasetStore';
 import { buildSourceKey } from '@/lib/sourceKey';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 
+/** Renders slice navigation controls bound to the dataset and annotation stores. */
 export default function SliceNavigator() {
   const { meta, currentSlice, source, kind, serverUri, setSlice } = useDatasetStore();
   const { byImage, negativeSlices, toggleNegativeSlice } = useAnnotationStore();
@@ -28,7 +29,9 @@ export default function SliceNavigator() {
 
   const isNegative = (negativeSlices[sourceKey] ?? []).includes(String(currentSlice));
 
+  /** Steps back one slice (clamped at 0); writes to the dataset store. */
   const prev = () => setSlice(Math.max(0, currentSlice - 1));
+  /** Steps forward one slice (clamped at the last slice); writes to the dataset store. */
   const next = () => setSlice(Math.min(n - 1, currentSlice + 1));
 
   return (

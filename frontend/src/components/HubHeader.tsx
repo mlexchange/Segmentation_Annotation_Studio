@@ -9,6 +9,7 @@ export type HubHeaderProps = {
     titleClassName?: string;
     onOpenTabSelector?: () => void;
 }
+/** HubHeader — top app bar with logo, title, and an optional "Change Tabs" button. */
 export default function HubHeader({title="ALS COMPUTING HUB", logoUrl=alsLogo, className, titleClassName, onOpenTabSelector}: HubHeaderProps) {
     return (
     <header className={cn("bg-sky-100 h-16 flex justify-between items-center", className)}>

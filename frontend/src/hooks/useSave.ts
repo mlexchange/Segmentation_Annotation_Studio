@@ -63,6 +63,11 @@ export interface UseSaveReturn {
   markClean: () => void;
 }
 
+/**
+ * Explicit versioned-save controller for one `sourceKey`: tracks dirty state and
+ * exposes save/restore/version-history actions (see UseSaveReturn). Resets when
+ * sourceKey changes.
+ */
 export function useSave(sourceKey: string | null): UseSaveReturn {
   const byImage = useAnnotationStore((s) => s.byImage);
   const splitBySlice = useAnnotationStore((s) => s.splitBySlice);
@@ -96,6 +101,7 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
     payloadCacheRef.current.clear();
   }, [sourceKey]);
 
+  /** Assemble the current stores into a draft payload, or null if no sourceKey. */
   const buildSavePayload = useCallback((): SaveDraftPayload | null => {
     if (!sourceKey) return null;
     return {
@@ -113,6 +119,7 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
     return { shapeCount, classCount: payload.classes.length };
   }, [buildSavePayload, classes.length]);
 
+  /** Fetch the version list from the server into state; non-fatal on failure. */
   const refreshVersions = useCallback(async () => {
     if (!sourceKey) return;
     try {
@@ -127,6 +134,8 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
     }
   }, [sourceKey]);
 
+  /** POST the current payload as a new version, then refresh versions and clear
+   *  dirty. Returns true on success, false (logged) on failure. */
   const save = useCallback(
     async (options: SaveOptions = {}): Promise<boolean> => {
       if (!sourceKey) return false;
@@ -165,6 +174,7 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
     [sourceKey, buildSavePayload, refreshVersions]
   );
 
+  /** Fetch a version's full payload, caching by version number; null on failure. */
   const fetchVersionPayload = useCallback(
     async (version: number): Promise<VersionPayload | null> => {
       if (!sourceKey) return null;
@@ -193,6 +203,7 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
     [sourceKey]
   );
 
+  /** Load a version's payload back into the stores and mark state dirty. */
   const restoreVersion = useCallback(
     async (version: number) => {
       if (!sourceKey) return;
@@ -206,6 +217,7 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
     [sourceKey, setClasses, mergeSourceDraft, fetchVersionPayload]
   );
 
+  /** Mark current state as clean (e.g. after restoring a draft on open). */
   const markClean = useCallback(() => {
     cleanRef.current = true;
     setIsDirty(false);

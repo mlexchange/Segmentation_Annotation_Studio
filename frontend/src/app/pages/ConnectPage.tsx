@@ -98,6 +98,7 @@ export default function ConnectPage() {
 
   const canConnect = mode === 'tiled' ? !!selectedServerUri : !!grantedRoot && !!selectedFolder;
 
+  /** Set the Tiled connection (optional browse container) and, by default, navigate to Browse. */
   const connectTiled = (containerPath: string | null, gotoBrowse = true) => {
     setConnection({
       kind: 'tiled',
@@ -115,6 +116,7 @@ export default function ConnectPage() {
     void openTiledArray(`${containerPath}/${firstKey}`, selectedServerUri); // navigates to /annotate
   };
 
+  /** Fetch a connection summary for the chosen Tiled server or local folder, store it, then go to Browse. */
   const handleConnect = async () => {
     setStatus('Connecting…');
     setConnecting(true);

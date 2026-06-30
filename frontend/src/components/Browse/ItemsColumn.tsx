@@ -130,6 +130,7 @@ function itemIsAnnotated(
   return flag === 'yes' || flag === true;
 }
 
+/** Single sample row: name, star rating, annotated badge, and an open-in-Annotate button. */
 function ItemRow({ item, isSelected, onSelect, onOpenInAnnotate, serverUri }: ItemRowProps) {
   const sourceKey = buildSourceKey('tiled', item.path, serverUri);
   const rating = useRatingStore((s) => s.ratings[sourceKey] ?? 0) as StarRatingValue;

@@ -9,6 +9,7 @@
  *   local  → "local:<relPath>"
  */
 
+/** Builds the canonical sourceKey for a sample; tiled keys embed the server URI, local keys use the relative path. */
 export function buildSourceKey(
   kind: 'tiled' | 'local',
   path: string,

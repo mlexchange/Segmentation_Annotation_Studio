@@ -17,6 +17,7 @@ export type HubAppLayoutProps = {
     sidebarInactiveLinkClassName?: string;
     onOpenTabSelector?: () => void;
     }
+/** HubAppLayout — overall app shell wiring the fixed sidebar, header, and routed main content. */
 export default function HubAppLayout ( {
     routes,
     headerTitle,

@@ -91,6 +91,7 @@ export const useAnnotationStore = create<AnnotationState>()(
       splitBySlice: {},
       negativeSlices: {},
 
+      /** Appends one shape to the given (sourceKey, slice); one undo step. */
       addShape: (sourceKey, sliceIdx, shape) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -106,6 +107,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Appends several shapes in one update (one undo step); used by magic-wand. */
       addShapes: (sourceKey, sliceIdx, shapes) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -121,6 +123,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Removes the shape with the given id from the (sourceKey, slice). */
       removeShape: (sourceKey, sliceIdx, shapeId) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -136,6 +139,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Removes several shapes by id in one update (one undo step). */
       removeShapes: (sourceKey, sliceIdx, shapeIds) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -152,6 +156,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Replaces a single shape via the updater fn (move / vertex edit). */
       updateShape: (sourceKey, sliceIdx, shapeId, updater) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -167,6 +172,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Removes every shape of *classId* across all samples/slices, pruning emptied slices and sources. */
       removeShapesByClassId: (classId) =>
         set((s) => {
           const nextByImage: Record<string, Record<string, Shape[]>> = {};
@@ -185,6 +191,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           return { byImage: nextByImage };
         }),
 
+      /** Appends a brush stroke to the named brush shape; no-op for non-brush shapes. */
       appendBrushStroke: (sourceKey, sliceIdx, shapeId, stroke) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -204,6 +211,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Appends an erase carve-out: brush shapes get an erase stroke, vector shapes get an `erased` entry. */
       appendEraseStroke: (sourceKey, sliceIdx, shapeId, stroke) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -225,6 +233,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Replaces all shapes for the given (sourceKey, slice). */
       setShapes: (sourceKey, sliceIdx, shapes) =>
         set((s) => ({
           byImage: {
@@ -236,6 +245,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           },
         })),
 
+      /** Sets the train/valid/test split (or 'auto') for one slice. */
       setSplitForSlice: (sourceKey, sliceIdx, split) =>
         set((s) => ({
           splitBySlice: {
@@ -247,6 +257,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           },
         })),
 
+      /** Toggles whether a slice is flagged as a negative (background-only) example. */
       toggleNegativeSlice: (sourceKey, sliceIdx) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -257,9 +268,11 @@ export const useAnnotationStore = create<AnnotationState>()(
           return { negativeSlices: { ...s.negativeSlices, [sourceKey]: next } };
         }),
 
+      /** Replaces ALL annotation data wholesale; used only on initial session restore. */
       loadFromDraft: (draft) =>
         set({ byImage: draft.byImage, splitBySlice: draft.splitBySlice, negativeSlices: draft.negativeSlices }),
 
+      /** Merges one sample's data into the store, leaving other samples untouched. */
       mergeSourceDraft: (sourceKey, slices, splitMap, negSlices) =>
         set((s) => ({
           byImage: { ...s.byImage, [sourceKey]: slices },
@@ -267,6 +280,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           negativeSlices: { ...s.negativeSlices, [sourceKey]: negSlices },
         })),
 
+      /** Clears all shapes, splits, and negative-slice flags. */
       reset: () => set({ byImage: {}, splitBySlice: {}, negativeSlices: {} }),
     }),
     { limit: 200, partialize: (s) => ({ byImage: s.byImage }) }

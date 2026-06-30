@@ -12,6 +12,7 @@ export type HubSidebarProps = {
     onOpenTabSelector?: () => void;
 };
 
+/** HubSidebar — vertical nav with one link per route plus an optional tab-selector button. */
 export default function HubSidebar({ routes, className, activeLinkClassName, inactiveLinkClassName, onOpenTabSelector }: HubSidebarProps) {
     const baseNavStyles = cn(
         "flex flex-col items-center justify-start gap-1 min-h-[5rem] w-full py-3 px-2 rounded-lg",

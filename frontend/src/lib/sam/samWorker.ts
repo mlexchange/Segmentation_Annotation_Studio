@@ -67,10 +67,12 @@ type InMsg =
   | { type: 'encode'; id: number; bitmap: ImageBitmap }
   | { type: 'decode'; id: number; points: PromptPoint[]; box: Box | null; granularity: Granularity; threshold: number };
 
+/** Post a message back to the main thread, optionally transferring buffers. */
 function post(msg: unknown, transfer?: Transferable[]) {
   (self as unknown as Worker).postMessage(msg, transfer ?? []);
 }
 
+/** Load the SAM model + processor onto a specific device and record the backend. */
 async function loadOn(device: Device) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   model = await SamModel.from_pretrained(MODEL_ID, { device } as any);
@@ -78,6 +80,8 @@ async function loadOn(device: Device) {
   backend = device;
 }
 
+/** Load on the best available device, trying WebGPU first then WASM; returns the
+ *  device that succeeded or throws if none load. */
 async function load(): Promise<Device> {
   const hasGpu = typeof (navigator as Navigator & { gpu?: unknown }).gpu !== 'undefined';
   const devices: Device[] = hasGpu ? ['webgpu', 'wasm'] : ['wasm'];
@@ -94,6 +98,7 @@ async function load(): Promise<Device> {
   throw lastErr ?? new Error('SAM model failed to load');
 }
 
+/** Reload the model on WASM after a WebGPU runtime failure and re-announce ready. */
 async function fallbackToWasm(reason: unknown) {
   console.warn('[SAM] WebGPU runtime failure — falling back to WASM', reason);
   await loadOn('wasm');
@@ -105,6 +110,8 @@ function freshRaw(): RawImage {
   return new RawImage(new Uint8ClampedArray(lastPixels!), lastW, lastH, 4).rgb();
 }
 
+/** Run the vision encoder on the cached pixels; caches the embedding plus the
+ *  processor's reshaped and original sizes for later decode calls. */
 async function runEncoder() {
   const inputs = await processor!(freshRaw());
   imageEmbeddings = await (model as PreTrainedModel & {
@@ -115,6 +122,8 @@ async function runEncoder() {
   originalSizes = (inputs as { original_sizes: [number, number][] }).original_sizes;
 }
 
+/** Cache the bitmap's RGBA pixels and run the encoder, retrying once on WASM if
+ *  a WebGPU run fails. Heavy; called once per slice. */
 async function encode(bitmap: ImageBitmap) {
   if (!model || !processor) throw new Error('model not loaded');
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -138,6 +147,9 @@ async function encode(bitmap: ImageBitmap) {
   }
 }
 
+/** Run the prompt decoder on the cached embedding for the given normalised
+ *  points/box, threshold the masks, pick a channel per `granularity` (auto =
+ *  highest IoU; else by area), and return the chosen mask as a flat Uint8Array. */
 async function runDecoder(points: PromptPoint[], box: Box | null, granularity: Granularity, threshold: number) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const inputs: any = { ...imageEmbeddings };
@@ -202,6 +214,8 @@ async function runDecoder(points: PromptPoint[], box: Box | null, granularity: G
   return { mask: out, width: W, height: H, score: iou[chosen] };
 }
 
+/** Decode a mask for the current slice's embedding, retrying once on WASM
+ *  (re-encoding first) if a WebGPU run fails. Requires a prior encode. */
 async function decode(points: PromptPoint[], box: Box | null, granularity: Granularity, threshold: number) {
   if (!model || !processor || !imageEmbeddings || !reshaped || !originalSizes) {
     throw new Error('encode must run before decode');
@@ -218,6 +232,8 @@ async function decode(points: PromptPoint[], box: Box | null, granularity: Granu
   }
 }
 
+/** Dispatch init/encode/decode messages from the main thread and post back the
+ *  result (or an error/status reply tagged with the request id). */
 self.onmessage = async (e: MessageEvent<InMsg>) => {
   const msg = e.data;
   try {

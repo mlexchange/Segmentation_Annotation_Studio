@@ -25,6 +25,7 @@ interface ToolButtonProps {
   onSelect: (t: Tool) => void;
 }
 
+/** Renders one tool as a radio button showing its icon, label, and keybind badge. */
 function ToolButton({ tool, label, icon, keybind, activeTool, disabled, onSelect }: ToolButtonProps) {
   const isActive = tool === activeTool && !disabled;
   return (
@@ -66,6 +67,7 @@ interface ToolbarProps {
   disabled?: boolean;
 }
 
+/** Renders the tool radiogroup, undo/redo, and the active tool's parameter controls. */
 export default function Toolbar({ disabled = false }: ToolbarProps) {
   const {
     tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity,

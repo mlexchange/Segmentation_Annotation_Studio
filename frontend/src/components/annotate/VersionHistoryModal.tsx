@@ -15,6 +15,7 @@ interface Props {
   onClose: () => void;
 }
 
+/** Formats an ISO timestamp as a short local date/time; falls back to the raw string. */
 function formatDate(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
@@ -28,10 +29,12 @@ function formatDate(iso: string): string {
   }
 }
 
+/** Builds the backend URL for a version's rendered thumbnail. */
 function thumbnailUrl(sourceKey: string, version: number): string {
   return `${API_BASE}/api/annotations/versions/${version}/thumbnail?source_key=${encodeURIComponent(sourceKey)}`;
 }
 
+/** Lazy-loading thumbnail image with a placeholder icon on load failure. */
 function VersionThumbnail({ src, alt }: { src: string; alt: string }) {
   const [status, setStatus] = useState<'loading' | 'ok' | 'error'>('loading');
   return (
@@ -51,6 +54,7 @@ function VersionThumbnail({ src, alt }: { src: string; alt: string }) {
   );
 }
 
+/** Renders the modal listing saved versions with preview/restore actions. */
 export default function VersionHistoryModal({ versions, sourceKey, onPreview, onRestore, onClose }: Props) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">

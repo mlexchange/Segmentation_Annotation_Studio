@@ -50,11 +50,15 @@ export const useDatasetStore = create<DatasetState>((set) => ({
   meta: null,
   currentSlice: 0,
   renderOpts: { ...DEFAULT_RENDER },
+  /** Activates a new image source and resets the current slice to 0. */
   setDataset: (kind, source, serverUri, meta) =>
     set({ kind, source, serverUri, meta, currentSlice: 0 }),
+  /** Sets the active slice index. */
   setSlice: (idx) => set({ currentSlice: idx }),
+  /** Merges partial render options (normalization/scale/percentiles/cmap). */
   setRenderOpts: (opts) =>
     set((s) => ({ renderOpts: { ...s.renderOpts, ...opts } })),
+  /** Clears the active dataset and restores default render options. */
   reset: () =>
     set({ kind: null, source: null, serverUri: null, meta: null, currentSlice: 0, renderOpts: { ...DEFAULT_RENDER } }),
 }));

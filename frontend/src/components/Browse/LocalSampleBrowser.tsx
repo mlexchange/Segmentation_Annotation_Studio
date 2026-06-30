@@ -155,6 +155,7 @@ export default function LocalSampleBrowser({
   );
 }
 
+/** Single local-file row: star rating, filename, annotated badge, and an Annotate button. */
 function LocalRow({
   sample,
   absPath,

@@ -29,6 +29,7 @@ interface ClassStore {
 
 export const useClassStore = create<ClassStore>((set, get) => ({
   classes: [],
+  /** Appends a new visible class with an auto-assigned id (max existing + 1); returns the new classId. */
   addClass: (label, color) => {
     const { classes } = get();
     const existingIds = classes.map((c) => c.classId);
@@ -36,19 +37,23 @@ export const useClassStore = create<ClassStore>((set, get) => ({
     set({ classes: [...classes, { classId, label, color, isVisible: true }] });
     return classId;
   },
+  /** Merges partial updates (label/color/visibility) into the matching class. */
   updateClass: (classId, updates) =>
     set((s) => ({
       classes: s.classes.map((c) =>
         c.classId === classId ? { ...c, ...updates } : c
       ),
     })),
+  /** Removes the class with the given id (does not touch existing shapes). */
   deleteClass: (classId) =>
     set((s) => ({ classes: s.classes.filter((c) => c.classId !== classId) })),
+  /** Flips the class's isVisible flag (controls whether its shapes render). */
   toggleVisibility: (classId) =>
     set((s) => ({
       classes: s.classes.map((c) =>
         c.classId === classId ? { ...c, isVisible: !c.isVisible } : c
       ),
     })),
+  /** Replaces the entire class list (used when loading a saved set). */
   setClasses: (classes) => set({ classes }),
 }));

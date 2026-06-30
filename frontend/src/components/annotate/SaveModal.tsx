@@ -18,6 +18,7 @@ export interface SaveModalProps {
   onClose: () => void;
 }
 
+/** POSTs the draft to the backend to render a preview thumbnail; returns null on failure. */
 async function fetchPreviewBlob(sourceKey: string, payload: SaveDraftPayload): Promise<Blob | null> {
   try {
     const res = await fetch(
@@ -35,6 +36,7 @@ async function fetchPreviewBlob(sourceKey: string, payload: SaveDraftPayload): P
   }
 }
 
+/** Reads a Blob into a base64 string (without the data-URL prefix). */
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -51,6 +53,7 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+/** Renders the save-version dialog and fetches a live thumbnail preview of the draft. */
 export default function SaveModal({
   sourceKey,
   payload,
@@ -95,6 +98,7 @@ export default function SaveModal({
     };
   }, [sourceKey, payload]);
 
+  /** Persists the annotator name to localStorage, encodes the thumbnail, and invokes onSave. */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {

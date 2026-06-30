@@ -33,6 +33,7 @@ export default function BrowsePage() {
     enabled: kind === 'tiled',
   });
 
+  /** Switch the active Tiled connection to the chosen server URI. */
   const handleServerChange = (uri: string) => {
     setConnection({
       kind: 'tiled',

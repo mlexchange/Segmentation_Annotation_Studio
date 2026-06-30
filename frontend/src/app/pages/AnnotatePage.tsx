@@ -23,6 +23,7 @@ import VersionPreviewBar from '@/components/annotate/VersionPreviewBar';
 import SaveModal from '@/components/annotate/SaveModal';
 import type { SaveDraftPayload } from '@/hooks/useSave';
 
+/** Renders the annotation workspace: tool sidebar, canvas, and save/version/export flows. */
 export default function AnnotatePage() {
   const navigate = useNavigate();
   const { source, kind, serverUri, meta } = useDatasetStore();
@@ -33,11 +34,13 @@ export default function AnnotatePage() {
   const [activeClassId, setActiveClassId] = useState<number | null>(null);
   const [activeBrushShapeId, setActiveBrushShapeId] = useState<string | null>(null);
 
+  /** Sets the active class and clears any in-progress brush instance. */
   const handleActivateClass = useCallback((classId: number) => {
     setActiveClassId(classId);
     setActiveBrushShapeId(null);
   }, []);
 
+  /** Resets the active brush instance after a class is deleted. */
   const handleClassDeleted = useCallback((_deletedClassId: number) => {
     setActiveBrushShapeId(null);
   }, []);
@@ -92,6 +95,7 @@ export default function AnnotatePage() {
     setPreviewVersion(null);
   }, [sourceKey]);
 
+  /** Restores the given version into the editor and exits preview mode. */
   const handleRestoreFromPreview = useCallback((version: number) => {
     restoreVersion(version);
     setPreviewVersion(null);
@@ -102,12 +106,14 @@ export default function AnnotatePage() {
     ? (previewPayload.slices[String(currentSlice)] ?? [])
     : null;
 
+  /** Removes the currently selected shapes from the active slice and clears the selection. */
   const handleDeleteSelected = () => {
     if (!sourceKey || selectedShapeIds.length === 0) return;
     removeShapes(sourceKey, currentSlice, selectedShapeIds);
     setSelectedShapeId(null);
   };
 
+  /** Builds the save payload and opens the save modal (no-op if nothing to save). */
   const handleOpenSaveModal = () => {
     const payload = buildSavePayload();
     if (!payload) return;
@@ -115,6 +121,7 @@ export default function AnnotatePage() {
     setShowSaveModal(true);
   };
 
+  /** Saves the version and closes the modal on success. */
   const handleConfirmSave = async (opts: { annotatedBy: string; notes: string; thumbnailBase64?: string }) => {
     const ok = await save(opts);
     if (ok) {
@@ -123,6 +130,7 @@ export default function AnnotatePage() {
     }
   };
 
+  /** Cancels the in-progress draft by clearing the active brush instance. */
   const handleCancelDraft = () => {
     setActiveBrushShapeId(null);
   };

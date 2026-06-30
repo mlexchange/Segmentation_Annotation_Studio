@@ -10,6 +10,7 @@ import { useAnnotationStore } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
 import { cn } from '@/lib/utils';
 
+/** Counts all shapes assigned to a class across every image/slice in the annotation store. */
 function countShapesForClass(classId: number): number {
   const { byImage } = useAnnotationStore.getState();
   let total = 0;
@@ -28,6 +29,7 @@ interface ClassRowProps {
   onClassDeleted: (deletedClassId: number) => void;
 }
 
+/** Renders a single class row with inline rename, visibility toggle, and delete. */
 function ClassRow({ cls, isActive, onActivate, onClassDeleted }: ClassRowProps) {
   const { updateClass, deleteClass, toggleVisibility } = useClassStore();
   const removeShapesByClassId = useAnnotationStore((s) => s.removeShapesByClassId);
@@ -35,12 +37,14 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted }: ClassRowProps) 
   const [editing, setEditing] = useState(false);
   const [labelInput, setLabelInput] = useState(cls.label);
 
+  /** Saves the edited label (if non-empty) to the class store and exits edit mode. */
   const commitLabel = () => {
     const trimmed = labelInput.trim();
     if (trimmed) updateClass(cls.classId, { label: trimmed });
     setEditing(false);
   };
 
+  /** Confirms with the user, then removes the class and all of its shapes from the stores. */
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();
     const shapeCount = countShapesForClass(cls.classId);
@@ -122,12 +126,14 @@ export interface ClassManagerProps {
 /** Common segmentation classes offered as one-click chips. */
 const SUGGESTED_CLASSES = ['air', 'sample', 'void', 'pore', 'background', 'substrate'];
 
+/** Renders the class list, add form, and quick-add suggestion chips. */
 export default function ClassManager({ activeClassId, onActivate, onClassDeleted }: ClassManagerProps) {
   const { classes, addClass } = useClassStore();
   const [showAdd, setShowAdd] = useState(false);
   const [newLabel, setNewLabel] = useState('');
   const [newColor, setNewColor] = useState('');
 
+  /** Notifies the parent of a deletion and re-activates the first remaining class if the active one was removed. */
   const handleClassDeleted = (deletedClassId: number) => {
     onClassDeleted?.(deletedClassId);
     if (activeClassId === deletedClassId) {
@@ -138,11 +144,13 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
     }
   };
 
+  /** Returns the first unused default color, or cycles back if all are taken. */
   const nextColor = () => {
     const used = new Set(classes.map((c) => c.color));
     return DEFAULT_COLORS.find((c) => !used.has(c)) ?? DEFAULT_COLORS[classes.length % DEFAULT_COLORS.length];
   };
 
+  /** Validates the new-class form (rejecting duplicate labels), adds the class, and activates it. */
   const handleAdd = () => {
     const label = newLabel.trim();
     if (!label) return;

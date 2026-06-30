@@ -8,6 +8,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { samClient, webgpuAvailable, type SamStatus, type PromptPoint, type PromptBox, type Granularity, type SamMask } from '@/lib/sam/samClient';
 
+/**
+ * Subscribes to the SAM worker and, when `enabled`, kicks off model load.
+ * Returns status/error/backend info plus `ensureEncoded` and `segment`.
+ */
 export function useSam(enabled: boolean) {
   const [status, setStatus] = useState<SamStatus>(samClient.getStatus());
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +54,8 @@ export function useSam(enabled: boolean) {
     }
   }, []);
 
+  /** Decode a mask from prompt points/box at the given granularity/threshold.
+   *  Returns null when there is no prompt or the decode fails. */
   const segment = useCallback(async (
     points: PromptPoint[],
     box: PromptBox | null,

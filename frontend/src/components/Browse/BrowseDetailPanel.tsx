@@ -21,6 +21,7 @@ const SECTION_ORDER = [
   { label: 'Chemistry', keys: ['OrganicSalt', 'OrganicSalt_Abbrev', 'MetalSalt', 'MetalSalt_Abbrev', 'Solvent', 'Concentration_M', 'MixingRatio', 'TargetStoichiometry', 'Stoichiometry'] },
 ];
 
+/** Render a metadata value for display: arrays/objects are summarised and ISO dates are localised. */
 function formatValue(v: unknown): string {
   if (v === null || v === undefined) return '—';
   if (Array.isArray(v)) return `[${v.length} items]`;
@@ -38,6 +39,7 @@ function formatValue(v: unknown): string {
   return text;
 }
 
+/** Map a raw metadata key to a friendlier label, falling back to the key itself. */
 function displayKey(key: string): string {
   const aliases: Record<string, string> = {
     studio_annotated: 'Annotated',
@@ -48,6 +50,10 @@ function displayKey(key: string): string {
   return aliases[key] ?? key;
 }
 
+/**
+ * BrowseDetailPanel — side panel showing a sample's thumbnail and grouped metadata.
+ * Fetches a backend thumbnail (size quantised to the panel width) and offers Open in Annotate.
+ */
 export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAnnotate, width = 340 }: BrowseDetailPanelProps) {
   const meta = item.metadata;
 

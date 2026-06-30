@@ -29,6 +29,7 @@ const INITIAL_COLUMN_COUNT = 4;
 /** Studio facets are useful as filters but should not fill the initial column set. */
 const STUDIO_FACETS = new Set(['Annotated', 'Annotated at', 'Shape count', 'Class count']);
 
+/** Pick a sensible default column width for a facet field based on its name/length. */
 function columnWidthForField(field: string): number {
   if (field === 'sample_name') return 200;
   if (field === 'Annotated') return 160;
@@ -38,6 +39,7 @@ function columnWidthForField(field: string): number {
   return Math.min(360, Math.max(DEFAULT_COLUMN_WIDTH, field.length * 7 + 48));
 }
 
+/** Format a column value for display (e.g. localise the "Annotated at" timestamp). */
 function formatColumnValue(field: string, value: string): string {
   if (field === 'Annotated at') {
     const parsed = Date.parse(value);
@@ -54,6 +56,11 @@ function formatColumnValue(field: string, value: string): string {
   return value;
 }
 
+/**
+ * ColumnBrowser — Miller-column metadata browser for a Tiled server: a chain of facet
+ * columns narrows to a matching sample list, with a resizable detail panel. Manages column
+ * widths, auto-scroll to new columns, and opening selected samples in Annotate.
+ */
 export default function ColumnBrowser({
   serverUri,
   containerPath,
@@ -119,6 +126,7 @@ export default function ColumnBrowser({
     pool.slice(0, n).forEach((f) => actions.addColumn(f));
   }, [state.facets, actions]);
 
+  /** Update the stored width for the facet column at the given index. */
   const handleResizeColumn = useCallback((index: number, newWidth: number) => {
     setColumnWidths((prev) => {
       if (index < 0 || index >= prev.length) return prev;
@@ -128,12 +136,14 @@ export default function ColumnBrowser({
     });
   }, []);
 
+  /** Append a column for the first facet not already in use. */
   const handleAddColumn = useCallback(() => {
     const used = new Set(state.columns.map((c) => c.field));
     const next = state.facets.find((f) => !used.has(f));
     if (next) actions.addColumn(next);
   }, [state.columns, state.facets, actions]);
 
+  /** Open a sample in the Annotate tab (navigates), surfacing progress/errors via openStatus. */
   const handleOpenInAnnotate = useCallback(
     async (item: BrowseItem) => {
       setOpenStatus(`Opening ${item.sample}…`);
@@ -292,6 +302,7 @@ interface ToolbarProps {
   onAnnotationFilterChange: (filter: AnnotationFilter) => void;
 }
 
+/** Toolbar — top bar with server/annotation selectors and refresh / show-all / add-column actions. */
 function Toolbar({
   facetsLoading,
   facetCount,
@@ -409,6 +420,7 @@ interface DetailPanelSlotProps {
   onOpenInAnnotate: (item: BrowseItem) => void;
 }
 
+/** Fixed-width container that hosts the BrowseDetailPanel for the selected sample. */
 function DetailPanelSlot({ item, width, onClose, serverUri, onOpenInAnnotate }: DetailPanelSlotProps) {
   return (
     <div

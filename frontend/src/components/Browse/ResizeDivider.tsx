@@ -14,6 +14,10 @@ interface ResizeDividerProps {
   className?: string;
 }
 
+/**
+ * ResizeDivider — draggable vertical separator that resizes an adjacent column.
+ * Tracks mouse drag globally while pressed and reports the clamped width via onResize.
+ */
 export default function ResizeDivider({
   currentWidth,
   onResize,
@@ -26,6 +30,7 @@ export default function ResizeDivider({
   const startX = useRef(0);
   const startWidth = useRef(currentWidth);
 
+  /** Captures the drag start position/width and begins the resize gesture. */
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();

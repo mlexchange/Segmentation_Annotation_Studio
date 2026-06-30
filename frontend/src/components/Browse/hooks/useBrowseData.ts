@@ -11,6 +11,7 @@ import { API_BASE } from '@/config';
 const BROWSE_TIMEOUT_MS = 60_000;
 const FACETS_POLL_INTERVAL_MS = 30_000;
 
+/** Fetch JSON with an abort-on-timeout; throws on non-OK responses. */
 async function fetchJson<T>(url: string, timeoutMs = BROWSE_TIMEOUT_MS): Promise<T> {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -78,6 +79,7 @@ function buildFilters(columns: ColumnState[], upToIndex: number): Record<string,
   return out;
 }
 
+/** Build an absolute Browse API URL with params plus optional server creds. */
 function buildUrl(
   path: string,
   params: Record<string, string | number>,
@@ -91,6 +93,11 @@ function buildUrl(
   return `${API_BASE}${path}?${qs.toString()}`;
 }
 
+/**
+ * Drives the column-browser UI: fetches facets/column values/leaf items from the
+ * Browse API and re-polls facets every 30s. Returns the `state` plus immutable
+ * `actions` (add/remove/change columns, select value/item, showAll, refresh).
+ */
 export function useBrowseData(
   serverUri: string,
   technique: string,
@@ -110,6 +117,7 @@ export function useBrowseData(
   // ------------------------------------------------------------------
   // API calls
   // ------------------------------------------------------------------
+  /** Fetch available facet fields; `silent` skips the loading flag for polling. */
   const loadFacets = useCallback(async (options?: { silent?: boolean }) => {
     const { serverUri: su, technique: tq, serverApiKey: sk, containerPath: cp } = paramsRef.current;
     const silent = Boolean(options?.silent);
@@ -134,6 +142,7 @@ export function useBrowseData(
     }
   }, []);
 
+  /** Load value counts for the column at `colIndex` given the upstream filters. */
   const loadColumn = useCallback(
     async (colIndex: number, field: string, filters: Record<string, string>) => {
       const { serverUri: su, technique: tq, serverApiKey: sk, containerPath: cp } = paramsRef.current;
@@ -173,6 +182,7 @@ export function useBrowseData(
     [],
   );
 
+  /** Load leaf items matching `filters` (forces a backend refresh for array-level filters). */
   const loadItems = useCallback(async (filters: Record<string, string>) => {
     const { serverUri: su, technique: tq, serverApiKey: sk, containerPath: cp } = paramsRef.current;
     setState((s) => ({ ...s, itemsLoading: true }));
@@ -207,6 +217,7 @@ export function useBrowseData(
   // ------------------------------------------------------------------
   // Public actions
   // ------------------------------------------------------------------
+  /** Append a new column for `field` and asynchronously load its values. */
   const addColumn = useCallback(
     (field: string) => {
       setState((s) => {
@@ -220,6 +231,7 @@ export function useBrowseData(
     [loadColumn],
   );
 
+  /** Drop the column at `colIndex` and all columns after it, clearing items. */
   const removeColumn = useCallback((colIndex: number) => {
     setState((s) => ({
       ...s,
@@ -230,6 +242,7 @@ export function useBrowseData(
     }));
   }, []);
 
+  /** Replace the column at `colIndex` with a new `field`, dropping later columns. */
   const changeColumnField = useCallback(
     (colIndex: number, field: string) => {
       setState((s) => {
@@ -243,6 +256,8 @@ export function useBrowseData(
     [loadColumn],
   );
 
+  /** Select a value in a column: loads the next column's values, or leaf items
+   *  if it's the last column. Passing null clears the selection and items. */
   const selectValue = useCallback(
     (colIndex: number, value: string | null) => {
       setState((s) => {
@@ -278,6 +293,7 @@ export function useBrowseData(
     [loadColumn, loadItems],
   );
 
+  /** Set the currently selected leaf item (or clear it with null). */
   const selectItem = useCallback((item: BrowseItem | null) => {
     setState((s) => ({ ...s, selectedItem: item }));
   }, []);
@@ -288,6 +304,7 @@ export function useBrowseData(
     void loadItems({});
   }, [loadItems]);
 
+  /** Reload current columns and items from the server using the latest state. */
   const refresh = useCallback(() => {
     const s = stateRef.current;
     if (s.showingAll) {

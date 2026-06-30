@@ -38,6 +38,7 @@ function fileStem(name: string): string {
   return name.replace(/\.[^.]+$/, '');
 }
 
+/** Turn a name into a filesystem/Tiled-safe slug, defaulting to 'dataset' if empty. */
 function sanitizeName(name: string): string {
   return name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'dataset';
 }
@@ -66,6 +67,7 @@ async function readEntry(entry: any): Promise<File[]> {
   return [];
 }
 
+/** Gather all dropped files (recursing into directories) and the top-level folder name. */
 async function collectFromDrop(dt: DataTransfer): Promise<{ files: File[]; folderName: string }> {
   const items = Array.from(dt.items);
   const entries = items
@@ -94,6 +96,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
   const [firstKey, setFirstKey] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
+  /** Clear the active status-polling interval, if any. */
   const stopPolling = useCallback(() => {
     if (pollRef.current !== null) {
       window.clearInterval(pollRef.current);
@@ -103,6 +106,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
 
   useEffect(() => stopPolling, [stopPolling]);
 
+  /** Poll the ingest job status every second until it reports done or error. */
   const poll = useCallback(
     (id: string) => {
       stopPolling();
@@ -122,6 +126,10 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
     [stopPolling],
   );
 
+  /**
+   * Filter to supported files, derive a destination container name, POST the upload,
+   * then start polling the resulting job. Side-effects: sets status/error/firstKey state.
+   */
   const startUpload = useCallback(
     async (files: File[], suggestedName: string) => {
       const supported = files.filter((f) => isSupported(f.name));
@@ -173,6 +181,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dirInputRef = useRef<HTMLInputElement | null>(null);
 
+  /** Drop handler: collect dropped files/folder and kick off the upload. */
   const onDrop = useCallback(
     async (e: React.DragEvent) => {
       e.preventDefault();
@@ -184,6 +193,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
     [startUpload],
   );
 
+  /** File/folder input change handler: start the upload from the chosen files. */
   const onPick = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(e.target.files ?? []);

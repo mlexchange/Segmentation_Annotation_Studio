@@ -49,6 +49,7 @@ interface AnnotationCanvasProps {
 
 // ---- Point-in-shape hit testing (used by the eraser to pick a target) ----
 
+/** Even-odd ray cast: true if point (px,py) is inside the flat [x,y,…] polygon. */
 function pointInPolygon(px: number, py: number, pts: number[]): boolean {
   let inside = false;
   for (let i = 0, j = pts.length - 2; i < pts.length; j = i, i += 2) {
@@ -61,6 +62,7 @@ function pointInPolygon(px: number, py: number, pts: number[]): boolean {
   return inside;
 }
 
+/** Shortest distance from point (px,py) to segment AB. */
 function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax, dy = by - ay;
   const len2 = dx * dx + dy * dy;
@@ -70,6 +72,8 @@ function distToSegment(px: number, py: number, ax: number, ay: number, bx: numbe
   return Math.hypot(px - cx, py - cy);
 }
 
+/** True if image-coord point (x,y) lies inside any shape kind; brush strokes
+ *  count as filled within `radius` of their segments (erase strokes ignored). */
 function shapeContainsPoint(shape: Shape, x: number, y: number): boolean {
   if (shape.kind === 'polygon') return pointInPolygon(x, y, shape.points);
   if (shape.kind === 'rectangle') {
@@ -176,6 +180,8 @@ function shapeIntersectsRect(shape: Shape, r: BBox): boolean {
   return false;
 }
 
+/** The annotation viewport: image + shape layers and all drawing/editing tools.
+ *  Shapes are stored in IMAGE pixel coords; `transform` is display-only (pan/zoom). */
 export default function AnnotationCanvas({
   brightness,
   contrast,
@@ -296,6 +302,7 @@ export default function AnnotationCanvas({
   const samEncodeKey = imageEl && meta
     ? `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}`
     : null;
+  /** Lazily render the brightness/contrast-adjusted slice that SAM encodes. */
   const makeSamSource = useCallback(
     () => renderAdjusted(imageEl!, meta!.width, meta!.height, brightness, contrast),
     [imageEl, meta, brightness, contrast],
@@ -389,6 +396,7 @@ export default function AnnotationCanvas({
 
   const showBrushCursor = (tool === 'brush' || tool === 'eraser') && !!meta && !isPreviewing;
 
+  /** Current pointer position mapped from stage/display coords to image pixels. */
   const getPointerImagePos = () => {
     const stage = stageRef.current;
     if (!stage) return null;
@@ -409,6 +417,7 @@ export default function AnnotationCanvas({
     return cm;
   };
 
+  /** Clear the magnetic-lasso trace and its dijkstra/seed refs. */
   const resetMagnetic = useCallback(() => {
     magneticPrevRef.current = null;
     magneticSeedRef.current = null;
@@ -416,6 +425,7 @@ export default function AnnotationCanvas({
     setMagneticPreview([]);
   }, []);
 
+  /** Clear all magic-wand/SAM seeds, box, and preview state. */
   const resetMagic = useCallback(() => {
     setMagicSeeds([]);
     setMagicPreview([]);
@@ -499,6 +509,7 @@ export default function AnnotationCanvas({
     return () => cancelAnimationFrame(id);
   }, [magicSeeds, magicBox, samDetail, samThreshold, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** Commit the magic preview polygons as new shapes (one batched undo step). */
   const commitMagic = useCallback(() => {
     if (!sourceKey || activeClassId === null) return;
     // One batched add = one undo step for the whole magic selection.
@@ -570,6 +581,8 @@ export default function AnnotationCanvas({
     }
   };
 
+  /** Tool-dispatched press: starts a marquee, seeds magic/magnetic, adds a polygon
+   *  vertex, begins a rect/ellipse drag, or starts a buffered brush/erase stroke. */
   const handleStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     if (isPreviewing) return;
 
@@ -710,6 +723,8 @@ export default function AnnotationCanvas({
     }
   };
 
+  /** Drives all live previews while dragging: brush cursor, marquee, SAM box,
+   *  magnetic path, rect/ellipse draft, and buffering brush/erase points. */
   const handleStageMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
     if (isPreviewing) return;
     const pos = getPointerImagePos();
@@ -764,6 +779,8 @@ export default function AnnotationCanvas({
     }
   };
 
+  /** Finalizes the press: box-select/deselect marquee, resolve SAM box-vs-point,
+   *  flush a brush/erase stroke, or commit a dragged rect/ellipse. */
   const handleStageMouseUp = () => {
     if (isPreviewing) return;
 
@@ -831,6 +848,7 @@ export default function AnnotationCanvas({
     }
   };
 
+  /** Closes the in-progress polygon, or finishes & simplifies a magnetic trace, into a committed shape. */
   const handleStageDblClick = () => {
     if (isPreviewing) return;
     if (tool === 'polygon' && draftPoly.length >= 6 && sourceKey && activeClassId !== null) {
@@ -853,6 +871,7 @@ export default function AnnotationCanvas({
     }
   };
 
+  /** Hides the brush cursor and commits any in-progress stroke/drag on exit. */
   const handleStageMouseLeave = () => {
     // Hide brush cursor
     if (brushCursorRef.current) {
@@ -868,6 +887,7 @@ export default function AnnotationCanvas({
     setDragCurrent(null);
   };
 
+  /** Re-shows the brush/eraser size cursor when the pointer re-enters the stage. */
   const handleStageMouseEnter = () => {
     if (showBrushCursor && brushCursorRef.current) {
       brushCursorRef.current.visible(true);
@@ -883,6 +903,7 @@ export default function AnnotationCanvas({
     }
   }, [showBrushCursor]);
 
+  /** Zoom in/out toward the cursor, keeping the point under the pointer fixed. */
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault();
     const stage = stageRef.current;
@@ -899,6 +920,7 @@ export default function AnnotationCanvas({
     });
   };
 
+  /** Live (uncommitted) rect/ellipse preview while dragging it out. */
   const renderDraftShape = () => {
     if (!dragStart || !dragCurrent) return null;
     const dx = dragCurrent.x - dragStart.x;
@@ -944,6 +966,8 @@ export default function AnnotationCanvas({
       />
     ));
 
+  /** Render a committed shape (any kind) on the cached display layer, with the
+   *  active brush instance recolored to the active class and erase strokes carved out. */
   const renderShape = (shape: Shape) => {
     const color =
       shape.id === activeBrushShapeId && activeClassId !== null
@@ -1033,6 +1057,7 @@ export default function AnnotationCanvas({
 
   // ----- Interactive selection / move / vertex-edit (select tool only) -----
 
+  /** Select a clicked shape; shift-click toggles it in the multi-selection. */
   const selectShape = (e: Konva.KonvaEventObject<MouseEvent>, id: string) => {
     e.cancelBubble = true;
     // Shift-click toggles the shape in/out of the current multi-selection.
@@ -1257,6 +1282,7 @@ export default function AnnotationCanvas({
     tr.getLayer()?.batchDraw();
   }, [showInteractive, selectedShape, selectedResizable, displayShapes, transform]);
 
+  /** Remove all currently selected shapes from the store and clear the selection. */
   const handleDeleteSelected = () => {
     if (!sourceKey || selectedShapeIds.length === 0) return;
     removeShapes(sourceKey, currentSlice, selectedShapeIds);

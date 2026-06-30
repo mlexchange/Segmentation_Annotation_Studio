@@ -12,6 +12,10 @@ interface DraftSummary {
   has_annotations?: boolean;
 }
 
+/**
+ * Returns a Set of sourceKeys that have at least one annotation, merging
+ * in-session store state with backend drafts (queried, 30s stale time).
+ */
 export function useAnnotatedSourceKeys() {
   const byImage = useAnnotationStore((s) => s.byImage);
 

@@ -13,6 +13,7 @@ export interface DisplayControlsProps {
   onReset: () => void;
 }
 
+/** Renders the brightness/contrast sliders with a reset button. */
 export default function DisplayControls({
   brightness,
   contrast,

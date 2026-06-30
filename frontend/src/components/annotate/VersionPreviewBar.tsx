@@ -20,6 +20,7 @@ interface Props {
   onRestore: (version: number) => void;
 }
 
+/** Formats an ISO timestamp as a short local date/time; falls back to the raw string. */
 function formatDate(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
@@ -33,6 +34,7 @@ function formatDate(iso: string): string {
   }
 }
 
+/** Renders the version time-travel overlay (scrub/restore/exit). */
 export default function VersionPreviewBar({
   versions,
   current,
@@ -50,6 +52,7 @@ export default function VersionPreviewBar({
   const meta = sorted.find((v) => v.version === current) ?? sorted[sorted.length - 1];
   const isLatest = current === max;
 
+  /** Moves the preview one version older/newer, clamped to the available range. */
   const step = (dir: -1 | 1) => {
     const next = current + dir;
     if (next >= min && next <= max) onChange(next);

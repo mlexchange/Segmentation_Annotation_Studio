@@ -57,6 +57,7 @@ const SCOPE_OPTIONS: { value: Scope; label: string; desc: string; stars?: string
   },
 ];
 
+/** Renders the COCO download dialog and drives the export job for the chosen scope. */
 export default function DownloadModal({ onClose }: DownloadModalProps) {
   const { source, kind, serverUri } = useDatasetStore();
   const { byImage, splitBySlice, negativeSlices } = useAnnotationStore();
@@ -80,6 +81,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
     }).length;
   }, [scope, source, byImage, ratings]);
 
+  /** Builds the per-sample export source list for the selected scope; throws if no current sample. */
   const buildSources = () => {
     if (scope === 'current') {
       if (!source || !kind) throw new Error('No active sample loaded.');
@@ -116,6 +118,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
       });
   };
 
+  /** Builds the sources (alerting on error/empty) and starts the COCO export job. */
   const handleExport = () => {
     let sources;
     try {

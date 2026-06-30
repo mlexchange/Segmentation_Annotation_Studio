@@ -9,6 +9,7 @@ export interface SliceResult {
   url: string;
 }
 
+/** Build the /api/image/slice URL encoding source, slice index, and render options. */
 function buildSliceUrl(
   source: string,
   kind: string,
@@ -30,6 +31,10 @@ function buildSliceUrl(
   return `${API_BASE}/api/image/slice?${params.toString()}`;
 }
 
+/**
+ * Fetches a PNG slice as a blob object URL (5min stale time). Disabled until
+ * both source and kind are set. Use for displaying a rendered image slice.
+ */
 export function useImageSlice(
   source: string | null,
   kind: string | null,

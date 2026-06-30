@@ -60,17 +60,30 @@ export const useToolStore = create<ToolState>((set) => ({
   samDetail: 'auto',
   samThreshold: 0,
   fitRequestId: 0,
+  /** Switches the active tool and clears the current shape selection. */
   setTool: (tool) => set({ tool, selectedShapeIds: [] }),
+  /** Sets the brush/eraser radius. */
   setBrushSize: (brushSize) => set({ brushSize }),
+  /** Sets the shape fill opacity (0–1). */
   setFillOpacity: (fillOpacity) => set({ fillOpacity }),
+  /** Single-selects a shape, or clears the selection when null. */
   setSelectedShapeId: (id) => set({ selectedShapeIds: id ? [id] : [] }),
+  /** Replaces the multi-selection with the given shape ids. */
   setSelectedShapeIds: (selectedShapeIds) => set({ selectedShapeIds }),
+  /** Sets the magic-wand similarity tolerance (0–1). */
   setMagicTolerance: (magicTolerance) => set({ magicTolerance }),
+  /** Sets the magic-wand selection mode (contiguous/global). */
   setMagicMode: (magicMode) => set({ magicMode }),
+  /** Sets the magic-wand pre-blur denoise sigma. */
   setMagicSigma: (magicSigma) => set({ magicSigma }),
+  /** Sets the contiguous magic-wand edge-barrier strength (0–1). */
   setMagicEdgeStop: (magicEdgeStop) => set({ magicEdgeStop }),
+  /** Selects the magic engine (SAM or classic wand). */
   setMagicEngine: (magicEngine) => set({ magicEngine }),
+  /** Sets the SAM multimask granularity to keep. */
   setSamDetail: (samDetail) => set({ samDetail }),
+  /** Sets the SAM mask-logit threshold (>0 tightens, <0 grows). */
   setSamThreshold: (samThreshold) => set({ samThreshold }),
+  /** Bumps fitRequestId to signal the canvas to re-fit the image to the viewport. */
   requestFit: () => set((s) => ({ fitRequestId: s.fitRequestId + 1 })),
 }));

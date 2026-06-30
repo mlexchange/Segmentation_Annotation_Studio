@@ -35,6 +35,10 @@ const allRoutes: RouteItem[] = [
 
 const DEFAULT_PATHS = allRoutes.map((r) => r.path);
 
+/**
+ * App — root component: validates persisted tab selection against known routes, redirects on
+ * first load, and renders the hub layout plus the tab-customisation modal.
+ */
 function App() {
   const { selectedPaths, setSelectedPaths } = useHubSelectedTabs();
   const navigate = useNavigate();

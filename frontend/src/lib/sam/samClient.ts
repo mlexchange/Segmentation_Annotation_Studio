@@ -22,15 +22,20 @@ class SamClient {
   private listeners = new Set<(s: SamStatus) => void>();
   private initPromise: Promise<void> | null = null;
 
+  /** Current worker status (model/encode lifecycle). */
   getStatus(): SamStatus { return this.status; }
+  /** The compute backend in use ('webgpu' | 'wasm'), or null before load. */
   getBackend(): string | null { return this.backend; }
 
+  /** Subscribe to status changes; fires immediately with the current status.
+   *  Returns an unsubscribe function. */
   subscribe(fn: (s: SamStatus) => void): () => void {
     this.listeners.add(fn);
     fn(this.status);
     return () => { this.listeners.delete(fn); };
   }
 
+  /** Update status and notify all subscribers. */
   private setStatus(s: SamStatus) {
     this.status = s;
     this.listeners.forEach((fn) => fn(s));
@@ -71,6 +76,8 @@ class SamClient {
     return this.initPromise;
   }
 
+  /** Post a tagged message to the worker and resolve when its matching reply
+   *  (by auto-assigned id) arrives. `transfer` ownership-transfers buffers. */
   private request<T>(payload: Record<string, unknown>, transfer?: Transferable[]): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {

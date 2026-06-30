@@ -29,12 +29,17 @@ async function applyDraft(
   mergeSourceDraft(sourceKey, slices, splitMap, negSlices);
 }
 
+/**
+ * Returns openers that load a sample's metadata, seed the dataset/class stores,
+ * restore its saved draft, and navigate to the Annotate tab.
+ */
 export function useOpenInAnnotate() {
   const navigate = useNavigate();
   const { setDataset } = useDatasetStore();
   const { setClasses } = useClassStore();
   const { mergeSourceDraft } = useAnnotationStore();
 
+  /** Open a Tiled array: fetch meta, set the dataset, apply its draft, then navigate. */
   const openTiledArray = useCallback(
     async (tiledPath: string, serverUri: string) => {
       const params = new URLSearchParams({ source: tiledPath, kind: 'tiled' });
@@ -60,6 +65,7 @@ export function useOpenInAnnotate() {
     [navigate, setDataset, setClasses, mergeSourceDraft],
   );
 
+  /** Open a local file by relative path: fetch meta, set the dataset, apply its draft, then navigate. */
   const openLocalFile = useCallback(
     async (relPath: string) => {
       const params = new URLSearchParams({ source: relPath, kind: 'local' });

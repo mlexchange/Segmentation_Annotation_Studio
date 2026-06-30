@@ -25,17 +25,24 @@ const IDLE: ExportJobState = {
   status: 'idle', phase: '', done: 0, total: 0, log: [], result: null, error: null, jobId: null,
 };
 
+/**
+ * Drives a background COCO export: returns the live job `state`, a `start` action,
+ * `reset`, and a `downloadUrl` for the result zip when available.
+ */
 export function useExportJob() {
   const [state, setState] = useState<ExportJobState>(IDLE);
   const timer = useRef<number | null>(null);
 
+  /** Cancel any pending poll timeout. */
   const clearTimer = () => {
     if (timer.current !== null) { window.clearTimeout(timer.current); timer.current = null; }
   };
   useEffect(() => clearTimer, []);
 
+  /** Stop polling and return state to idle. */
   const reset = useCallback(() => { clearTimer(); setState(IDLE); }, []);
 
+  /** Recursively poll /api/export/status/{jobId} every 500ms until done/error. */
   const poll = useCallback((jobId: string) => {
     const tick = async () => {
       try {
