@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1,
+    "name": "air",
+    "color": "#1f77b4"
+  },
+  {
+    "id": 2,
+    "name": "plant",
+    "color": "#ff7f0e"
+  },
+  {
+    "id": 3,
+    "name": "xylem",
+    "color": "#2ca02c"
+  },
+  {
+    "id": 4,
+    "name": "pith",
+    "color": "#d62728"
+  }
+]

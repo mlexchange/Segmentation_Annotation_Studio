@@ -12,6 +12,11 @@ metadata-driven Browse UI (which needs fields with >=2 distinct values):
   stays a string filter (see ``browse_helpers._typed_query_value``).
 * ``size``            — ``"H x W"`` from the array shape.
 * ``original_filename`` — the uploaded filename.
+* ``sample_name``     — the filename stem (the node key); a friendlier label.
+* ``description``     — optional user-supplied keyword(s) entered on Connect; the
+  same value is written to every node in the batch so a single drop is filterable
+  (these keys are made facet-eligible with one distinct value, see
+  ``browse_helpers._SINGLE_VALUE_FACET_RAW_KEYS``).
 
 Job state is held in-memory (lost on restart) — acceptable for a localhost tool.
 """
@@ -136,6 +141,7 @@ def run_ingest_job(
     server_uri: str | None,
     container_path: str,
     temp_files: list[tuple[str, Path]],
+    description: str = "",
 ) -> None:
     """Copy each temp file into the target Tiled container.
 
@@ -144,7 +150,10 @@ def run_ingest_job(
         server_uri: Connected Tiled server URI.
         container_path: Slash-separated target container (e.g. ``browse/testset``).
         temp_files: list of ``(original_filename, temp_path)``.
+        description: Optional user-supplied keyword(s) stored on every node so the
+            batch is identifiable/filterable in Browse (empty string → omitted).
     """
+    description = (description or "").strip()
     _update(jid, state="running")
     try:
         api_key = api_key_for_uri(server_uri)
@@ -152,6 +161,21 @@ def run_ingest_job(
         parts = [p for p in container_path.strip("/").split("/") if p]
         target = _ensure_container(client, parts)
         width = _pad_width([orig for orig, _ in temp_files])
+
+        # Describe the dataset at the CONTAINER level too. Browse treats each
+        # child of the browse root as a "sample" and reads its container
+        # metadata (not the per-array metadata written below), so this is what
+        # makes the upload identifiable/filterable there.
+        container_meta: dict[str, Any] = {
+            "sample_name": parts[-1] if parts else "",
+            "n_images": len(temp_files),
+        }
+        if description:
+            container_meta["description"] = description
+        try:
+            target.update_metadata(metadata=container_meta)
+        except Exception as exc:  # noqa: BLE001 — best-effort; per-array meta still set
+            logger.warning("could not set container metadata on %s: %s", container_path, exc)
 
         for idx, (orig_name, tmp) in enumerate(temp_files):
             try:
@@ -161,7 +185,10 @@ def run_ingest_job(
                     "image_number": _image_number(stem, width, idx),
                     "size": _size_str(arr),
                     "original_filename": orig_name,
+                    "sample_name": stem,
                 }
+                if description:
+                    meta["description"] = description
                 if arr.ndim == 3 and arr.shape[2] in (3, 4):
                     dims = ["y", "x", "channel"]
                 elif arr.ndim == 2:

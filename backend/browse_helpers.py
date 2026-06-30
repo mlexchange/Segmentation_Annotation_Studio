@@ -36,6 +36,20 @@ _STUDIO_RAW_KEYS: tuple[str, ...] = (
     "studio_updated_at",
 )
 
+# Ingest-time keys worth showing as Browse facets even when only ONE distinct
+# value exists (e.g. a single dropped file, or a whole batch sharing one
+# user-supplied description). Without this they'd be hidden by the >=2 rule.
+_INGEST_FACET_RAW_KEYS: tuple[str, ...] = (
+    "description",
+    "sample_name",
+    "original_filename",
+)
+
+# Keys that qualify as a facet with a single distinct value (vs. the default >=2).
+_SINGLE_VALUE_FACET_RAW_KEYS: frozenset[str] = frozenset(
+    (*_STUDIO_RAW_KEYS, *_INGEST_FACET_RAW_KEYS),
+)
+
 # Raw keys that are stored at the array-node level rather than on the parent
 # sample container. When a filter references one of these, we switch to a
 # per-sample search path.
@@ -116,12 +130,17 @@ def build_field_mapping(container_node: Any) -> FieldMapping:
     )
 
 
+# Ingest writes these at the dataset-container level, so they're always worth
+# offering as facets even when the scanned sample metadata didn't surface them.
+_INJECTED_INGEST_RAW_KEYS: tuple[str, ...] = ("description", "sample_name")
+
+
 def _inject_studio_keys(
     display_to_raw: dict[str, str],
     raw_to_display: dict[str, str],
 ) -> None:
-    """Ensure studio annotation fields are always available in Browse."""
-    for raw_key in _STUDIO_RAW_KEYS:
+    """Ensure studio annotation + ingest description fields are always in Browse."""
+    for raw_key in (*_STUDIO_RAW_KEYS, *_INJECTED_INGEST_RAW_KEYS):
         display_key = _display_name(raw_key)
         display_to_raw.setdefault(display_key, raw_key)
         raw_to_display.setdefault(raw_key, display_key)
@@ -303,14 +322,38 @@ def _search_container_only(
         for k in list(node)[:limit]:
             try:
                 entry = node[k]
-                meta = dict(entry.metadata) if hasattr(entry, "metadata") else {}
-                items.append({"path": _join(prefix, k), "sample": k, "metadata": meta})
+                meta = dict(entry.metadata) if hasattr(entry, "metadata") and entry.metadata else {}
+                n_slices = 1
+                # Drag-and-drop ingest nests as browse/<dataset>/<array(s)>: the
+                # dataset is a container of array slices, with the descriptive
+                # metadata on the children. Report the slice count (so the UI can
+                # offer drill-in) and, if the container itself is metadata-less,
+                # borrow the first child's metadata (cheap metadata-only read).
+                if _is_container(entry):
+                    child_keys = list(entry)
+                    if child_keys and not _is_container(entry[child_keys[0]]):
+                        n_slices = len(child_keys)  # flat stack of array slices
+                        if not meta:
+                            cmeta = entry[child_keys[0]].metadata
+                            meta = dict(cmeta) if cmeta else {}
+                items.append({
+                    "path": _join(prefix, k),
+                    "sample": k,
+                    "metadata": meta,
+                    "n_slices": n_slices,
+                })
             except Exception:  # noqa: BLE001
                 continue
     except Exception as exc:  # noqa: BLE001
         logger.warning("tiled_search_items iteration failed: %s", exc)
 
     return {"items": items, "total": len(items)}
+
+
+def _is_container(entry: Any) -> bool:
+    """True if *entry* is a Tiled container (vs. an array/leaf) node."""
+    sf = getattr(entry, "structure_family", None)
+    return str(getattr(sf, "value", sf)) == "container"
 
 
 def _search_array_only(

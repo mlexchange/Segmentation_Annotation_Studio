@@ -45,7 +45,7 @@ from browse_helpers import (
     scoped_metadata_rows,
     tiled_distinct_values,
     tiled_search_items,
-    _STUDIO_RAW_KEYS,
+    _SINGLE_VALUE_FACET_RAW_KEYS,
 )
 from cache import TTLCache
 from schemas import DraftPayload, ExportRequest, ExportSourceItem, ImageMeta, SaveVersionRequest
@@ -170,7 +170,7 @@ async def browse_facets(
 
         def _facet_for_key(disp_key: str) -> tuple[list[str], list[str]]:
             raw_key = mapping.display_to_raw.get(disp_key, disp_key)
-            min_values = 1 if raw_key in _STUDIO_RAW_KEYS else 2
+            min_values = 1 if raw_key in _SINGLE_VALUE_FACET_RAW_KEYS else 2
             if scoped:
                 raw_values = distinct_from_rows(scoped_rows, raw_key)
             else:
@@ -295,6 +295,40 @@ async def browse_items(
         result = await asyncio.to_thread(_build)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to browse items: {exc}") from exc
+
+    _items_cache.set(cache_key, result)
+    return result
+
+
+@app.get("/api/browse/slices")
+async def browse_slices(
+    path: str = Query(..., description="Tiled container path of a multi-slice dataset"),
+    server_uri: Optional[str] = None,
+    server_api_key: Optional[str] = None,
+    limit: int = Query(2000, ge=1, le=10000),
+) -> dict:
+    """List a dataset container's array children as individually-openable slices.
+
+    Used by Browse drill-in: each returned record is ``{path, sample, metadata}``
+    where ``path`` points at a single array node that opens as a 2-D image.
+    """
+    cache_key = ("slices", server_uri or "", path, limit)
+    cached = _items_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    def _build() -> dict:
+        client = get_tiled_client(server_uri, server_api_key)
+        container, prefix = get_browse_container_for(client, path)
+        result = tiled_search_items(container, limit=limit, container_path_prefix=prefix)
+        # Order slices by key (ingest zero-pads, so lexical == slice order).
+        result["items"].sort(key=lambda it: it["sample"])
+        return result
+
+    try:
+        result = await asyncio.to_thread(_build)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to list slices: {exc}") from exc
 
     _items_cache.set(cache_key, result)
     return result
@@ -942,6 +976,7 @@ async def import_coco(dataset_dir: str = Query(...)) -> dict:
 async def ingest_upload(
     server_uri: Optional[str] = Query(None, description="Target Tiled server URI"),
     container_path: str = Form(..., description="Target container, e.g. 'browse/myset'"),
+    description: str = Form("", description="Optional keyword(s) stored on every ingested node"),
     files: list[UploadFile] = File(..., description="Image files to copy into Tiled"),
 ) -> dict:
     """Stream uploaded files to temp storage and start a background ingest job.
@@ -971,7 +1006,7 @@ async def ingest_upload(
     jid = ingest_mod.new_job(len(saved), server_uri, container_path)
     threading.Thread(
         target=ingest_mod.run_ingest_job,
-        args=(jid, server_uri, container_path, saved),
+        args=(jid, server_uri, container_path, saved, description),
         daemon=True,
     ).start()
     return {"job_id": jid, "total": len(saved), "container_path": container_path}

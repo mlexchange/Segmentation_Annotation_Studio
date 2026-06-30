@@ -54,6 +54,10 @@ _BROWSE_CANDIDATES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("beamlines", "bl733", "projects", "10k"), "beamlines/bl733/projects/10k"),
     (("beamlines", "bl733"), "beamlines/bl733"),
     (("beamlines", "bl901"), "beamlines/bl901"),
+    # Plain drag-and-drop ingest writes samples directly under `browse/`; catch
+    # this before falling back to the root (which would list `browse` itself as
+    # a single sample instead of its contents).
+    (("browse",), "browse"),
 )
 
 

@@ -34,6 +34,8 @@ export interface BrowseItem {
   path: string;
   sample: string;
   metadata: Record<string, unknown>;
+  /** Number of array slices when this item is a multi-image volume (>1 = drillable). */
+  n_slices?: number;
 }
 
 export interface ColumnState {
@@ -55,6 +57,11 @@ export interface BrowseState {
   connectionStatus: 'loading' | 'connected' | 'disconnected';
   /** True when showing every sample (no column filters). */
   showingAll: boolean;
+  /** Multi-slice dataset currently drilled into (its slices listed), or null. */
+  expandedSample: BrowseItem | null;
+  /** Individual array slices of `expandedSample`. */
+  slices: BrowseItem[];
+  slicesLoading: boolean;
 }
 
 const INITIAL_STATE: BrowseState = {
@@ -67,6 +74,9 @@ const INITIAL_STATE: BrowseState = {
   selectedItem: null,
   connectionStatus: 'loading',
   showingAll: false,
+  expandedSample: null,
+  slices: [],
+  slicesLoading: false,
 };
 
 /** Build a filter dict from the first `upToIndex` selected column values. */
@@ -214,9 +224,41 @@ export function useBrowseData(
     }
   }, []);
 
+  /** Fetch the individual array slices of a multi-image dataset container. */
+  const loadSlices = useCallback(async (item: BrowseItem) => {
+    const { serverUri: su, serverApiKey: sk } = paramsRef.current;
+    setState((s) => ({ ...s, expandedSample: item, slices: [], slicesLoading: true, selectedItem: null }));
+    try {
+      const data = await fetchJson<{ items?: BrowseItem[] }>(
+        buildUrl('/api/browse/slices', { path: item.path }, su, sk),
+      );
+      setState((s) =>
+        s.expandedSample?.path === item.path
+          ? { ...s, slices: data.items ?? [], slicesLoading: false }
+          : s,
+      );
+    } catch (err) {
+      console.warn('Browse slices unavailable:', err);
+      setState((s) =>
+        s.expandedSample?.path === item.path ? { ...s, slices: [], slicesLoading: false } : s,
+      );
+    }
+  }, []);
+
   // ------------------------------------------------------------------
   // Public actions
   // ------------------------------------------------------------------
+  /** Drill into a multi-image dataset to list its slices, or collapse with null. */
+  const expandSample = useCallback(
+    (item: BrowseItem | null) => {
+      if (!item) {
+        setState((s) => ({ ...s, expandedSample: null, slices: [], slicesLoading: false }));
+        return;
+      }
+      void loadSlices(item);
+    },
+    [loadSlices],
+  );
   /** Append a new column for `field` and asynchronously load its values. */
   const addColumn = useCallback(
     (field: string) => {
@@ -225,7 +267,7 @@ export function useBrowseData(
         const newCols = [...s.columns, newCol];
         const newIndex = newCols.length - 1;
         queueMicrotask(() => loadColumn(newIndex, field, buildFilters(newCols, newIndex)));
-        return { ...s, columns: newCols, showingAll: false, items: [], itemsTotal: 0 };
+        return { ...s, columns: newCols, showingAll: false, items: [], itemsTotal: 0, expandedSample: null, slices: [] };
       });
     },
     [loadColumn],
@@ -239,6 +281,8 @@ export function useBrowseData(
       items: [],
       itemsTotal: 0,
       selectedItem: null,
+      expandedSample: null,
+      slices: [],
     }));
   }, []);
 
@@ -250,7 +294,7 @@ export function useBrowseData(
         const newCol: ColumnState = { field, values: [], loading: true, error: null, selected: null };
         const newCols = [...cols, newCol];
         queueMicrotask(() => loadColumn(colIndex, field, buildFilters(newCols, colIndex)));
-        return { ...s, columns: newCols, items: [], itemsTotal: 0, selectedItem: null };
+        return { ...s, columns: newCols, items: [], itemsTotal: 0, selectedItem: null, expandedSample: null, slices: [] };
       });
     },
     [loadColumn],
@@ -266,7 +310,7 @@ export function useBrowseData(
         );
 
         if (value === null) {
-          return { ...s, columns: cols, items: [], itemsTotal: 0, selectedItem: null };
+          return { ...s, columns: cols, items: [], itemsTotal: 0, selectedItem: null, expandedSample: null, slices: [] };
         }
 
         const hasNext = colIndex + 1 < s.columns.length;
@@ -282,12 +326,12 @@ export function useBrowseData(
           queueMicrotask(() =>
             loadColumn(colIndex + 1, nextCol.field, buildFilters(nextCols, colIndex + 1)),
           );
-          return { ...s, columns: nextCols, items: [], itemsTotal: 0, selectedItem: null };
+          return { ...s, columns: nextCols, items: [], itemsTotal: 0, selectedItem: null, expandedSample: null, slices: [] };
         }
 
         // No next column — load leaf items.
         queueMicrotask(() => loadItems(buildFilters(cols, cols.length)));
-        return { ...s, columns: cols, selectedItem: null };
+        return { ...s, columns: cols, selectedItem: null, expandedSample: null, slices: [] };
       });
     },
     [loadColumn, loadItems],
@@ -300,7 +344,7 @@ export function useBrowseData(
 
   /** Show every sample with no column filters (useful for metadata-less data). */
   const showAll = useCallback(() => {
-    setState((s) => ({ ...s, columns: [], showingAll: true, selectedItem: null }));
+    setState((s) => ({ ...s, columns: [], showingAll: true, selectedItem: null, expandedSample: null, slices: [] }));
     void loadItems({});
   }, [loadItems]);
 
@@ -322,7 +366,7 @@ export function useBrowseData(
   // ------------------------------------------------------------------
   useEffect(() => {
     void loadFacets();
-    setState((s) => ({ ...s, columns: [], items: [], itemsTotal: 0, selectedItem: null, showingAll: false }));
+    setState((s) => ({ ...s, columns: [], items: [], itemsTotal: 0, selectedItem: null, showingAll: false, expandedSample: null, slices: [] }));
     const interval = setInterval(() => {
       void loadFacets({ silent: true });
     }, FACETS_POLL_INTERVAL_MS);
@@ -330,8 +374,8 @@ export function useBrowseData(
   }, [loadFacets, serverUri, technique, serverApiKey, containerPath]);
 
   const actions = useMemo(
-    () => ({ addColumn, removeColumn, changeColumnField, selectValue, selectItem, showAll, refresh, loadFacets }),
-    [addColumn, removeColumn, changeColumnField, selectValue, selectItem, showAll, refresh, loadFacets],
+    () => ({ addColumn, removeColumn, changeColumnField, selectValue, selectItem, expandSample, showAll, refresh, loadFacets }),
+    [addColumn, removeColumn, changeColumnField, selectValue, selectItem, expandSample, showAll, refresh, loadFacets],
   );
 
   return { state, actions };

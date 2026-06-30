@@ -88,6 +88,7 @@ async function collectFromDrop(dt: DataTransfer): Promise<{ files: File[]; folde
 export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: IngestDropzoneProps) {
   const [dragging, setDragging] = useState(false);
   const [containerPath, setContainerPath] = useState('browse/');
+  const [description, setDescription] = useState('');
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -158,6 +159,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
       try {
         const fd = new FormData();
         fd.append('container_path', target);
+        if (description.trim()) fd.append('description', description.trim());
         for (const f of supported) fd.append('files', f, f.name);
 
         const res = await fetch(
@@ -175,7 +177,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
         setUploading(false);
       }
     },
-    [containerPath, serverUri, poll],
+    [containerPath, description, serverUri, poll],
   );
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -296,6 +298,21 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
         <span className="block mt-1 text-[11px] text-sky-300/55">
           Destination path on the server (created if new). Auto-filled from the dropped
           file/folder — edit if you want.
+        </span>
+      </label>
+
+      <label className="block text-xs text-sky-300/80">
+        Description / keywords <span className="text-sky-300/40">(optional)</span>
+        <input
+          type="text"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          disabled={uploading}
+          placeholder="e.g. petiole tomography, batch 3"
+          className="mt-1 w-full border border-white/20 rounded-md px-2 py-1.5 text-sm bg-white/10 text-white focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-50"
+        />
+        <span className="block mt-1 text-[11px] text-sky-300/55">
+          Saved on every uploaded image as a searchable tag in Browse.
         </span>
       </label>
 

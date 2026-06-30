@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { File, PencilSimple, PencilLine } from '@phosphor-icons/react';
+import { File, PencilSimple, PencilLine, CaretRight, Stack } from '@phosphor-icons/react';
 import StarRating from './StarRating';
 import { useRatingStore, type StarRating as StarRatingValue } from '@/stores/ratingStore';
 import { useAnnotatedSourceKeys } from '@/hooks/useAnnotatedSourceKeys';
@@ -17,6 +17,8 @@ interface ItemsColumnProps {
   width: number;
   serverUri: string;
   annotationFilter: AnnotationFilter;
+  /** Path of the dataset currently drilled into (its slices listed), if any. */
+  expandedPath?: string | null;
 }
 
 /** Last column of the browser: leaf records matching the current filter chain. */
@@ -30,6 +32,7 @@ export default function ItemsColumn({
   width,
   serverUri,
   annotationFilter,
+  expandedPath,
 }: ItemsColumnProps) {
   const [minStars, setMinStars] = useState<0 | 1 | 2 | 3>(0);
   const ratings = useRatingStore((s) => s.ratings);
@@ -101,6 +104,7 @@ export default function ItemsColumn({
               key={item.path}
               item={item}
               isSelected={selectedItem?.path === item.path}
+              isExpanded={expandedPath === item.path}
               onSelect={() => onSelect(selectedItem?.path === item.path ? null : item)}
               onOpenInAnnotate={() => onOpenInAnnotate(item)}
               serverUri={serverUri}
@@ -114,6 +118,7 @@ export default function ItemsColumn({
 interface ItemRowProps {
   item: BrowseItem;
   isSelected: boolean;
+  isExpanded: boolean;
   onSelect: () => void;
   onOpenInAnnotate: () => void;
   serverUri: string;
@@ -130,16 +135,20 @@ function itemIsAnnotated(
   return flag === 'yes' || flag === true;
 }
 
-/** Single sample row: name, star rating, annotated badge, and an open-in-Annotate button. */
-function ItemRow({ item, isSelected, onSelect, onOpenInAnnotate, serverUri }: ItemRowProps) {
+/** Single sample row: name, star rating, annotated badge, and an open-in-Annotate button.
+ *  Multi-slice volumes show a slice-count badge + caret and drill into a Slices column. */
+function ItemRow({ item, isSelected, isExpanded, onSelect, onOpenInAnnotate, serverUri }: ItemRowProps) {
   const sourceKey = buildSourceKey('tiled', item.path, serverUri);
   const rating = useRatingStore((s) => s.ratings[sourceKey] ?? 0) as StarRatingValue;
   const setRating = useRatingStore((s) => s.setRating);
   const annotatedKeys = useAnnotatedSourceKeys();
 
   const isAnnotated = itemIsAnnotated(item, sourceKey, annotatedKeys);
+  const sliceCount = item.n_slices ?? 1;
+  const isVolume = sliceCount > 1;
 
-  const background = isSelected ? 'bg-blue-700' : 'bg-transparent hover:bg-slate-700';
+  const background = isSelected || isExpanded ? 'bg-blue-700' : 'bg-transparent hover:bg-slate-700';
+  const lit = isSelected || isExpanded;
 
   return (
     <div className={`flex items-center transition-colors border-b border-slate-800 ${background}`}>
@@ -151,9 +160,16 @@ function ItemRow({ item, isSelected, onSelect, onOpenInAnnotate, serverUri }: It
         onClick={onSelect}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } }}
         className="flex-1 flex flex-col px-2 py-1.5 text-left min-w-0 cursor-pointer"
+        title={isVolume ? `${sliceCount} slices — click to browse them` : undefined}
       >
-        <span className={`text-xs font-medium truncate ${isSelected ? 'text-white' : 'text-slate-200'}`}>
-          {item.sample}
+        <span className={`flex items-center gap-1 text-xs font-medium truncate ${lit ? 'text-white' : 'text-slate-200'}`}>
+          {isVolume && <Stack size={11} className="shrink-0 text-sky-400" />}
+          <span className="truncate">{item.sample}</span>
+          {isVolume && (
+            <span className={`ml-1 shrink-0 text-[9px] font-mono px-1 py-px rounded ${lit ? 'bg-blue-900 text-blue-100' : 'bg-slate-700 text-slate-400'}`}>
+              {sliceCount}
+            </span>
+          )}
         </span>
         <div className="flex items-center gap-1.5 mt-0.5">
           <StarRating
@@ -175,12 +191,18 @@ function ItemRow({ item, isSelected, onSelect, onOpenInAnnotate, serverUri }: It
           e.stopPropagation();
           onOpenInAnnotate();
         }}
-        title="Open in Annotate"
+        title={isVolume ? 'Open whole volume in Annotate (slice slider)' : 'Open in Annotate'}
         className="shrink-0 px-2 py-2 self-center rounded hover:bg-slate-600 transition-colors"
-        style={{ color: isSelected ? '#fff' : '#64748b' }}
+        style={{ color: lit ? '#fff' : '#64748b' }}
       >
         <PencilSimple size={13} />
       </button>
+      {isVolume && (
+        <CaretRight
+          size={13}
+          className={`shrink-0 mr-1 self-center transition-transform ${isExpanded ? 'rotate-90' : ''} ${lit ? 'text-white' : 'text-slate-500'}`}
+        />
+      )}
     </div>
   );
 }

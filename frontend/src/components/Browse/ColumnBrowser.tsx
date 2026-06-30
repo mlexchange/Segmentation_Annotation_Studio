@@ -3,6 +3,7 @@ import { ArrowsClockwise, PencilSimple, Plus, Stack } from '@phosphor-icons/reac
 import BrowseColumn from './BrowseColumn';
 import BrowseDetailPanel from './BrowseDetailPanel';
 import ItemsColumn from './ItemsColumn';
+import SlicesColumn from './SlicesColumn';
 import ResizeDivider from './ResizeDivider';
 import { useBrowseData, type BrowseItem } from './hooks/useBrowseData';
 import { useOpenInAnnotate } from '@/hooks/useOpenInAnnotate';
@@ -24,10 +25,6 @@ const DEFAULT_ITEMS_WIDTH = 260;
 const DEFAULT_DETAIL_WIDTH = 340;
 const MIN_DETAIL_WIDTH = 280;
 const MAX_DETAIL_WIDTH = 900;
-const INITIAL_COLUMN_COUNT = 4;
-
-/** Studio facets are useful as filters but should not fill the initial column set. */
-const STUDIO_FACETS = new Set(['Annotated', 'Annotated at', 'Shape count', 'Class count']);
 
 /** Pick a sensible default column width for a facet field based on its name/length. */
 function columnWidthForField(field: string): number {
@@ -76,6 +73,7 @@ export default function ColumnBrowser({
 
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [itemsColumnWidth, setItemsColumnWidth] = useState(DEFAULT_ITEMS_WIDTH);
+  const [sliceColumnWidth, setSliceColumnWidth] = useState(DEFAULT_ITEMS_WIDTH);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL_WIDTH);
   const [openStatus, setOpenStatus] = useState<string | null>(null);
 
@@ -114,17 +112,20 @@ export default function ColumnBrowser({
     prevColumnCount.current = state.columns.length;
   }, [state.columns.length]);
 
-  // First-load: populate with the first few discovered facets.
+  // First-load: show every sample immediately (low-friction default) so data
+  // already in Tiled appears without the user having to add filter columns.
+  // Reset when the server/container changes (which resets the browse state).
   const initialised = useRef(false);
   useEffect(() => {
-    if (initialised.current || state.facets.length === 0) return;
+    initialised.current = false;
+  }, [serverUri, containerPath]);
+
+  useEffect(() => {
+    if (initialised.current || state.connectionStatus !== 'connected') return;
     initialised.current = true;
     skipNextAutoScroll.current = true;
-    const preferred = state.facets.filter((f) => !STUDIO_FACETS.has(f));
-    const pool = preferred.length >= INITIAL_COLUMN_COUNT ? preferred : state.facets;
-    const n = Math.min(INITIAL_COLUMN_COUNT, pool.length);
-    pool.slice(0, n).forEach((f) => actions.addColumn(f));
-  }, [state.facets, actions]);
+    actions.showAll();
+  }, [state.connectionStatus, actions]);
 
   /** Update the stored width for the facet column at the given index. */
   const handleResizeColumn = useCallback((index: number, newWidth: number) => {
@@ -154,6 +155,20 @@ export default function ColumnBrowser({
       }
     },
     [openTiledArray, serverUri],
+  );
+
+  /** Sample-row click: drill multi-slice volumes into a Slices column; select
+   *  single images into the detail panel (collapsing any open drill-in). */
+  const handleSelectItem = useCallback(
+    (item: BrowseItem | null) => {
+      if (item && (item.n_slices ?? 1) > 1) {
+        actions.expandSample(state.expandedSample?.path === item.path ? null : item);
+        return;
+      }
+      if (state.expandedSample) actions.expandSample(null);
+      actions.selectItem(item);
+    },
+    [actions, state.expandedSample],
   );
 
   const activeFilters = useMemo(() => {
@@ -249,11 +264,34 @@ export default function ColumnBrowser({
                 total={state.itemsTotal}
                 loading={state.itemsLoading}
                 selectedItem={state.selectedItem}
-                onSelect={actions.selectItem}
+                onSelect={handleSelectItem}
                 onOpenInAnnotate={handleOpenInAnnotate}
                 width={itemsColumnWidth}
                 serverUri={serverUri}
                 annotationFilter={annotationFilter}
+                expandedPath={state.expandedSample?.path ?? null}
+              />
+            </>
+          )}
+
+          {state.expandedSample && (
+            <>
+              <ResizeDivider
+                key="resize-slices"
+                currentWidth={sliceColumnWidth}
+                onResize={setSliceColumnWidth}
+                resizeRight
+              />
+              <SlicesColumn
+                dataset={state.expandedSample}
+                slices={state.slices}
+                loading={state.slicesLoading}
+                selectedItem={state.selectedItem}
+                onSelect={actions.selectItem}
+                onOpenInAnnotate={handleOpenInAnnotate}
+                onClose={() => actions.expandSample(null)}
+                width={sliceColumnWidth}
+                serverUri={serverUri}
               />
             </>
           )}
