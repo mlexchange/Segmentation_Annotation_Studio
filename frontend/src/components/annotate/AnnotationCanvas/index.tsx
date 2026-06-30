@@ -219,7 +219,7 @@ export default function AnnotationCanvas({
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
-  const { byImage, addShape, addShapes, appendBrushStroke, appendEraseStroke, updateShape, removeShapes } = useAnnotationStore();
+  const { byImage, addShape, addShapes, appendBrushStroke, appendEraseStroke, updateShape, removeShapes, setClassForShapes } = useAnnotationStore();
   const { tool, brushSize, fillOpacity, selectedShapeIds, setSelectedShapeId, setSelectedShapeIds } = useToolStore();
   // Single-selection id — drives move/resize/vertex editing (those need exactly one).
   const selectedId = selectedShapeIds.length === 1 ? selectedShapeIds[0] : null;
@@ -249,6 +249,9 @@ export default function AnnotationCanvas({
   // Marquee rubber-band (select tool): drag a box to select multiple shapes.
   const [marqueeStart, setMarqueeStart] = useState<{ x: number; y: number } | null>(null);
   const [marqueeRect, setMarqueeRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  // True when the marquee drag began with Shift held — its result is added to
+  // (unioned with) the existing selection instead of replacing it.
+  const marqueeShiftRef = useRef(false);
 
   // Magic seeds: each click is a prompt point. label 1 = positive (grow the
   // object / region), 0 = negative (carve back out — SAM only). The classic
@@ -592,7 +595,12 @@ export default function AnnotationCanvas({
     if (tool === 'select') {
       if (e.target === e.target.getStage()) {
         const p = getPointerImagePos();
-        if (p) { setMarqueeStart(p); setMarqueeRect(null); }
+        if (p) {
+          setMarqueeStart(p);
+          setMarqueeRect(null);
+          // Shift-drag accumulates onto the existing selection (decided on mouse-up).
+          marqueeShiftRef.current = e.evt.shiftKey;
+        }
       }
       return;
     }
@@ -784,21 +792,24 @@ export default function AnnotationCanvas({
   const handleStageMouseUp = () => {
     if (isPreviewing) return;
 
-    // Finish a marquee: a real drag box-selects intersecting shapes; a bare
-    // click (no box) clears the selection.
+    // Finish a marquee. A real drag box-selects intersecting shapes; with Shift
+    // those are added to the current selection (drag several boxes to build it
+    // up). A bare non-Shift click clears; a bare Shift-click keeps the selection.
     if (tool === 'select' && marqueeStart) {
       const rect = marqueeRect;
+      const additive = marqueeShiftRef.current;
       if (rect && rect.w > 3 && rect.h > 3 && sourceKey) {
         const ids = storeShapes
           .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
           .filter((s) => shapeIntersectsRect(s, rect))
           .map((s) => s.id);
-        setSelectedShapeIds(ids);
-      } else {
+        setSelectedShapeIds(additive ? Array.from(new Set([...selectedShapeIds, ...ids])) : ids);
+      } else if (!additive) {
         setSelectedShapeIds([]);
       }
       setMarqueeStart(null);
       setMarqueeRect(null);
+      marqueeShiftRef.current = false;
       return;
     }
 
@@ -1290,6 +1301,18 @@ export default function AnnotationCanvas({
     setEditPoly(null);
   };
 
+  /** Reassign every selected shape to *classId* (one undo step). */
+  const handleReassignClass = (classId: number) => {
+    if (!sourceKey || selectedShapeIds.length === 0) return;
+    setClassForShapes(sourceKey, currentSlice, selectedShapeIds, classId);
+  };
+
+  // The class shared by all selected shapes, or null if they differ ("mixed").
+  const selectedClassIds = new Set(
+    storeShapes.filter((s) => selectedShapeIds.includes(s.id)).map((s) => s.classId),
+  );
+  const commonClassId = selectedClassIds.size === 1 ? [...selectedClassIds][0] : null;
+
   return (
     <div
       ref={containerRef}
@@ -1524,6 +1547,21 @@ export default function AnnotationCanvas({
                 ? 'Drag a vertex to edit, or drag the shape to move'
                 : 'Drag to move or resize'}
           </span>
+          {/* Reassign the selected shape(s) to a different class. */}
+          <label className="flex items-center gap-1 text-slate-300">
+            Class:
+            <select
+              value={commonClassId ?? ''}
+              onChange={(e) => handleReassignClass(Number(e.target.value))}
+              className="bg-slate-700 text-slate-100 text-xs rounded px-1 py-0.5 border border-slate-600 focus:outline-none focus:border-sky-400"
+              title="Change class of the selection"
+            >
+              {commonClassId === null && <option value="" disabled>(mixed)</option>}
+              {classes.map((c) => (
+                <option key={c.classId} value={c.classId}>{c.label}</option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             onClick={handleDeleteSelected}
@@ -1538,7 +1576,7 @@ export default function AnnotationCanvas({
 
       {showInteractive && selectedShapeIds.length === 0 && (
         <div className="absolute top-2 left-2 bg-slate-800/80 text-slate-300 text-xs px-3 py-1.5 rounded-md pointer-events-none">
-          Click a shape to select · drag a box to select many · shift-click to add
+          Click a shape · drag a box to select many · Shift-drag to add more · Shift-click to toggle
         </div>
       )}
 

@@ -69,6 +69,8 @@ export interface AnnotationState {
   removeShapes: (sourceKey: string, sliceIdx: number, shapeIds: string[]) => void;
   /** Replace a single shape via an updater (used for move / vertex editing). */
   updateShape: (sourceKey: string, sliceIdx: number, shapeId: string, updater: (shape: Shape) => Shape) => void;
+  /** Reassign several shapes to a class in one update (one undo step). */
+  setClassForShapes: (sourceKey: string, sliceIdx: number, shapeIds: string[], classId: number) => void;
   /** Remove every shape with *classId* across all loaded samples (all slices). */
   removeShapesByClassId: (classId: number) => void;
   appendBrushStroke: (sourceKey: string, sliceIdx: number, shapeId: string, stroke: BrushStroke) => void;
@@ -167,6 +169,23 @@ export const useAnnotationStore = create<AnnotationState>()(
               [sourceKey]: {
                 ...(s.byImage[sourceKey] ?? {}),
                 [sliceKey]: prev.map((sh) => (sh.id === shapeId ? updater(sh) : sh)),
+              },
+            },
+          };
+        }),
+
+      /** Reassigns every shape in *shapeIds* to *classId* (one undo step). */
+      setClassForShapes: (sourceKey, sliceIdx, shapeIds, classId) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          const ids = new Set(shapeIds);
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: prev.map((sh) => (ids.has(sh.id) ? { ...sh, classId } : sh)),
               },
             },
           };
