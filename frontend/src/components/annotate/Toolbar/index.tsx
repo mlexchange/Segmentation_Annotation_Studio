@@ -74,6 +74,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     magicTolerance, setMagicTolerance, magicMode, setMagicMode, magicSigma, setMagicSigma,
     magicEdgeStop, setMagicEdgeStop, magicEngine, setMagicEngine,
     samDetail, setSamDetail, samThreshold, setSamThreshold,
+    samAvoidLabeled, setSamAvoidLabeled,
   } = useToolStore();
   const sam = useSam(tool === 'magic' && magicEngine === 'sam');
   const { undo, redo } = useStore(useAnnotationStore.temporal);
@@ -249,6 +250,21 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
                 value={magicSigma}
                 onChange={setMagicSigma}
               />
+              <label className="flex items-start gap-2 text-[11px] text-gray-600 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={samAvoidLabeled}
+                  onChange={(e) => setSamAvoidLabeled(e.target.checked)}
+                  className="mt-0.5 accent-sky-600"
+                />
+                <span>
+                  Avoid other-class regions
+                  <span className="block text-[10px] text-gray-400 leading-snug">
+                    Uses nearby regions of other classes as "not" hints (faint red rings) so a new
+                    selection won't bleed into them.
+                  </span>
+                </span>
+              </label>
               <p className="text-[10px] text-gray-400 leading-snug">
                 Drag a box around the object (most reliable), or click it. Shift-click adds to the
                 object; <b>{REMOVE_KEY_LABEL}-click drops a "not" point (red)</b> to remove an area

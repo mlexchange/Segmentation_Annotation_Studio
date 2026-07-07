@@ -11,7 +11,7 @@
  * committed to the Zustand store ONCE on mouseup, eliminating the per-frame
  * store updates + zundo history snapshots that caused cursor lag.
  */
-import { useRef, useState, useEffect, useCallback } from 'react';
+import { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Group, Circle, Transformer,
 } from 'react-konva';
@@ -95,6 +95,50 @@ function shapeContainsPoint(shape: Shape, x: number, y: number): boolean {
     }
   }
   return false;
+}
+
+/** A representative point that lies inside *shape* (best-effort), in image
+ *  coords — used to seed SAM with negative ("not") prompts for other-class
+ *  regions. Returns null when no interior point can be derived. */
+function interiorPoint(shape: Shape): { x: number; y: number } | null {
+  if (shape.kind === 'rectangle') return { x: shape.x + shape.w / 2, y: shape.y + shape.h / 2 };
+  if (shape.kind === 'ellipse') return { x: shape.cx, y: shape.cy };
+  if (shape.kind === 'polygon') {
+    const p = shape.points;
+    if (p.length < 6) return null;
+    let cx = 0, cy = 0;
+    const n = p.length / 2;
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    for (let i = 0; i < p.length; i += 2) {
+      cx += p[i]; cy += p[i + 1];
+      minx = Math.min(minx, p[i]); maxx = Math.max(maxx, p[i]);
+      miny = Math.min(miny, p[i + 1]); maxy = Math.max(maxy, p[i + 1]);
+    }
+    cx /= n; cy /= n;
+    if (pointInPolygon(cx, cy, p)) return { x: cx, y: cy };
+    // Concave polygon: centroid may fall outside — scan a grid for an inside point.
+    const steps = 8;
+    for (let gy = 1; gy < steps; gy++) {
+      for (let gx = 1; gx < steps; gx++) {
+        const x = minx + ((maxx - minx) * gx) / steps;
+        const y = miny + ((maxy - miny) * gy) / steps;
+        if (pointInPolygon(x, y, p)) return { x, y };
+      }
+    }
+    return { x: cx, y: cy };
+  }
+  if (shape.kind === 'brush') {
+    for (const st of shape.strokes) {
+      if (st.mode === 'erase') continue;
+      const pp = st.points;
+      if (pp.length >= 2) {
+        const mid = Math.min(pp.length - 2, Math.floor(pp.length / 4) * 2);
+        return { x: pp[mid], y: pp[mid + 1] };
+      }
+    }
+    return null;
+  }
+  return null;
 }
 
 interface BBox { x: number; y: number; w: number; h: number; }
@@ -231,6 +275,7 @@ export default function AnnotationCanvas({
   const setMagicEngine = useToolStore((s) => s.setMagicEngine);
   const samDetail = useToolStore((s) => s.samDetail);
   const samThreshold = useToolStore((s) => s.samThreshold);
+  const samAvoidLabeled = useToolStore((s) => s.samAvoidLabeled);
   const fitRequestId = useToolStore((s) => s.fitRequestId);
   const { classes } = useClassStore();
 
@@ -450,6 +495,39 @@ export default function AnnotationCanvas({
     return f;
   }, [imageEl, meta]);
 
+  // Auto negative ("not") prompts for SAM: interior points of nearby other-class
+  // regions, so a new selection won't bleed into already-labeled areas. Anchored
+  // to the current click (last positive seed, else the box center), capped to the
+  // 12 nearest, and skipping any region a positive click sits inside.
+  const autoNegPoints = useMemo<Array<{ x: number; y: number }>>(() => {
+    if (magicEngine !== 'sam' || !samAvoidLabeled || activeClassId === null) return [];
+    const positives = magicSeeds.filter((s) => s.label === 1);
+    const ref =
+      positives.length > 0
+        ? positives[positives.length - 1]
+        : magicBox
+          ? { x: magicBox.x + magicBox.w / 2, y: magicBox.y + magicBox.h / 2 }
+          : null;
+    if (!ref) return [];
+
+    const isClassVisible = (s: Shape) =>
+      classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+
+    const cands: Array<{ x: number; y: number }> = [];
+    for (const shape of storeShapes) {
+      if (shape.classId === activeClassId || !isClassVisible(shape)) continue;
+      // Don't fight the user's own target: skip a region a positive click is in.
+      if (positives.some((p) => shapeContainsPoint(shape, p.x, p.y))) continue;
+      const ip = interiorPoint(shape);
+      if (ip) cands.push(ip);
+    }
+    cands.sort(
+      (a, b) =>
+        (a.x - ref.x) ** 2 + (a.y - ref.y) ** 2 - ((b.x - ref.x) ** 2 + (b.y - ref.y) ** 2),
+    );
+    return cands.slice(0, 12);
+  }, [magicEngine, samAvoidLabeled, activeClassId, magicSeeds, magicBox, storeShapes, classes]);
+
   // (Re)compute the preview whenever the seeds or params change.
   // SAM engine: encode the slice (cached) then decode the point prompts into a
   // mask → polygons. Classic engine: client-side flood/threshold via magicSelect.
@@ -463,9 +541,15 @@ export default function AnnotationCanvas({
         const ready = samEncodeKey ? await sam.ensureEncoded(samEncodeKey, makeSamSource) : false;
         if (cancelled) return;
         if (!ready) { setMagicLoading(false); return; } // status flips → classic
-        const points = magicSeeds.map((s) => ({
-          x: s.x / meta.width, y: s.y / meta.height, label: s.label,
-        }));
+        const points = [
+          ...magicSeeds.map((s) => ({
+            x: s.x / meta.width, y: s.y / meta.height, label: s.label,
+          })),
+          // Auto "not" prompts from nearby other-class regions (label 0).
+          ...autoNegPoints.map((p) => ({
+            x: p.x / meta.width, y: p.y / meta.height, label: 0 as const,
+          })),
+        ];
         const box = magicBox
           ? {
               x0: magicBox.x / meta.width, y0: magicBox.y / meta.height,
@@ -510,7 +594,7 @@ export default function AnnotationCanvas({
       setMagicLoading(false);
     });
     return () => cancelAnimationFrame(id);
-  }, [magicSeeds, magicBox, samDetail, samThreshold, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [magicSeeds, magicBox, autoNegPoints, samDetail, samThreshold, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Commit the magic preview polygons as new shapes (one batched undo step). */
   const commitMagic = useCallback(() => {
@@ -1500,6 +1584,23 @@ export default function AnnotationCanvas({
                 stroke={s.label === 0 ? '#ffffff' : activeColor}
                 strokeWidth={1.5 / transform.scaleX}
                 listening={false}
+              />
+            ))}
+          {/* Auto "not" anchors from other-class regions: faint hollow red rings,
+              distinct from the user's solid-red manual negatives. */}
+          {(tool === 'magic' || tool === 'pan') && magicEngine === 'sam' && samAvoidLabeled &&
+            autoNegPoints.map((p, i) => (
+              <Circle
+                key={`auto-neg-${i}`}
+                x={p.x}
+                y={p.y}
+                radius={4 / transform.scaleX}
+                stroke="#ef4444"
+                strokeWidth={1.25 / transform.scaleX}
+                fillEnabled={false}
+                opacity={0.65}
+                listening={false}
+                perfectDrawEnabled={false}
               />
             ))}
         </Layer>

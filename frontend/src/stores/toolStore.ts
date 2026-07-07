@@ -29,6 +29,9 @@ export interface ToolState {
   samDetail: SamDetail;
   /** SAM mask-logit threshold: >0 tightens the selection, <0 grows it. */
   samThreshold: number;
+  /** When true, feed interior points of other-class regions to SAM as negative
+   *  ("not") prompts so a new selection won't bleed into already-labeled areas. */
+  samAvoidLabeled: boolean;
   /** Bumped to request the canvas re-fit the image to the viewport (F shortcut). */
   fitRequestId: number;
   setTool: (tool: Tool) => void;
@@ -44,6 +47,7 @@ export interface ToolState {
   setMagicEngine: (e: MagicEngine) => void;
   setSamDetail: (d: SamDetail) => void;
   setSamThreshold: (t: number) => void;
+  setSamAvoidLabeled: (v: boolean) => void;
   requestFit: () => void;
 }
 
@@ -59,6 +63,7 @@ export const useToolStore = create<ToolState>((set) => ({
   magicEngine: 'sam',
   samDetail: 'auto',
   samThreshold: 0,
+  samAvoidLabeled: true,
   fitRequestId: 0,
   /** Switches the active tool and clears the current shape selection. */
   setTool: (tool) => set({ tool, selectedShapeIds: [] }),
@@ -84,6 +89,8 @@ export const useToolStore = create<ToolState>((set) => ({
   setSamDetail: (samDetail) => set({ samDetail }),
   /** Sets the SAM mask-logit threshold (>0 tightens, <0 grows). */
   setSamThreshold: (samThreshold) => set({ samThreshold }),
+  /** Toggles using other-class regions as SAM negative ("not") prompts. */
+  setSamAvoidLabeled: (samAvoidLabeled) => set({ samAvoidLabeled }),
   /** Bumps fitRequestId to signal the canvas to re-fit the image to the viewport. */
   requestFit: () => set((s) => ({ fitRequestId: s.fitRequestId + 1 })),
 }));
