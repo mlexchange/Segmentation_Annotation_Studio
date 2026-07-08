@@ -39,6 +39,21 @@ describe('rasterizeShapes', () => {
     expect(mask[2 * 40 + 2]).toBe(1); // corner still set
   });
 
+  it('leaves a polygon hole empty (invert-shape complement)', () => {
+    // Outer = full 40x40 frame; hole = centered 20x20 square.
+    const inverted: Shape = {
+      id: 'inv', classId: 0, kind: 'polygon',
+      points: [0, 0, 40, 0, 40, 40, 0, 40],
+      holes: [[10, 10, 30, 10, 30, 30, 10, 30]],
+    };
+    const mask = rasterizeShapes([inverted], 40, 40, 1);
+    expect(mask[20 * 40 + 20]).toBe(0); // inside the hole → empty
+    expect(mask[2 * 40 + 2]).toBe(1);   // frame corner → filled
+    // Area ≈ 40² − 20² = 1200, allow boundary slack.
+    expect(area(mask)).toBeGreaterThan(1050);
+    expect(area(mask)).toBeLessThan(1350);
+  });
+
   it('round-trips shape → mask → polygons preserving rough area', () => {
     const rect: Shape = { id: 'r', classId: 0, kind: 'rectangle', x: 20, y: 20, w: 60, h: 60 };
     const { gw, gh, scale } = gridFor(200, 200);

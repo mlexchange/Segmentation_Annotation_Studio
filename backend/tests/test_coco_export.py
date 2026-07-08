@@ -212,3 +212,20 @@ def test_zero_area_polygon_skipped() -> None:
     rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
     area = float(mask_utils.area(rle))
     assert area < 2, "Degenerate polygon should produce near-zero area"
+
+
+def test_polygon_hole_carved_out() -> None:
+    """A polygon with an inner ring (invert-shape) leaves the hole empty."""
+    from coco_export import shape_to_mask
+
+    h, w = 40, 40
+    shape = {
+        "id": "inv", "classId": 1, "kind": "polygon",
+        "points": [0, 0, 40, 0, 40, 40, 0, 40],
+        "holes": [[10, 10, 30, 10, 30, 30, 10, 30]],
+    }
+    mask = shape_to_mask(shape, h, w)
+    assert not mask[20, 20], "hole interior must be empty"
+    assert mask[2, 2], "frame corner must be filled"
+    # Area ~= 40*40 - 20*20 = 1200, allow boundary slack.
+    assert 1050 < int(mask.sum()) < 1350

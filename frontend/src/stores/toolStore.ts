@@ -32,6 +32,9 @@ export interface ToolState {
   /** When true, feed interior points of other-class regions to SAM as negative
    *  ("not") prompts so a new selection won't bleed into already-labeled areas. */
   samAvoidLabeled: boolean;
+  /** When true, new annotations are clipped so they can't overlap other classes'
+   *  regions on the current slice (neighbor classes act as a hard boundary). */
+  clipToOtherClasses: boolean;
   /** Bumped to request the canvas re-fit the image to the viewport (F shortcut). */
   fitRequestId: number;
   setTool: (tool: Tool) => void;
@@ -48,6 +51,7 @@ export interface ToolState {
   setSamDetail: (d: SamDetail) => void;
   setSamThreshold: (t: number) => void;
   setSamAvoidLabeled: (v: boolean) => void;
+  setClipToOtherClasses: (v: boolean) => void;
   requestFit: () => void;
 }
 
@@ -64,6 +68,7 @@ export const useToolStore = create<ToolState>((set) => ({
   samDetail: 'auto',
   samThreshold: 0,
   samAvoidLabeled: true,
+  clipToOtherClasses: false,
   fitRequestId: 0,
   /** Switches the active tool and clears the current shape selection. */
   setTool: (tool) => set({ tool, selectedShapeIds: [] }),
@@ -91,6 +96,8 @@ export const useToolStore = create<ToolState>((set) => ({
   setSamThreshold: (samThreshold) => set({ samThreshold }),
   /** Toggles using other-class regions as SAM negative ("not") prompts. */
   setSamAvoidLabeled: (samAvoidLabeled) => set({ samAvoidLabeled }),
+  /** Toggles clipping new annotations against other classes' regions. */
+  setClipToOtherClasses: (clipToOtherClasses) => set({ clipToOtherClasses }),
   /** Bumps fitRequestId to signal the canvas to re-fit the image to the viewport. */
   requestFit: () => set((s) => ({ fitRequestId: s.fitRequestId + 1 })),
 }));

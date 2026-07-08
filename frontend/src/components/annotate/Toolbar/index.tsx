@@ -75,6 +75,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     magicEdgeStop, setMagicEdgeStop, magicEngine, setMagicEngine,
     samDetail, setSamDetail, samThreshold, setSamThreshold,
     samAvoidLabeled, setSamAvoidLabeled,
+    clipToOtherClasses, setClipToOtherClasses,
   } = useToolStore();
   const sam = useSam(tool === 'magic' && magicEngine === 'sam');
   const { undo, redo } = useStore(useAnnotationStore.temporal);
@@ -338,6 +339,19 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
           onChange={(v) => setFillOpacity(v / 100)}
         />
       </div>
+
+      <label
+        className="flex items-center gap-2 text-[11px] text-gray-600 cursor-pointer mt-1"
+        title="New annotations won't overlap regions already labeled with a different class on this slice"
+      >
+        <input
+          type="checkbox"
+          checked={clipToOtherClasses}
+          onChange={(e) => setClipToOtherClasses(e.target.checked)}
+          className="accent-sky-600"
+        />
+        Clip to other classes
+      </label>
     </div>
   );
 }

@@ -1,9 +1,11 @@
 /**
- * DisplayControls — brightness/contrast sliders (display-only via Konva filters).
- * Does NOT affect exported pixel values — that is governed by RenderOpts.
+ * DisplayControls — brightness/contrast sliders + a min/max levels histogram, all
+ * display-only via Konva filters. Does NOT affect exported pixel values — that is
+ * governed by RenderOpts.
  */
 import { ArrowCounterClockwise } from '@phosphor-icons/react';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
+import HistogramControl from '@/components/annotate/HistogramControl';
 
 export interface DisplayControlsProps {
   brightness: number;
@@ -11,15 +13,26 @@ export interface DisplayControlsProps {
   onBrightnessChange: (v: number) => void;
   onContrastChange: (v: number) => void;
   onReset: () => void;
+  /** Levels histogram + window (0–255). */
+  histogramBins: number[] | null;
+  levelsLo: number;
+  levelsHi: number;
+  onLevelsChange: (lo: number, hi: number) => void;
+  onLevelsReset: () => void;
 }
 
-/** Renders the brightness/contrast sliders with a reset button. */
+/** Renders the brightness/contrast sliders + levels histogram with reset buttons. */
 export default function DisplayControls({
   brightness,
   contrast,
   onBrightnessChange,
   onContrastChange,
   onReset,
+  histogramBins,
+  levelsLo,
+  levelsHi,
+  onLevelsChange,
+  onLevelsReset,
 }: DisplayControlsProps) {
   return (
     <div className="flex flex-col gap-2">
@@ -58,6 +71,14 @@ export default function DisplayControls({
           onChange={onContrastChange}
         />
       </div>
+
+      <HistogramControl
+        bins={histogramBins}
+        lo={levelsLo}
+        hi={levelsHi}
+        onChange={onLevelsChange}
+        onReset={onLevelsReset}
+      />
     </div>
   );
 }

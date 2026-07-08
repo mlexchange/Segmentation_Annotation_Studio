@@ -53,6 +53,10 @@ export default function AnnotatePage() {
 
   const [brightness, setBrightness] = useState(0);
   const [contrast, setContrast] = useState(0);
+  // Min/max levels window (0–255) + histogram of the current slice (client-side).
+  const [levelsLo, setLevelsLo] = useState(0);
+  const [levelsHi, setLevelsHi] = useState(255);
+  const [histogramBins, setHistogramBins] = useState<number[] | null>(null);
   const [showDownload, setShowDownload] = useState(false);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
@@ -183,7 +187,12 @@ export default function AnnotatePage() {
             contrast={contrast}
             onBrightnessChange={setBrightness}
             onContrastChange={setContrast}
-            onReset={() => { setBrightness(0); setContrast(0); }}
+            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); }}
+            histogramBins={histogramBins}
+            levelsLo={levelsLo}
+            levelsHi={levelsHi}
+            onLevelsChange={(lo, hi) => { setLevelsLo(lo); setLevelsHi(hi); }}
+            onLevelsReset={() => { setLevelsLo(0); setLevelsHi(255); }}
           />
           <hr />
           <SliceNavigator />
@@ -246,6 +255,9 @@ export default function AnnotatePage() {
           <AnnotationCanvas
             brightness={brightness}
             contrast={contrast}
+            levelsLo={levelsLo}
+            levelsHi={levelsHi}
+            onHistogram={setHistogramBins}
             activeClassId={activeClassId}
             activeBrushShapeId={activeBrushShapeId}
             onNewBrushInstance={setActiveBrushShapeId}

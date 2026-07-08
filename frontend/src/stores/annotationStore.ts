@@ -31,6 +31,9 @@ export interface BaseShape {
 export interface PolygonShape extends BaseShape {
   kind: 'polygon';
   points: number[];
+  /** Optional inner rings (flat [x,y,…] image coords) carved out of the outer
+   *  polygon — e.g. produced by "invert shape". Rendered/rasterized even-odd. */
+  holes?: number[][];
 }
 
 export interface RectShape extends BaseShape {

@@ -114,6 +114,9 @@ def shape_to_mask(shape: dict[str, Any], h: int, w: int) -> np.ndarray:
     kind = shape["kind"]
     if kind == "polygon":
         mask = _polygon_mask(shape["points"], h, w)
+        # Carve inner rings (holes), e.g. from "invert shape", so exports match.
+        for hole in shape.get("holes") or []:
+            mask &= ~_polygon_mask(hole, h, w)
     elif kind == "rectangle":
         mask = _rect_mask(shape["x"], shape["y"], shape["w"], shape["h"], h, w)
     elif kind == "ellipse":

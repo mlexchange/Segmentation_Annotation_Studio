@@ -33,6 +33,8 @@ export function rasterizeShapes(shapes: Shape[], gw: number, gh: number, scale =
   for (const shape of shapes) {
     if (shape.kind === 'polygon') {
       fillPolygon(mask, gw, gh, shape.points, s, 1);
+      // Carve inner rings (holes) back out — e.g. from "invert shape".
+      for (const hole of shape.holes ?? []) fillPolygon(mask, gw, gh, hole, s, 0);
     } else if (shape.kind === 'rectangle') {
       fillRect(mask, gw, gh, shape.x / s, shape.y / s, shape.w / s, shape.h / s, 1);
     } else if (shape.kind === 'ellipse') {

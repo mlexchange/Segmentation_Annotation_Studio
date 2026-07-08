@@ -29,6 +29,11 @@ import { buildSourceKey } from '@/lib/sourceKey';
 import { buildField, magicSelect, maskToPolygons, type GrayField } from '@/lib/magicwand';
 import { useSam } from '@/hooks/useSam';
 import { renderAdjusted } from '@/lib/sam/adjust';
+import { LevelsFilter } from '@/lib/levelsFilter';
+import { gridFor, rasterizeShapes } from '@/lib/rasterize';
+import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
+import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
+import { useClipboardStore } from '@/stores/clipboardStore';
 
 // macOS labels the Alt key "Option" (⌥). e.altKey is true for it either way,
 // so only the on-screen label needs to differ.
@@ -41,6 +46,11 @@ const EMPTY_SHAPES: Shape[] = [];
 interface AnnotationCanvasProps {
   brightness: number;
   contrast: number;
+  /** Client-side levels window (0–255) applied to the displayed image. */
+  levelsLo: number;
+  levelsHi: number;
+  /** Emits the current slice's 256-bin luminance histogram when it loads. */
+  onHistogram?: (bins: number[]) => void;
   activeClassId: number | null;
   activeBrushShapeId: string | null;
   onNewBrushInstance: (id: string) => void;
@@ -51,6 +61,18 @@ interface AnnotationCanvasProps {
 }
 
 // ---- Point-in-shape hit testing (used by the eraser to pick a target) ----
+
+/** Translate a shape by (dx,dy) in image coords (used for paste offset). */
+function offsetShape(shape: Shape, dx: number, dy: number): Shape {
+  const shiftFlat = (pts: number[]) => pts.map((v, i) => (i % 2 === 0 ? v + dx : v + dy));
+  if (shape.kind === 'polygon') {
+    return { ...shape, points: shiftFlat(shape.points), holes: shape.holes?.map(shiftFlat) };
+  }
+  if (shape.kind === 'rectangle') return { ...shape, x: shape.x + dx, y: shape.y + dy };
+  if (shape.kind === 'ellipse') return { ...shape, cx: shape.cx + dx, cy: shape.cy + dy };
+  // brush
+  return { ...shape, strokes: shape.strokes.map((st) => ({ ...st, points: shiftFlat(st.points) })) };
+}
 
 /** Even-odd ray cast: true if point (px,py) is inside the flat [x,y,…] polygon. */
 function pointInPolygon(px: number, py: number, pts: number[]): boolean {
@@ -232,6 +254,9 @@ function shapeIntersectsRect(shape: Shape, r: BBox): boolean {
 export default function AnnotationCanvas({
   brightness,
   contrast,
+  levelsLo,
+  levelsHi,
+  onHistogram,
   activeClassId,
   activeBrushShapeId,
   onNewBrushInstance,
@@ -266,7 +291,8 @@ export default function AnnotationCanvas({
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
-  const { byImage, addShape, addShapes, appendBrushStroke, appendEraseStroke, updateShape, removeShapes, setClassForShapes } = useAnnotationStore();
+  const { byImage, addShape, addShapes, appendBrushStroke, appendEraseStroke, updateShape, removeShapes, setShapes, setClassForShapes } = useAnnotationStore();
+  const clipboard = useClipboardStore();
   const { tool, brushSize, fillOpacity, selectedShapeIds, setSelectedShapeId, setSelectedShapeIds } = useToolStore();
   // Single-selection id — drives move/resize/vertex editing (those need exactly one).
   const selectedId = selectedShapeIds.length === 1 ? selectedShapeIds[0] : null;
@@ -280,6 +306,7 @@ export default function AnnotationCanvas({
   const samThreshold = useToolStore((s) => s.samThreshold);
   const samAvoidLabeled = useToolStore((s) => s.samAvoidLabeled);
   const fitRequestId = useToolStore((s) => s.fitRequestId);
+  const clipToOtherClasses = useToolStore((s) => s.clipToOtherClasses);
   const { classes } = useClassStore();
 
   const [stageSize, setStageSize] = useState({ width: 800, height: 600 });
@@ -374,11 +401,37 @@ export default function AnnotationCanvas({
     imageRef.current.filters([
       (window as any).Konva?.Filters?.Brighten ?? (() => {}),
       (window as any).Konva?.Filters?.Contrast ?? (() => {}),
+      LevelsFilter,
     ]);
     imageRef.current.brightness(brightness);
     imageRef.current.contrast(contrast);
+    imageRef.current.setAttr('levelsLo', levelsLo);
+    imageRef.current.setAttr('levelsHi', levelsHi);
     imageRef.current.getLayer()?.batchDraw();
-  }, [brightness, contrast, imageEl]);
+  }, [brightness, contrast, levelsLo, levelsHi, imageEl]);
+
+  // Compute a 256-bin luminance histogram of the current slice (downsampled) for
+  // the levels control. Runs once per loaded image.
+  useEffect(() => {
+    if (!imageEl || !onHistogram) return;
+    const maxDim = 512;
+    const scale = Math.max(1, Math.ceil(Math.max(imageEl.width, imageEl.height) / maxDim));
+    const w = Math.max(1, Math.floor(imageEl.width / scale));
+    const h = Math.max(1, Math.floor(imageEl.height / scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.drawImage(imageEl, 0, 0, w, h);
+    let data: Uint8ClampedArray;
+    try { data = ctx.getImageData(0, 0, w, h).data; } catch { return; }
+    const bins = new Array(256).fill(0);
+    for (let i = 0; i < data.length; i += 4) {
+      const lum = (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]) | 0;
+      bins[lum < 0 ? 0 : lum > 255 ? 255 : lum]++;
+    }
+    onHistogram(bins);
+  }, [imageEl, onHistogram]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -451,6 +504,19 @@ export default function AnnotationCanvas({
 
   const colorForClass = (classId: number) =>
     renderClasses.find((c) => c.classId === classId)?.color ?? '#ff0000';
+
+  /** Commit new shapes, clipping them against other classes when the toggle is on
+   *  (neighbor classes act as a hard boundary). One undo step. */
+  const commitShapes = useCallback((newShapes: Shape[]) => {
+    if (!sourceKey || newShapes.length === 0) return;
+    const slice = useDatasetStore.getState().currentSlice;
+    const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(slice)] ?? [];
+    let toAdd = newShapes;
+    if (clipToOtherClasses && meta && newShapes.some((s) => hasOtherClass(sliceShapes, s.classId))) {
+      toAdd = clipShapesToOthers(newShapes, sliceShapes, meta.width, meta.height);
+    }
+    if (toAdd.length) addShapes(sourceKey, slice, toAdd);
+  }, [sourceKey, clipToOtherClasses, meta, addShapes]);
 
   const activeColor =
     activeClassId !== null ? colorForClass(activeClassId) : '#4090ff';
@@ -616,9 +682,9 @@ export default function AnnotationCanvas({
     const shapes = magicPreview
       .filter((pts) => pts.length >= 6)
       .map((pts) => ({ id: uuidv4(), classId: activeClassId, kind: 'polygon' as const, points: pts }));
-    if (shapes.length) addShapes(sourceKey, currentSlice, shapes);
+    if (shapes.length) commitShapes(shapes);
     resetMagic();
-  }, [sourceKey, activeClassId, magicPreview, addShapes, currentSlice, resetMagic]);
+  }, [sourceKey, activeClassId, magicPreview, commitShapes, resetMagic]);
 
   // Preserve in-progress polygon/lasso/magic drafts across a transient hold-Space
   // pan (tool flips to 'pan' then back), but abandon them on a real tool switch.
@@ -681,9 +747,35 @@ export default function AnnotationCanvas({
     const finalPoints = points.length === 2 ? [...points, ...points] : points;
     if (mode === 'erase' && eraseTargetKind === 'vector') {
       appendEraseStroke(sourceKey, currentSlice, shapeId, { points: finalPoints, radius });
-    } else {
-      appendBrushStroke(sourceKey, currentSlice, shapeId, { points: finalPoints, radius, mode });
+      return;
     }
+
+    // Clip-to-other-classes (paint only): if this stroke makes the brush overlap
+    // another class, convert the whole brush instance to a clipped polygon.
+    if (mode === 'paint' && clipToOtherClasses && meta) {
+      const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
+      const brush = sliceShapes.find((s) => s.id === shapeId);
+      const others = brush ? sliceShapes.filter((s) => s.classId !== brush.classId) : [];
+      if (brush && brush.kind === 'brush' && others.length > 0) {
+        const { gw, gh, scale } = gridFor(meta.width, meta.height);
+        const prospective = { ...brush, strokes: [...brush.strokes, { points: finalPoints, radius, mode: 'paint' as const }] };
+        const mine = rasterizeShapes([prospective], gw, gh, scale);
+        const otherMask = rasterizeShapes(others, gw, gh, scale);
+        let overlap = false;
+        for (let i = 0; i < mine.length; i++) { if (mine[i] && otherMask[i]) { overlap = true; break; } }
+        if (overlap) {
+          for (let i = 0; i < mine.length; i++) if (otherMask[i]) mine[i] = 0;
+          const polys = maskToPolygons(mine, gw, gh, { minRegion: 4, scale })
+            .filter((p) => p.length >= 6)
+            .map((points) => ({ id: uuidv4(), classId: brush.classId, kind: 'polygon' as const, points }));
+          const kept = sliceShapes.filter((s) => s.id !== shapeId);
+          setShapes(sourceKey, currentSlice, [...kept, ...polys]);
+          onNewBrushInstance(''); // this brush instance no longer exists
+          return;
+        }
+      }
+    }
+    appendBrushStroke(sourceKey, currentSlice, shapeId, { points: finalPoints, radius, mode });
   };
 
   /** Tool-dispatched press: starts a marquee, seeds magic/magnetic, adds a polygon
@@ -946,7 +1038,7 @@ export default function AnnotationCanvas({
         const id = uuidv4();
         if (tool === 'rectangle') {
           const { x, y, w, h } = normalizeRect(dragStart.x, dragStart.y, dx, dy);
-          addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'rectangle', x, y, w, h });
+          commitShapes([{ id, classId: activeClassId, kind: 'rectangle', x, y, w, h }]);
         } else {
           const { cx, cy, rx, ry } = normalizeEllipse(
             (dragStart.x + dragCurrent.x) / 2,
@@ -954,7 +1046,7 @@ export default function AnnotationCanvas({
             Math.abs(dx) / 2,
             Math.abs(dy) / 2
           );
-          addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'ellipse', cx, cy, rx, ry });
+          commitShapes([{ id, classId: activeClassId, kind: 'ellipse', cx, cy, rx, ry }]);
         }
       }
       setDragStart(null);
@@ -967,7 +1059,7 @@ export default function AnnotationCanvas({
     if (isPreviewing) return;
     if (tool === 'polygon' && draftPoly.length >= 6 && sourceKey && activeClassId !== null) {
       const id = uuidv4();
-      addShape(sourceKey, currentSlice, { id, classId: activeClassId, kind: 'polygon', points: draftPoly });
+      commitShapes([{ id, classId: activeClassId, kind: 'polygon', points: draftPoly }]);
       setDraftPoly([]);
     } else if (tool === 'magnetic' && sourceKey && activeClassId !== null) {
       // Commit the final hovered segment, then close the traced polygon.
@@ -979,7 +1071,7 @@ export default function AnnotationCanvas({
       }
       const simplified = simplifyPath(pts, 3);
       if (simplified.length >= 6) {
-        addShape(sourceKey, currentSlice, { id: uuidv4(), classId: activeClassId, kind: 'polygon', points: simplified });
+        commitShapes([{ id: uuidv4(), classId: activeClassId, kind: 'polygon', points: simplified }]);
       }
       resetMagnetic();
     }
@@ -1080,6 +1172,21 @@ export default function AnnotationCanvas({
       />
     ));
 
+  /** Destination-out filled polygons that carve holes out of a polygon shape
+   *  (e.g. from "invert shape"). Same compositing trick as erase strokes. */
+  const renderHoles = (holes?: number[][]) =>
+    (holes ?? []).map((pts, i) => (
+      <Line
+        key={`hole-${i}`}
+        points={pts}
+        closed
+        fill="black"
+        globalCompositeOperation="destination-out"
+        perfectDrawEnabled={false}
+        listening={false}
+      />
+    ));
+
   /** Render a committed shape (any kind) on the cached display layer, with the
    *  active brush instance recolored to the active class and erase strokes carved out. */
   const renderShape = (shape: Shape) => {
@@ -1101,6 +1208,7 @@ export default function AnnotationCanvas({
             strokeWidth={strokeW}
             perfectDrawEnabled={false}
           />
+          {renderHoles(shape.holes)}
           {renderErased(shape.erased)}
         </Group>
       );
@@ -1416,6 +1524,97 @@ export default function AnnotationCanvas({
   );
   const commonClassId = selectedClassIds.size === 1 ? [...selectedClassIds][0] : null;
 
+  // ----- Selection editing: copy/paste, invert, region ops, brush thickness -----
+  const selectedShapes = useMemo(
+    () => storeShapes.filter((s) => selectedShapeIds.includes(s.id)),
+    [storeShapes, selectedShapeIds],
+  );
+  const selectedBrush = selectedShape?.kind === 'brush' ? selectedShape : null;
+
+  const [regionOp, setRegionOp] = useState<RegionOp | null>(null);
+  const [regionParam, setRegionParam] = useState(4);
+
+  // Live region-op preview polygons (per class), recomputed as op/param/selection change.
+  const regionPreview = useMemo(() => {
+    if (!regionOp || !meta || selectedShapes.length === 0) return [];
+    return computeRegionOps(selectedShapes, meta.width, meta.height, regionOp, regionParam);
+  }, [regionOp, regionParam, selectedShapes, meta]);
+
+  // Cancel a pending region op whenever the selection empties or the tool changes.
+  useEffect(() => {
+    if (selectedShapeIds.length === 0 || tool !== 'select') setRegionOp(null);
+  }, [selectedShapeIds, tool]);
+
+  const handleCopy = useCallback(() => {
+    if (selectedShapes.length) clipboard.copy(selectedShapes);
+  }, [selectedShapes, clipboard]);
+
+  const handlePaste = useCallback(() => {
+    if (!sourceKey || clipboard.shapes.length === 0) return;
+    const pasted = clipboard.shapes.map((s) => offsetShape({ ...structuredClone(s), id: uuidv4() }, 12, 12));
+    const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
+    const toAdd = clipToOtherClasses && meta && pasted.some((s) => hasOtherClass(sliceShapes, s.classId))
+      ? clipShapesToOthers(pasted, sliceShapes, meta.width, meta.height)
+      : pasted;
+    if (toAdd.length === 0) return;
+    addShapes(sourceKey, currentSlice, toAdd);
+    setSelectedShapeIds(toAdd.map((s) => s.id));
+  }, [sourceKey, clipboard.shapes, addShapes, currentSlice, setSelectedShapeIds, clipToOtherClasses, meta]);
+
+  /** Replace the single selected shape with its complement (frame minus shape). */
+  const handleInvert = useCallback(() => {
+    if (!sourceKey || !meta || !selectedShape) return;
+    const { gw, gh, scale } = gridFor(meta.width, meta.height);
+    const mask = rasterizeShapes([selectedShape], gw, gh, scale);
+    const holes = maskToPolygons(mask, gw, gh, { minRegion: 4, scale });
+    const outer = [0, 0, meta.width, 0, meta.width, meta.height, 0, meta.height];
+    updateShape(sourceKey, currentSlice, selectedShape.id, (s) => ({
+      id: s.id, classId: s.classId, kind: 'polygon', points: outer, holes,
+    }));
+  }, [sourceKey, meta, selectedShape, updateShape, currentSlice]);
+
+  /** Commit the region-op preview: replace the selected shapes with the result. */
+  const handleApplyRegion = useCallback(() => {
+    if (!sourceKey || regionPreview.length === 0) return;
+    const selSet = new Set(selectedShapeIds);
+    const kept = storeShapes.filter((s) => !selSet.has(s.id));
+    const created: Shape[] = regionPreview.map((r) => ({
+      id: uuidv4(), classId: r.classId, kind: 'polygon' as const, points: r.points,
+    }));
+    const finalCreated = clipToOtherClasses && meta
+      ? clipShapesToOthers(created, kept, meta.width, meta.height)
+      : created;
+    setShapes(sourceKey, currentSlice, [...kept, ...finalCreated]);
+    setSelectedShapeIds(finalCreated.map((s) => s.id));
+    setRegionOp(null);
+  }, [sourceKey, regionPreview, selectedShapeIds, storeShapes, setShapes, currentSlice, setSelectedShapeIds, clipToOtherClasses, meta]);
+
+  /** Set every stroke's radius on the selected brush shape (post-draw re-thickness). */
+  const handleBrushThickness = useCallback((radius: number) => {
+    if (!sourceKey || !selectedBrush) return;
+    updateShape(sourceKey, currentSlice, selectedBrush.id, (s) =>
+      s.kind === 'brush' ? { ...s, strokes: s.strokes.map((st) => ({ ...st, radius })) } : s,
+    );
+  }, [sourceKey, selectedBrush, updateShape, currentSlice]);
+
+  // Keyboard: copy/paste/invert (select tool) + Enter to apply a region op.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (tool !== 'select') return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const mod = e.metaKey || e.ctrlKey;
+      const k = e.key.toLowerCase();
+      if (mod && k === 'c' && selectedShapes.length) { e.preventDefault(); handleCopy(); }
+      else if (mod && k === 'v' && clipboard.shapes.length) { e.preventDefault(); handlePaste(); }
+      else if (!mod && k === 'i' && selectedShape) { e.preventDefault(); handleInvert(); }
+      else if (e.key === 'Enter' && regionOp && regionPreview.length) { e.preventDefault(); handleApplyRegion(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [tool, selectedShapes, clipboard.shapes, selectedShape, regionOp, regionPreview,
+      handleCopy, handlePaste, handleInvert, handleApplyRegion]);
+
   return (
     <div
       ref={containerRef}
@@ -1623,6 +1822,22 @@ export default function AnnotationCanvas({
                 perfectDrawEnabled={false}
               />
             ))}
+
+          {/* Region-op preview (select tool): dashed outline of the pending result. */}
+          {regionOp && regionPreview.map((r, i) => (
+            <Line
+              key={`region-${i}`}
+              points={r.points}
+              closed
+              fill={colorForClass(r.classId)}
+              stroke={colorForClass(r.classId)}
+              strokeWidth={1.5 / transform.scaleX}
+              dash={[5 / transform.scaleX, 3 / transform.scaleX]}
+              opacity={0.6}
+              listening={false}
+              perfectDrawEnabled={false}
+            />
+          ))}
         </Layer>
 
         {/* Layer 3: in-progress brush stroke (imperatively updated, no React re-renders per move) */}
@@ -1660,38 +1875,95 @@ export default function AnnotationCanvas({
 
       {/* Selection toolbar (select tool) */}
       {showInteractive && selectedShapeIds.length > 0 && (
-        <div className="absolute top-2 left-2 flex items-center gap-2 bg-slate-800/90 text-slate-100 text-xs px-3 py-1.5 rounded-md shadow-lg">
-          <span className="text-slate-300">
-            {selectedShapeIds.length > 1
-              ? `${selectedShapeIds.length} selected`
-              : selectedShape?.kind === 'polygon'
-                ? 'Drag a vertex to edit, or drag the shape to move'
-                : 'Drag to move or resize'}
-          </span>
-          {/* Reassign the selected shape(s) to a different class. */}
-          <label className="flex items-center gap-1 text-slate-300">
-            Class:
-            <select
-              value={commonClassId ?? ''}
-              onChange={(e) => handleReassignClass(Number(e.target.value))}
-              className="bg-slate-700 text-slate-100 text-xs rounded px-1 py-0.5 border border-slate-600 focus:outline-none focus:border-sky-400"
-              title="Change class of the selection"
-            >
-              {commonClassId === null && <option value="" disabled>(mixed)</option>}
-              {classes.map((c) => (
-                <option key={c.classId} value={c.classId}>{c.label}</option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            onClick={handleDeleteSelected}
-            className="flex items-center gap-1 px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white font-medium"
-            title="Delete selected (Del)"
-          >
-            <Trash size={13} />
-            Delete{selectedShapeIds.length > 1 ? ` (${selectedShapeIds.length})` : ''}
-          </button>
+        <div className="absolute top-2 left-2 flex flex-col gap-1.5 bg-slate-800/90 text-slate-100 text-xs px-3 py-1.5 rounded-md shadow-lg max-w-[560px]">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-slate-300">
+              {selectedShapeIds.length > 1
+                ? `${selectedShapeIds.length} selected`
+                : selectedShape?.kind === 'polygon'
+                  ? 'Drag a vertex to edit, or drag to move'
+                  : 'Drag to move or resize'}
+            </span>
+            {/* Reassign the selected shape(s) to a different class. */}
+            <label className="flex items-center gap-1 text-slate-300">
+              Class:
+              <select
+                value={commonClassId ?? ''}
+                onChange={(e) => handleReassignClass(Number(e.target.value))}
+                className="bg-slate-700 text-slate-100 text-xs rounded px-1 py-0.5 border border-slate-600 focus:outline-none focus:border-sky-400"
+                title="Change class of the selection"
+              >
+                {commonClassId === null && <option value="" disabled>(mixed)</option>}
+                {classes.map((c) => (
+                  <option key={c.classId} value={c.classId}>{c.label}</option>
+                ))}
+              </select>
+            </label>
+            <button type="button" onClick={handleCopy}
+              className="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 text-white font-medium" title="Copy (⌘/Ctrl-C)">
+              Copy
+            </button>
+            <button type="button" onClick={handlePaste} disabled={clipboard.shapes.length === 0}
+              className="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 disabled:opacity-40 text-white font-medium" title="Paste (⌘/Ctrl-V)">
+              Paste
+            </button>
+            <button type="button" onClick={handleInvert} disabled={!selectedShape}
+              className="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 disabled:opacity-40 text-white font-medium"
+              title="Invert the selected shape (I)">
+              Invert
+            </button>
+            <button type="button" onClick={handleDeleteSelected}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white font-medium" title="Delete selected (Del)">
+              <Trash size={13} />
+              Delete{selectedShapeIds.length > 1 ? ` (${selectedShapeIds.length})` : ''}
+            </button>
+          </div>
+
+          {/* Brush thickness (single brush shape) */}
+          {selectedBrush && (
+            <label className="flex items-center gap-2 text-slate-300">
+              Thickness
+              <input type="range" min={1} max={200} value={selectedBrush.strokes[0]?.radius ?? brushSize}
+                onChange={(e) => handleBrushThickness(Number(e.target.value))}
+                className="flex-1 accent-sky-400" />
+              <span className="w-7 text-right tabular-nums">{selectedBrush.strokes[0]?.radius ?? brushSize}</span>
+            </label>
+          )}
+
+          {/* Region ops on the selection (mask-level), with a magic-wand-style confirm. */}
+          <div className="flex items-center gap-1 flex-wrap">
+            <span className="text-slate-400">Region:</span>
+            {(['merge', 'grow', 'shrink', 'islands'] as RegionOp[]).map((op) => (
+              <button key={op} type="button"
+                onClick={() => { setRegionOp(op); if (op === 'islands') setRegionParam(50); else if (op !== 'merge') setRegionParam(4); }}
+                className={`px-2 py-0.5 rounded font-medium ${regionOp === op ? 'bg-sky-600 text-white' : 'bg-slate-600 hover:bg-slate-500 text-white'}`}>
+                {op === 'islands' ? 'Remove islands' : op[0].toUpperCase() + op.slice(1)}
+              </button>
+            ))}
+            {regionOp && regionOp !== 'merge' && (
+              <label className="flex items-center gap-1 text-slate-300">
+                {regionOp === 'islands' ? 'min px²' : 'px'}
+                <input type="range"
+                  min={1} max={regionOp === 'islands' ? 2000 : 30} step={1}
+                  value={regionParam}
+                  onChange={(e) => setRegionParam(Number(e.target.value))}
+                  className="w-24 accent-sky-400" />
+                <span className="w-9 text-right tabular-nums">{regionParam}</span>
+              </label>
+            )}
+            {regionOp && (
+              <>
+                <button type="button" onClick={handleApplyRegion} disabled={regionPreview.length === 0}
+                  className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-medium" title="Apply (Enter)">
+                  Apply
+                </button>
+                <button type="button" onClick={() => setRegionOp(null)}
+                  className="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 text-white font-medium">
+                  Cancel
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
 
