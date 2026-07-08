@@ -37,13 +37,15 @@ async function applyDraft(
  */
 export function useOpenInAnnotate() {
   const navigate = useNavigate();
-  const { setDataset } = useDatasetStore();
+  const { setDataset, setSlice } = useDatasetStore();
   const { setClasses } = useClassStore();
   const { mergeSourceDraft } = useAnnotationStore();
 
-  /** Open a Tiled array: fetch meta, set the dataset, apply its draft, then navigate. */
+  /** Open a Tiled array: fetch meta, set the dataset, apply its draft, then navigate.
+   *  Pass `initialSlice` to jump to a slice of a volume (keeps one sourceKey for
+   *  the whole stack, so per-slice annotations stay unified). */
   const openTiledArray = useCallback(
-    async (tiledPath: string, serverUri: string) => {
+    async (tiledPath: string, serverUri: string, initialSlice = 0) => {
       const params = new URLSearchParams({ source: tiledPath, kind: 'tiled' });
       if (serverUri) params.set('server_uri', serverUri);
 
@@ -59,12 +61,14 @@ export function useOpenInAnnotate() {
         isRgb: meta.is_rgb,
         valueRange: meta.value_range,
       });
+      // setDataset resets to slice 0; jump to the requested slice (clamped).
+      if (initialSlice > 0) setSlice(Math.min(initialSlice, Math.max(0, meta.n_slices - 1)));
 
       const sourceKey = buildSourceKey('tiled', tiledPath, serverUri);
       await applyDraft(sourceKey, setClasses, mergeSourceDraft);
       navigate('/annotate');
     },
-    [navigate, setDataset, setClasses, mergeSourceDraft],
+    [navigate, setDataset, setSlice, setClasses, mergeSourceDraft],
   );
 
   /** Open a local file by relative path: fetch meta, set the dataset, apply its draft, then navigate. */

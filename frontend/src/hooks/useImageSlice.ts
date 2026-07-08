@@ -10,7 +10,7 @@ export interface SliceResult {
 }
 
 /** Build the /api/image/slice URL encoding source, slice index, and render options. */
-function buildSliceUrl(
+export function buildSliceUrl(
   source: string,
   kind: string,
   sliceIndex: number,

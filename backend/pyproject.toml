@@ -9,7 +9,11 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
-  "tiled[all]>=0.1",
+  # Client only — the app talks to an EXTERNAL Tiled (tiled.client / tiled.queries).
+  # The Tiled *server* is not a runtime dependency and is intentionally not shipped
+  # in the Docker image. Local dev runs its own Tiled server via start_all.sh, which
+  # installs tiled[all] into .venv independently of this file.
+  "tiled[client]>=0.1",
   "numpy>=1.26",
   "pillow>=10.3",
   "python-dotenv>=1.0",

@@ -1038,6 +1038,28 @@ def _parse_json_filters(raw: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# ---------------------------------------------------------------------------
+# Static SPA (production container only)
+# ---------------------------------------------------------------------------
+# In the Docker image the built frontend is copied to backend/static/, and
+# FastAPI serves it so the app is a single same-origin service. In local dev
+# this directory is absent (Vite serves the SPA), so the mount is skipped.
+# Registered AFTER all /api routes so the catch-all never shadows them.
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.is_dir():
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/assets", StaticFiles(directory=str(_STATIC_DIR / "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str) -> FileResponse:
+        """Serve a real static file when it exists, else index.html (SPA routing)."""
+        candidate = _STATIC_DIR / full_path
+        if full_path and candidate.is_file() and _STATIC_DIR in candidate.resolve().parents:
+            return FileResponse(str(candidate))
+        return FileResponse(str(_STATIC_DIR / "index.html"))
+
+
 if __name__ == "__main__":  # pragma: no cover — convenience entry point
     import uvicorn
 

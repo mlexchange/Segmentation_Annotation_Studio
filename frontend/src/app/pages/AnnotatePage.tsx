@@ -16,6 +16,7 @@ import Toolbar from '@/components/annotate/Toolbar';
 import ClassManager from '@/components/annotate/ClassManager';
 import DisplayControls from '@/components/annotate/DisplayControls';
 import SliceNavigator from '@/components/annotate/SliceNavigator';
+import MaskToolsPanel from '@/components/annotate/MaskToolsPanel';
 import AnnotationCanvas from '@/components/annotate/AnnotationCanvas';
 import DownloadModal from '@/components/annotate/DownloadModal';
 import VersionHistoryModal from '@/components/annotate/VersionHistoryModal';
@@ -186,6 +187,8 @@ export default function AnnotatePage() {
           />
           <hr />
           <SliceNavigator />
+          <hr />
+          <MaskToolsPanel sourceKey={sourceKey} activeClassId={activeClassId} />
           <hr />
 
           {/* Save button + status */}

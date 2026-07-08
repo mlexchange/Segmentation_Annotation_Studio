@@ -4,6 +4,7 @@
  */
 import { create } from 'zustand';
 import { temporal } from 'zundo';
+import { v4 as uuidv4 } from 'uuid';
 
 // ---- Shape types ----
 
@@ -56,6 +57,11 @@ export interface BrushShape extends BaseShape {
 export type Shape = PolygonShape | RectShape | EllipseShape | BrushShape;
 export type Split = 'train' | 'valid' | 'test';
 
+/** Deep-clone a shape with a fresh id (used when copying across slices). */
+function cloneShapeWithNewId(shape: Shape): Shape {
+  return { ...structuredClone(shape), id: uuidv4() };
+}
+
 export interface AnnotationState {
   byImage: Record<string, Record<string, Shape[]>>;
   splitBySlice: Record<string, Record<string, Split | 'auto'>>;
@@ -71,6 +77,12 @@ export interface AnnotationState {
   updateShape: (sourceKey: string, sliceIdx: number, shapeId: string, updater: (shape: Shape) => Shape) => void;
   /** Reassign several shapes to a class in one update (one undo step). */
   setClassForShapes: (sourceKey: string, sliceIdx: number, shapeIds: string[], classId: number) => void;
+  /** Replace every shape of *classId* on a slice with *shapes* (one undo step).
+   *  Used by threshold/cleanup/interpolate to write a recomputed region back. */
+  replaceClassShapesOnSlice: (sourceKey: string, sliceIdx: number, classId: number, shapes: Shape[]) => void;
+  /** Clone shapes from *fromSlice* into each *toSlices* index (fresh ids, merged
+   *  with existing), optionally limited to one class. One undo step. */
+  copySliceShapes: (sourceKey: string, fromSlice: number, toSlices: number[], classId?: number | null) => void;
   /** Remove every shape with *classId* across all loaded samples (all slices). */
   removeShapesByClassId: (classId: number) => void;
   appendBrushStroke: (sourceKey: string, sliceIdx: number, shapeId: string, stroke: BrushStroke) => void;
@@ -189,6 +201,38 @@ export const useAnnotationStore = create<AnnotationState>()(
               },
             },
           };
+        }),
+
+      /** Replaces all shapes of *classId* on one slice with *shapes* (one undo step). */
+      replaceClassShapesOnSlice: (sourceKey, sliceIdx, classId, shapes) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          const kept = prev.filter((sh) => sh.classId !== classId);
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: [...kept, ...shapes],
+              },
+            },
+          };
+        }),
+
+      /** Clones shapes (fresh ids) from *fromSlice* into each *toSlices* index. */
+      copySliceShapes: (sourceKey, fromSlice, toSlices, classId = null) =>
+        set((s) => {
+          const src = s.byImage[sourceKey]?.[String(fromSlice)] ?? [];
+          const picked = classId == null ? src : src.filter((sh) => sh.classId === classId);
+          if (picked.length === 0) return {};
+          const slices = { ...(s.byImage[sourceKey] ?? {}) };
+          for (const t of toSlices) {
+            if (t === fromSlice) continue;
+            const key = String(t);
+            slices[key] = [...(slices[key] ?? []), ...picked.map(cloneShapeWithNewId)];
+          }
+          return { byImage: { ...s.byImage, [sourceKey]: slices } };
         }),
 
       /** Removes every shape of *classId* across all samples/slices, pruning emptied slices and sources. */

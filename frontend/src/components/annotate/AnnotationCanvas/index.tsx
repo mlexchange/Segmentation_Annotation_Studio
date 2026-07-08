@@ -35,6 +35,9 @@ import { renderAdjusted } from '@/lib/sam/adjust';
 const IS_MAC = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
 const REMOVE_KEY_LABEL = IS_MAC ? 'Option' : 'Alt';
 
+/** Shared stable empty shape list — see `storeShapes` for why identity matters. */
+const EMPTY_SHAPES: Shape[] = [];
+
 interface AnnotationCanvasProps {
   brightness: number;
   contrast: number;
@@ -416,11 +419,21 @@ export default function AnnotationCanvas({
   }, [fitRequestId, fitToScreen]);
 
   const isPreviewing = previewShapes !== null;
-  const storeShapes = sourceKey ? (byImage[sourceKey]?.[String(currentSlice)] ?? []) : [];
+  // Stable empty fallback: a fresh `[]` here changes identity every render, which
+  // would make the `autoNegPoints` memo (and the SAM preview effect that depends
+  // on it) re-run in a loop — leaving `magicLoading` stuck true so "Add"/Enter
+  // never enable. Reuse one constant instead.
+  const storeShapes = sourceKey ? (byImage[sourceKey]?.[String(currentSlice)] ?? EMPTY_SHAPES) : EMPTY_SHAPES;
   // Shapes actually drawn on Layer 1: previewed version when previewing, else the live store.
   const displayShapes = isPreviewing ? previewShapes! : storeShapes;
   // Classes used for color/visibility lookups when rendering Layer 1.
   const renderClasses = isPreviewing && previewClasses ? previewClasses : classes;
+
+  // Clip stroke/shape layers to the image frame (layer coords == image coords,
+  // since pan/zoom lives on the Stage) so painting past the edge is cropped.
+  const imageClip = meta
+    ? { clipX: 0, clipY: 0, clipWidth: meta.width, clipHeight: meta.height }
+    : {};
 
   // Cache the shapes layer for uniform opacity compositing — skipped mid-stroke
   // so the cache rebuild doesn't stall painting.
@@ -594,7 +607,7 @@ export default function AnnotationCanvas({
       setMagicLoading(false);
     });
     return () => cancelAnimationFrame(id);
-  }, [magicSeeds, magicBox, autoNegPoints, samDetail, samThreshold, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tool, magicSeeds, magicBox, autoNegPoints, samDetail, samThreshold, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Commit the magic preview polygons as new shapes (one batched undo step). */
   const commitMagic = useCallback(() => {
@@ -628,22 +641,27 @@ export default function AnnotationCanvas({
 
   // Escape cancels the entire in-progress shape (polygon vertices, magnetic
   // trace, magic selection, or rect/ellipse drag) without committing anything.
+  // Enter accepts the current magic-tool selection (same as the "Add" button).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      setDraftPoly([]);
-      setDragStart(null);
-      setDragCurrent(null);
-      setMarqueeStart(null);
-      setMarqueeRect(null);
-      resetMagnetic();
-      resetMagic();
+      if (e.key === 'Escape') {
+        setDraftPoly([]);
+        setDragStart(null);
+        setDragCurrent(null);
+        setMarqueeStart(null);
+        setMarqueeRect(null);
+        resetMagnetic();
+        resetMagic();
+      } else if (e.key === 'Enter' && tool === 'magic' && !magicLoading && magicPreview.length > 0) {
+        e.preventDefault();
+        commitMagic();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [resetMagnetic, resetMagic]);
+  }, [resetMagnetic, resetMagic, tool, magicLoading, magicPreview, commitMagic]);
 
   /** Flush the buffered draft stroke to the Zustand store (one write per stroke). */
   const commitDraftStroke = () => {
@@ -783,14 +801,15 @@ export default function AnnotationCanvas({
     } else if (tool === 'eraser') {
       setIsDrawing(true);
       const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
-      // Erase carves from the topmost shape under the cursor (any kind). Falls
-      // back to the active brush instance if the click isn't over a shape.
+      // Erase carves only from the topmost shape of the ACTIVE class under the
+      // cursor, so it never eats into another layer. Falls back to the active
+      // brush instance if the click isn't over a shape.
       const visible = (s: Shape) =>
         classes.find((c) => c.classId === s.classId)?.isVisible !== false;
       let target: Shape | undefined;
       for (let i = sliceShapes.length - 1; i >= 0; i--) {
         const s = sliceShapes[i];
-        if (visible(s) && shapeContainsPoint(s, pos.x, pos.y)) { target = s; break; }
+        if (s.classId === activeClassId && visible(s) && shapeContainsPoint(s, pos.x, pos.y)) { target = s; break; }
       }
       if (!target && activeBrushShapeId) {
         target = sliceShapes.find((s) => s.id === activeBrushShapeId && s.kind === 'brush');
@@ -1441,8 +1460,9 @@ export default function AnnotationCanvas({
         </Layer>
 
         {/* Layer 1: committed shapes — cached + opacity applied once at the
-            layer so overlapping same-class shapes render a uniform class color. */}
-        <Layer ref={shapesLayerRef} listening={false} opacity={fillOpacity}>
+            layer so overlapping same-class shapes render a uniform class color.
+            Clipped to the image frame so strokes never render past the edges. */}
+        <Layer ref={shapesLayerRef} listening={false} opacity={fillOpacity} {...imageClip}>
           {displayShapes
             .filter((s) => renderClasses.find((c) => c.classId === s.classId)?.isVisible !== false)
             .map(renderShape)}
@@ -1606,7 +1626,7 @@ export default function AnnotationCanvas({
         </Layer>
 
         {/* Layer 3: in-progress brush stroke (imperatively updated, no React re-renders per move) */}
-        <Layer ref={draftStrokeLayerRef} listening={false} opacity={fillOpacity}>
+        <Layer ref={draftStrokeLayerRef} listening={false} opacity={fillOpacity} {...imageClip}>
           <Line
             ref={draftLineRef}
             points={[]}

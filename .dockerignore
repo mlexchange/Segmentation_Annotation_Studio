@@ -1,0 +1,36 @@
+# Build artifacts & deps (rebuilt inside the image)
+**/node_modules
+**/dist
+**/.vite
+frontend/dist
+backend/static
+
+# Python envs / caches
+.venv
+.conda-py312
+**/__pycache__
+**/*.pyc
+.pytest_cache
+htmlcov
+.coverage
+
+# Tiled server config, data & catalog (external in production — never bundled)
+.tiled
+tiled/
+
+# Local data, backups, runtime files
+data
+.drafts
+.reset-backups
+*.pid
+.run
+
+# VCS / editor / OS
+.git
+.gitignore
+.idea
+.vscode
+.DS_Store
+
+# Plans / docs not needed in the image
+*.md

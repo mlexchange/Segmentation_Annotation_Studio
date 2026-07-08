@@ -71,6 +71,20 @@ export default function SlicesColumn({
         )}
       </div>
 
+      {/* Open the whole stack as one scrollable volume (slice slider + cross-slice
+          tools), vs. opening a single slice from the list below. */}
+      <button
+        type="button"
+        onClick={() => onOpenInAnnotate(dataset)}
+        className="flex items-center justify-center gap-1.5 mx-2 my-2 px-2 py-1.5 rounded bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-medium transition-colors"
+      >
+        <PencilSimple size={13} />
+        Open all {slices.length || ''} slices as a volume
+      </button>
+      <p className="px-3 pb-2 text-[10px] text-slate-500 leading-snug">
+        …or pick one slice below to open it on its own.
+      </p>
+
       <div className="flex-1 overflow-y-auto min-h-0">
         {loading && (
           <div className="flex items-center justify-center py-8">

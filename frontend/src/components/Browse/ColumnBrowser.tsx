@@ -144,17 +144,26 @@ export default function ColumnBrowser({
     if (next) actions.addColumn(next);
   }, [state.columns, state.facets, actions]);
 
-  /** Open a sample in the Annotate tab (navigates), surfacing progress/errors via openStatus. */
+  /** Open a sample in the Annotate tab (navigates), surfacing progress/errors via openStatus.
+   *  A slice of the drilled-in volume opens the whole volume at that slice index, so its
+   *  annotations share the volume's sourceKey rather than a standalone single-array key. */
   const handleOpenInAnnotate = useCallback(
     async (item: BrowseItem) => {
       setOpenStatus(`Opening ${item.sample}…`);
       try {
-        await openTiledArray(item.path, serverUri);
+        const sliceIdx = state.expandedSample
+          ? state.slices.findIndex((s) => s.path === item.path)
+          : -1;
+        if (state.expandedSample && sliceIdx >= 0) {
+          await openTiledArray(state.expandedSample.path, serverUri, sliceIdx);
+        } else {
+          await openTiledArray(item.path, serverUri);
+        }
       } catch (err) {
         setOpenStatus(`Failed to open: ${err}`);
       }
     },
-    [openTiledArray, serverUri],
+    [openTiledArray, serverUri, state.expandedSample, state.slices],
   );
 
   /** Sample-row click: drill multi-slice volumes into a Slices column; select
