@@ -956,6 +956,38 @@ async def export_download(job_id: str) -> Response:
     return FileResponse(zp, media_type="application/zip", filename=Path(zp).name)
 
 
+@app.post("/api/masks/to-tiled")
+async def masks_to_tiled(payload: ExportRequest) -> dict:
+    """Write rasterized masks into Tiled as stacked volumes (standalone action).
+
+    Reuses the export payload (classes/slices/negative_slices per source) but,
+    instead of building a training zip, rasterizes each Tiled source's shapes and
+    writes a ``<source_stem>__masks`` sibling container. Runs on a background
+    thread; poll ``/api/export/status/{job_id}`` for progress.
+    """
+    import tiled_mask_sync
+
+    if payload.sources:
+        source_items: list[ExportSourceItem] = payload.sources
+    else:
+        source_items = [ExportSourceItem(
+            kind=payload.kind,  # type: ignore[arg-type]
+            source=payload.source,
+            server_uri=payload.server_uri,
+            slices=payload.slices,
+            split_by_slice=payload.split_by_slice,
+            negative_slices=payload.negative_slices,
+        )]
+
+    jid = export_jobs.new_job("")
+    threading.Thread(
+        target=tiled_mask_sync.run_mask_sync_job,
+        args=(jid, source_items, payload),
+        daemon=True,
+    ).start()
+    return {"job_id": jid}
+
+
 @app.post("/api/import/coco")
 async def import_coco(dataset_dir: str = Query(...)) -> dict:
     """Import a COCO dataset directory back into editor payload."""

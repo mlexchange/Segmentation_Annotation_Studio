@@ -65,12 +65,12 @@ export function useExportJob() {
     tick();
   }, []);
 
-  /** Start a real export. Returns once the job is queued (progress via state). */
-  const start = useCallback(async (payload: unknown) => {
+  /** POST a job-starting request to `path`, then poll the shared status route. */
+  const run = useCallback(async (path: string, payload: unknown) => {
     clearTimer();
     setState({ ...IDLE, status: 'running', phase: 'queued' });
     try {
-      const res = await fetch(`${API_BASE}/api/export/coco`, {
+      const res = await fetch(`${API_BASE}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -89,10 +89,16 @@ export function useExportJob() {
     }
   }, [poll]);
 
+  /** Start a real COCO export. Returns once the job is queued (progress via state). */
+  const start = useCallback((payload: unknown) => run('/api/export/coco', payload), [run]);
+
+  /** Write rasterized masks into Tiled (standalone). Shares the status polling. */
+  const startMaskSync = useCallback((payload: unknown) => run('/api/masks/to-tiled', payload), [run]);
+
   const downloadUrl =
     state.jobId && (state.result as { zip_available?: boolean } | null)?.zip_available
       ? `${API_BASE}/api/export/download/${state.jobId}`
       : null;
 
-  return { state, start, reset, downloadUrl };
+  return { state, start, startMaskSync, reset, downloadUrl };
 }

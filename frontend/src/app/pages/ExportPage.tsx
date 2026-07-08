@@ -21,7 +21,7 @@ export default function ExportPage() {
   const [includePolygons, setIncludePolygons] = useState(false);
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [status, setStatus] = useState('');
-  const { state: job, start, downloadUrl } = useExportJob();
+  const { state: job, start, startMaskSync, downloadUrl } = useExportJob();
 
   if (!source || !meta) {
     return (
@@ -88,6 +88,12 @@ export default function ExportPage() {
   const handleWrite = () => {
     setStatus('');
     start(buildPayload(false));
+  };
+
+  /** Writes rasterized masks straight into Tiled as stacked volumes (no zip). */
+  const handleMaskSync = () => {
+    setStatus('');
+    startMaskSync(buildPayload(false));
   };
 
   const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
@@ -218,7 +224,16 @@ export default function ExportPage() {
               {job.log.slice(-15).map((line, i) => <div key={i}>{line}</div>)}
             </div>
           )}
-          {job.status === 'done' && (
+          {job.status === 'done' && Array.isArray(job.result?.written) ? (
+            <p className="text-xs text-gray-600">
+              Wrote masks into Tiled:{' '}
+              {(job.result.written as Array<{ container?: string; n_slices?: number }>).length === 0
+                ? 'nothing (no Tiled sources / no annotated slices).'
+                : (job.result.written as Array<{ container?: string; n_slices?: number }>)
+                    .map((w) => `${w.container} (${w.n_slices} slices)`)
+                    .join(', ')}
+            </p>
+          ) : job.status === 'done' && (
             <p className="text-xs text-gray-600">
               Saved to <span className="font-mono">{String(job.result?.dataset_path ?? 'server')}</span> (Tiled). Download includes images + masks (semantic + per-class) + COCO.
             </p>
@@ -251,6 +266,18 @@ export default function ExportPage() {
             Download .zip
           </a>
         )}
+        <button
+          onClick={handleMaskSync}
+          disabled={job.status === 'running' || kind !== 'tiled'}
+          title={
+            kind === 'tiled'
+              ? 'Rasterize masks and write them into Tiled as stacked volumes (semantic + per-class) next to this dataset'
+              : 'Only available for Tiled sources'
+          }
+          className="ml-auto px-4 py-2 text-sm rounded-md border border-emerald-600 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+        >
+          {job.status === 'running' ? 'Working…' : 'Push masks to Tiled'}
+        </button>
       </div>
     </div>
   );

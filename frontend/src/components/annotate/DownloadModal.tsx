@@ -14,7 +14,7 @@ interface DownloadModalProps {
   onClose: () => void;
 }
 
-type Scope = 'current' | 'all' | 'stars1' | 'stars2' | 'stars3';
+type Scope = 'slice' | 'current' | 'all' | 'stars1' | 'stars2' | 'stars3';
 
 /** Parse a canonical sourceKey back to { kind, source, serverUri }. */
 function parseSourceKey(sk: string) {
@@ -27,6 +27,11 @@ function parseSourceKey(sk: string) {
 }
 
 const SCOPE_OPTIONS: { value: Scope; label: string; desc: string; stars?: string }[] = [
+  {
+    value: 'slice',
+    label: 'Current slice only',
+    desc: 'Export just the slice currently open in the viewer.',
+  },
   {
     value: 'current',
     label: 'Current sample only',
@@ -59,19 +64,20 @@ const SCOPE_OPTIONS: { value: Scope; label: string; desc: string; stars?: string
 
 /** Renders the COCO download dialog and drives the export job for the chosen scope. */
 export default function DownloadModal({ onClose }: DownloadModalProps) {
-  const { source, kind, serverUri } = useDatasetStore();
+  const { source, kind, serverUri, currentSlice } = useDatasetStore();
   const { byImage, splitBySlice, negativeSlices } = useAnnotationStore();
   const { classes } = useClassStore();
   const ratings = useRatingStore((s) => s.ratings);
 
   const [scope, setScope] = useState<Scope>('current');
   const [includePolygons, setIncludePolygons] = useState(false);
-  const { state: job, start, downloadUrl } = useExportJob();
+  const { state: job, start, startMaskSync, downloadUrl } = useExportJob();
   const status = job.status;
+  const maskResult = Array.isArray(job.result?.written) ? (job.result.written as Array<{ container?: string; n_slices?: number; updated?: number }>) : null;
 
   /** Preview count of samples that would be exported for the selected scope. */
   const previewCount = useMemo(() => {
-    if (scope === 'current') return source ? 1 : 0;
+    if (scope === 'slice' || scope === 'current') return source ? 1 : 0;
     const minStars = scope === 'stars1' ? 1 : scope === 'stars2' ? 2 : scope === 'stars3' ? 3 : 0;
     return Object.keys(byImage).filter((sk) => {
       const hasShapes = Object.values(byImage[sk]).some((s) => s.length > 0);
@@ -83,16 +89,26 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
 
   /** Builds the per-sample export source list for the selected scope; throws if no current sample. */
   const buildSources = () => {
-    if (scope === 'current') {
+    if (scope === 'slice' || scope === 'current') {
       if (!source || !kind) throw new Error('No active sample loaded.');
       const sk = buildSourceKey(kind as 'tiled' | 'local', source, serverUri);
+      const allSlices = byImage[sk] ?? {};
+      const allSplits = splitBySlice[sk] ?? {};
+      const allNeg = negativeSlices[sk] ?? [];
+
+      // "Current slice only": keep just the slice open in the viewer.
+      const cur = String(currentSlice);
+      const slices = scope === 'slice' ? (allSlices[cur] ? { [cur]: allSlices[cur] } : {}) : allSlices;
+      const split_by_slice = scope === 'slice' ? (allSplits[cur] ? { [cur]: allSplits[cur] } : {}) : allSplits;
+      const negative_slices = scope === 'slice' ? allNeg.filter((k) => String(k) === cur) : allNeg;
+
       return [{
         kind,
         source,
         server_uri: serverUri ?? null,
-        slices: byImage[sk] ?? {},
-        split_by_slice: splitBySlice[sk] ?? {},
-        negative_slices: negativeSlices[sk] ?? [],
+        slices,
+        split_by_slice,
+        negative_slices,
       }];
     }
 
@@ -130,6 +146,25 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
     }
     if (sources.length === 0) { window.alert('No samples match the selected scope.'); return; }
     start({ sources, classes, mode: 'merge', include_polygons: includePolygons });
+  };
+
+  /** True when the chosen scope can actually write back to Tiled. */
+  const canMaskSync =
+    previewCount > 0 && !((scope === 'slice' || scope === 'current') && kind !== 'tiled');
+
+  /** Rasterizes the selected sources' masks and writes them into Tiled (no zip). */
+  const handleMaskSync = () => {
+    let sources;
+    try {
+      sources = buildSources();
+    } catch (e) {
+      window.alert(String(e));
+      return;
+    }
+    // Masks only write back to Tiled sources; the backend skips any local ones.
+    sources = sources.filter((s) => s.kind === 'tiled');
+    if (sources.length === 0) { window.alert('Masks can only be written to Tiled sources.'); return; }
+    startMaskSync({ sources, classes });
   };
 
   const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
@@ -229,7 +264,17 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
           </div>
         )}
 
-        {status === 'done' && (
+        {status === 'done' && maskResult && (
+          <div className="flex items-start gap-2 text-sm text-green-300">
+            <CheckCircle size={16} className="mt-0.5 shrink-0" />
+            <span>
+              {maskResult.length === 0
+                ? 'No masks written (no Tiled sources or no annotated slices).'
+                : <>Masks merged into Tiled: {maskResult.map((w) => `${w.container} (${w.n_slices} slices total, ${w.updated ?? 0} updated)`).join(', ')}.</>}
+            </span>
+          </div>
+        )}
+        {status === 'done' && !maskResult && (
           <div className="flex items-start gap-2 text-sm text-green-300">
             <CheckCircle size={16} className="mt-0.5 shrink-0" />
             <span>
@@ -254,6 +299,21 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
           >
             {status === 'done' ? 'Close' : 'Cancel'}
           </button>
+          {status !== 'done' && (
+            <button
+              type="button"
+              onClick={handleMaskSync}
+              disabled={status === 'running' || !canMaskSync}
+              title={
+                canMaskSync
+                  ? 'Rasterize masks and write them into Tiled as stacked volumes (semantic + per-class) next to the dataset'
+                  : 'Only available for Tiled sources'
+              }
+              className="px-4 py-2 text-sm rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-900/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {status === 'running' ? 'Working…' : 'Push masks to Tiled'}
+            </button>
+          )}
           {status === 'done' && downloadUrl ? (
             <a
               href={downloadUrl}
