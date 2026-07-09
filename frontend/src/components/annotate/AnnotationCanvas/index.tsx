@@ -14,6 +14,7 @@
 import { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Group, Circle, Transformer,
+  Shape as KonvaShape,
 } from 'react-konva';
 import { Trash } from '@phosphor-icons/react';
 import type Konva from 'konva';
@@ -26,7 +27,7 @@ import { toImage, normalizeRect, normalizeEllipse } from '@/lib/geometry';
 import { buildCostMap, dijkstra, tracePath, imageToGrid, simplifyPath, type CostMap } from '@/lib/livewire';
 import { useImageSlice } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
-import { buildField, magicSelect, maskToPolygons, type GrayField } from '@/lib/magicwand';
+import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type GrayField } from '@/lib/magicwand';
 import { useSam } from '@/hooks/useSam';
 import { renderAdjusted } from '@/lib/sam/adjust';
 import { LevelsFilter } from '@/lib/levelsFilter';
@@ -765,9 +766,12 @@ export default function AnnotationCanvas({
         for (let i = 0; i < mine.length; i++) { if (mine[i] && otherMask[i]) { overlap = true; break; } }
         if (overlap) {
           for (let i = 0; i < mine.length; i++) if (otherMask[i]) mine[i] = 0;
-          const polys = maskToPolygons(mine, gw, gh, { minRegion: 4, scale })
-            .filter((p) => p.length >= 6)
-            .map((points) => ({ id: uuidv4(), classId: brush.classId, kind: 'polygon' as const, points }));
+          const polys = maskToPolygonsWithHoles(mine, gw, gh, { minRegion: 4, scale })
+            .filter((p) => p.points.length >= 6)
+            .map((p) => ({
+              id: uuidv4(), classId: brush.classId, kind: 'polygon' as const,
+              points: p.points, ...(p.holes.length ? { holes: p.holes } : {}),
+            }));
           const kept = sliceShapes.filter((s) => s.id !== shapeId);
           setShapes(sourceKey, currentSlice, [...kept, ...polys]);
           onNewBrushInstance(''); // this brush instance no longer exists
@@ -1172,20 +1176,32 @@ export default function AnnotationCanvas({
       />
     ));
 
-  /** Destination-out filled polygons that carve holes out of a polygon shape
-   *  (e.g. from "invert shape"). Same compositing trick as erase strokes. */
-  const renderHoles = (holes?: number[][]) =>
-    (holes ?? []).map((pts, i) => (
-      <Line
-        key={`hole-${i}`}
-        points={pts}
-        closed
-        fill="black"
-        globalCompositeOperation="destination-out"
-        perfectDrawEnabled={false}
-        listening={false}
-      />
-    ));
+  /** Render a polygon that may have holes via an even-odd fill (outer path minus
+   *  hole subpaths). Even-odd — not destination-out — so a hole reveals whatever
+   *  is *beneath* it (e.g. another class) instead of erasing it off the layer. */
+  const renderPolygonWithHoles = (points: number[], holes: number[][], color: string, strokeW: number) => (
+    <KonvaShape
+      stroke={color}
+      strokeWidth={strokeW}
+      perfectDrawEnabled={false}
+      listening={false}
+      sceneFunc={(ctx: Konva.Context, node: Konva.Shape) => {
+        const drawRing = (r: number[]) => {
+          if (r.length < 6) return;
+          ctx.moveTo(r[0], r[1]);
+          for (let i = 2; i < r.length; i += 2) ctx.lineTo(r[i], r[i + 1]);
+          ctx.closePath();
+        };
+        ctx.beginPath();
+        drawRing(points);
+        for (const h of holes) drawRing(h);
+        const raw = (ctx as unknown as { _context: CanvasRenderingContext2D })._context;
+        raw.fillStyle = color;
+        raw.fill('evenodd');
+        ctx.strokeShape(node);
+      }}
+    />
+  );
 
   /** Render a committed shape (any kind) on the cached display layer, with the
    *  active brush instance recolored to the active class and erase strokes carved out. */
@@ -1200,15 +1216,18 @@ export default function AnnotationCanvas({
     if (shape.kind === 'polygon') {
       return (
         <Group key={shape.id}>
-          <Line
-            points={shape.points}
-            closed
-            fill={color}
-            stroke={color}
-            strokeWidth={strokeW}
-            perfectDrawEnabled={false}
-          />
-          {renderHoles(shape.holes)}
+          {shape.holes?.length
+            ? renderPolygonWithHoles(shape.points, shape.holes, color, strokeW)
+            : (
+              <Line
+                points={shape.points}
+                closed
+                fill={color}
+                stroke={color}
+                strokeWidth={strokeW}
+                perfectDrawEnabled={false}
+              />
+            )}
           {renderErased(shape.erased)}
         </Group>
       );

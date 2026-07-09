@@ -8,6 +8,7 @@
  * Moore-neighbor boundary trace → Douglas–Peucker simplify → polygons in
  * full-resolution IMAGE pixel coordinates.
  */
+import { fillHoles } from '@/lib/morphology';
 
 export interface GrayField {
   gw: number;
@@ -309,6 +310,55 @@ export function maskToPolygons(
 
   polys.sort((a, b) => b.area - a.area);
   return polys.slice(0, MAX_POLYGONS).map((p) => p.flat);
+}
+
+/** Even-odd point-in-polygon test on a flat [x,y,…] ring. */
+function pointInPolygonFlat(px: number, py: number, pts: number[]): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 2; i < pts.length; j = i, i += 2) {
+    const xi = pts[i], yi = pts[i + 1];
+    const xj = pts[j], yj = pts[j + 1];
+    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Like `maskToPolygons`, but also returns each region's enclosed voids as inner
+ * rings ("holes"). Enclosed background (not connected to the image border) is
+ * detected via `fillHoles`, vectorized, and each void assigned to the outer
+ * polygon that contains it. Outer + hole rings are in IMAGE coordinates.
+ */
+export function maskToPolygonsWithHoles(
+  mask: Uint8Array,
+  gw: number,
+  gh: number,
+  opts: MaskPolyOpts = {},
+): Array<{ points: number[]; holes: number[][] }> {
+  const outers = maskToPolygons(mask, gw, gh, opts);
+  const result = outers.map((points) => ({ points, holes: [] as number[][] }));
+  if (result.length === 0) return result;
+
+  // Enclosed background = pixels fillHoles would fill (interior voids only).
+  const filled = fillHoles(mask, gw, gh);
+  const holeMask = new Uint8Array(mask.length);
+  let anyHole = false;
+  for (let i = 0; i < mask.length; i++) {
+    if (filled[i] && !mask[i]) { holeMask[i] = 1; anyHole = true; }
+  }
+  if (!anyHole) return result;
+
+  const holeRings = maskToPolygons(holeMask, gw, gh, opts);
+  for (const ring of holeRings) {
+    // Centroid of the ring as a containment probe.
+    let cx = 0, cy = 0;
+    const n = ring.length / 2;
+    for (let i = 0; i < ring.length; i += 2) { cx += ring[i]; cy += ring[i + 1]; }
+    cx /= n; cy /= n;
+    const owner = result.find((r) => pointInPolygonFlat(cx, cy, r.points));
+    if (owner) owner.holes.push(ring);
+  }
+  return result;
 }
 
 /**

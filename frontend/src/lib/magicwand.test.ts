@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { magicSelect, maskToPolygons, gradientField, type GrayField } from './magicwand';
+import { magicSelect, maskToPolygons, maskToPolygonsWithHoles, gradientField, type GrayField } from './magicwand';
 
 /** 40x40 grid (scale 1): background 0 with two value-200 blocks. */
 function twoBlocks(): GrayField {
@@ -128,5 +128,31 @@ describe('maskToPolygons (shared by SAM + classic)', () => {
     const xs = polys[0].filter((_, i) => i % 2 === 0);
     // grid x∈[4,14) → image x∈[~18,~58): max should clear the raw grid range.
     expect(Math.max(...xs)).toBeGreaterThan(40);
+  });
+});
+
+describe('maskToPolygonsWithHoles', () => {
+  const W = 60, H = 60;
+  /** 60x60 mask: filled outer square minus a centered square = a donut. */
+  function donut(): Uint8Array {
+    const m = new Uint8Array(W * H);
+    for (let y = 10; y < 50; y++) for (let x = 10; x < 50; x++) m[y * W + x] = 1; // outer
+    for (let y = 22; y < 38; y++) for (let x = 22; x < 38; x++) m[y * W + x] = 0; // hole
+    return m;
+  }
+
+  it('returns one outer ring and one hole for a donut', () => {
+    const out = maskToPolygonsWithHoles(donut(), W, H, { minRegion: 8 });
+    expect(out.length).toBe(1);
+    expect(out[0].holes.length).toBe(1);
+    expect(out[0].points.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('returns no holes for a solid region', () => {
+    const m = new Uint8Array(W * H);
+    for (let y = 10; y < 50; y++) for (let x = 10; x < 50; x++) m[y * W + x] = 1;
+    const out = maskToPolygonsWithHoles(m, W, H, { minRegion: 8 });
+    expect(out.length).toBe(1);
+    expect(out[0].holes.length).toBe(0);
   });
 });

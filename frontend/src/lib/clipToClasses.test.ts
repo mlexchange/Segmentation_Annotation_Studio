@@ -50,4 +50,17 @@ describe('clipShapesToOthers', () => {
     const clipped = clipShapesToOthers([newB], [classA, newB], W, H);
     expect(clipped.length).toBe(0);
   });
+
+  it('carves a hole when the new region encloses another class', () => {
+    const classA = rect('a', 1, 90, 90, 20, 20);        // small A blob in the middle
+    const newB = rect('b', 2, 40, 40, 120, 120);        // large B surrounds A
+    const clipped = clipShapesToOthers([newB], [classA, newB], W, H);
+    expect(clipped.length).toBe(1);
+    expect(clipped[0].holes && clipped[0].holes.length).toBeGreaterThanOrEqual(1);
+    // Rasterizing the clipped B leaves A's center empty (hole carved).
+    const { gw, gh, scale } = gridFor(W, H);
+    const bMask = rasterizeShapes(clipped, gw, gh, scale);
+    expect(bMask[Math.floor((100 / scale)) * gw + Math.floor(100 / scale)]).toBe(0); // A center → empty
+    expect(bMask[Math.floor((50 / scale)) * gw + Math.floor(50 / scale)]).toBe(1);   // B body → filled
+  });
 });

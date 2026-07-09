@@ -11,7 +11,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { PolygonShape, Shape } from '@/stores/annotationStore';
 import { gridFor, rasterizeShapes } from '@/lib/rasterize';
-import { maskToPolygons } from '@/lib/magicwand';
+import { maskToPolygonsWithHoles } from '@/lib/magicwand';
 
 /** Does the slice hold any shape of a different class than `classId`? */
 export function hasOtherClass(sliceShapes: Shape[], classId: number): boolean {
@@ -47,15 +47,16 @@ export function clipShapesToOthers(
     const other = otherMaskFor(shape.classId);
     const mine = rasterizeShapes([shape], gw, gh, scale);
     for (let i = 0; i < mine.length; i++) if (other[i]) mine[i] = 0; // mine AND NOT other
-    const polys = maskToPolygons(mine, gw, gh, { minRegion: 4, scale });
+    const polys = maskToPolygonsWithHoles(mine, gw, gh, { minRegion: 4, scale });
     for (let k = 0; k < polys.length; k++) {
-      if (polys[k].length >= 6) {
+      if (polys[k].points.length >= 6) {
         out.push({
           // Reuse the id when the shape maps to a single polygon; fresh ids on split.
           id: k === 0 ? shape.id : uuidv4(),
           classId: shape.classId,
           kind: 'polygon',
-          points: polys[k],
+          points: polys[k].points,
+          ...(polys[k].holes.length ? { holes: polys[k].holes } : {}),
         });
       }
     }
