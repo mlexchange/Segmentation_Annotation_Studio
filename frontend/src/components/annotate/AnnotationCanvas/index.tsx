@@ -31,7 +31,7 @@ import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type 
 import { useSam } from '@/hooks/useSam';
 import { renderAdjusted } from '@/lib/sam/adjust';
 import { LevelsFilter } from '@/lib/levelsFilter';
-import { gridFor, rasterizeShapes } from '@/lib/rasterize';
+import { gridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
 import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
 import { useClipboardStore } from '@/stores/clipboardStore';
@@ -62,6 +62,17 @@ interface AnnotationCanvasProps {
 }
 
 // ---- Point-in-shape hit testing (used by the eraser to pick a target) ----
+
+/** Build an even-odd path (outer + hole rings) on a Konva context. */
+function buildRingsPath(ctx: Konva.Context, rings: number[][]): void {
+  ctx.beginPath();
+  for (const r of rings) {
+    if (r.length < 6) continue;
+    ctx.moveTo(r[0], r[1]);
+    for (let i = 2; i < r.length; i += 2) ctx.lineTo(r[i], r[i + 1]);
+    ctx.closePath();
+  }
+}
 
 /** Translate a shape by (dx,dy) in image coords (used for paste offset). */
 function offsetShape(shape: Shape, dx: number, dy: number): Shape {
@@ -761,7 +772,7 @@ export default function AnnotationCanvas({
         const { gw, gh, scale } = gridFor(meta.width, meta.height);
         const prospective = { ...brush, strokes: [...brush.strokes, { points: finalPoints, radius, mode: 'paint' as const }] };
         const mine = rasterizeShapes([prospective], gw, gh, scale);
-        const otherMask = rasterizeShapes(others, gw, gh, scale);
+        const otherMask = rasterizeUnion(others, gw, gh, scale);
         let overlap = false;
         for (let i = 0; i < mine.length; i++) { if (mine[i] && otherMask[i]) { overlap = true; break; } }
         if (overlap) {
@@ -1183,18 +1194,15 @@ export default function AnnotationCanvas({
     <KonvaShape
       stroke={color}
       strokeWidth={strokeW}
+      // width/height give the shape a real self-rect so the CACHED committed layer
+      // sizes its cache canvas to include it (otherwise it's clipped away when the
+      // only other in-bounds shape — the enclosed class — is hidden).
+      width={meta?.width ?? 0}
+      height={meta?.height ?? 0}
       perfectDrawEnabled={false}
       listening={false}
       sceneFunc={(ctx: Konva.Context, node: Konva.Shape) => {
-        const drawRing = (r: number[]) => {
-          if (r.length < 6) return;
-          ctx.moveTo(r[0], r[1]);
-          for (let i = 2; i < r.length; i += 2) ctx.lineTo(r[i], r[i + 1]);
-          ctx.closePath();
-        };
-        ctx.beginPath();
-        drawRing(points);
-        for (const h of holes) drawRing(h);
+        buildRingsPath(ctx, [points, ...holes]);
         const raw = (ctx as unknown as { _context: CanvasRenderingContext2D })._context;
         raw.fillStyle = color;
         raw.fill('evenodd');
@@ -1332,6 +1340,8 @@ export default function AnnotationCanvas({
 
     if (shape.kind === 'polygon') {
       const livePoints = editPoly?.id === shape.id ? editPoly.points : shape.points;
+      const holes = shape.holes ?? [];
+      const hasHoles = holes.length > 0;
       return (
         <Group
           key={shape.id}
@@ -1345,21 +1355,38 @@ export default function AnnotationCanvas({
             const dy = e.target.y();
             e.target.position({ x: 0, y: 0 });
             if (dx === 0 && dy === 0) return;
+            const shift = (r: number[]) => r.map((v, i) => (i % 2 === 0 ? v + dx : v + dy));
             updateShape(sourceKey, currentSlice, shape.id, (s) =>
               s.kind === 'polygon'
-                ? { ...s, points: s.points.map((v, i) => (i % 2 === 0 ? v + dx : v + dy)) }
+                ? { ...s, points: shift(s.points), holes: s.holes?.map(shift) }
                 : s,
             );
           }}
         >
-          <Line
-            points={livePoints}
-            closed
-            fill={hitFill}
-            stroke={outline}
-            strokeWidth={sw}
-            dash={dash}
-          />
+          {hasHoles ? (
+            // Even-odd hit so the hole is click-through (the enclosed class stays
+            // selectable) and the outline traces both the outer ring and holes.
+            <KonvaShape
+              stroke={outline}
+              strokeWidth={sw}
+              dash={dash}
+              sceneFunc={(ctx: Konva.Context, node: Konva.Shape) => {
+                buildRingsPath(ctx, [livePoints, ...holes]);
+                const raw = (ctx as unknown as { _context: CanvasRenderingContext2D })._context;
+                raw.fillStyle = 'rgba(0,0,0,0.001)';
+                raw.fill('evenodd');
+                ctx.strokeShape(node);
+              }}
+              hitFunc={(ctx: Konva.Context, node: Konva.Shape) => {
+                buildRingsPath(ctx, [livePoints, ...holes]);
+                const raw = (ctx as unknown as { _context: CanvasRenderingContext2D })._context;
+                raw.fillStyle = (node as unknown as { colorKey: string }).colorKey;
+                raw.fill('evenodd');
+              }}
+            />
+          ) : (
+            <Line points={livePoints} closed fill={hitFill} stroke={outline} strokeWidth={sw} dash={dash} />
+          )}
           {single &&
             Array.from({ length: livePoints.length / 2 }, (_, vi) => (
               <Circle
@@ -1389,6 +1416,32 @@ export default function AnnotationCanvas({
                 }}
               />
             ))}
+          {/* Hole (inner-ring) vertices — amber to distinguish from the outer ring. */}
+          {single && holes.map((ring, hi) =>
+            Array.from({ length: ring.length / 2 }, (_, vi) => (
+              <Circle
+                key={`h${hi}-${vi}`}
+                x={ring[vi * 2]}
+                y={ring[vi * 2 + 1]}
+                radius={5 / transform.scaleX}
+                fill="#fbbf24"
+                stroke="#1e293b"
+                strokeWidth={1 / transform.scaleX}
+                draggable
+                onClick={(e) => { e.cancelBubble = true; }}
+                onDragEnd={(e) => {
+                  const nx = e.target.x(), ny = e.target.y();
+                  updateShape(sourceKey, currentSlice, shape.id, (s) => {
+                    if (s.kind !== 'polygon' || !s.holes) return s;
+                    const hc = s.holes.map((r) => r.slice());
+                    hc[hi][vi * 2] = nx;
+                    hc[hi][vi * 2 + 1] = ny;
+                    return { ...s, holes: hc };
+                  });
+                }}
+              />
+            )),
+          )}
         </Group>
       );
     }

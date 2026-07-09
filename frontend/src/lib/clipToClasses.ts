@@ -10,7 +10,7 @@
  */
 import { v4 as uuidv4 } from 'uuid';
 import type { PolygonShape, Shape } from '@/stores/annotationStore';
-import { gridFor, rasterizeShapes } from '@/lib/rasterize';
+import { gridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
 import { maskToPolygonsWithHoles } from '@/lib/magicwand';
 
 /** Does the slice hold any shape of a different class than `classId`? */
@@ -20,8 +20,11 @@ export function hasOtherClass(sliceShapes: Shape[], classId: number): boolean {
 
 /**
  * Clip `newShapes` against every same-slice shape of a *different* class,
- * returning replacement polygon shapes (image coords). Shapes with no remaining
- * area are dropped. Non-overlapping shapes still round-trip to a polygon.
+ * returning replacement polygon shapes (image coords). Fragments left with no
+ * new area — fully inside another class (subtracted away) OR entirely redundant
+ * with the same class's existing labels (e.g. a spurious little SAM blob on top
+ * of an already-labeled region) — are dropped. Fragments that add any new area
+ * are kept whole (so legitimate extensions/merges are preserved).
  */
 export function clipShapesToOthers(
   newShapes: Shape[],
@@ -32,21 +35,40 @@ export function clipShapesToOthers(
   const { gw, gh, scale } = gridFor(width, height);
   const out: PolygonShape[] = [];
 
-  // Cache the other-class mask per classId (usually one active class → one mask).
+  // Cached per classId: other = union of DIFFERENT-class shapes (subtracted);
+  // same = union of SAME-class shapes (used to drop fully-redundant fragments).
   const otherMaskByClass = new Map<number, Uint8Array>();
+  const sameMaskByClass = new Map<number, Uint8Array>();
   const otherMaskFor = (classId: number): Uint8Array => {
     let m = otherMaskByClass.get(classId);
     if (!m) {
-      m = rasterizeShapes(sliceShapes.filter((s) => s.classId !== classId), gw, gh, scale);
+      m = rasterizeUnion(sliceShapes.filter((s) => s.classId !== classId), gw, gh, scale);
       otherMaskByClass.set(classId, m);
+    }
+    return m;
+  };
+  const sameMaskFor = (classId: number): Uint8Array => {
+    let m = sameMaskByClass.get(classId);
+    if (!m) {
+      m = rasterizeUnion(sliceShapes.filter((s) => s.classId === classId), gw, gh, scale);
+      sameMaskByClass.set(classId, m);
     }
     return m;
   };
 
   for (const shape of newShapes) {
     const other = otherMaskFor(shape.classId);
+    const same = sameMaskFor(shape.classId);
     const mine = rasterizeShapes([shape], gw, gh, scale);
-    for (let i = 0; i < mine.length; i++) if (other[i]) mine[i] = 0; // mine AND NOT other
+    // Subtract other classes; track whether any surviving pixel adds NEW area
+    // (outside both other and same-class existing labels).
+    let hasNew = false;
+    for (let i = 0; i < mine.length; i++) {
+      if (other[i]) { mine[i] = 0; continue; } // mine AND NOT other
+      if (mine[i] && !same[i]) hasNew = true;
+    }
+    // Fully covered by existing labels (other or same) → redundant fragment, drop.
+    if (!hasNew) continue;
     const polys = maskToPolygonsWithHoles(mine, gw, gh, { minRegion: 4, scale });
     for (let k = 0; k < polys.length; k++) {
       if (polys[k].points.length >= 6) {

@@ -54,6 +54,22 @@ export function rasterizeShapes(shapes: Shape[], gw: number, gh: number, scale =
   return mask;
 }
 
+/**
+ * Union of independently-rasterized shapes. Unlike `rasterizeShapes([...])`
+ * (which fills all shapes onto one mask in order, so a later shape's holes/erase
+ * carve-outs can cut through an earlier shape's fill), each shape is rasterized
+ * on its own and OR-ed in — so carve-outs stay scoped to their own shape. Use
+ * this whenever combining DIFFERENT shapes (e.g. a class's region mask).
+ */
+export function rasterizeUnion(shapes: Shape[], gw: number, gh: number, scale = 1): Uint8Array {
+  const mask = new Uint8Array(gw * gh);
+  for (const shape of shapes) {
+    const m = rasterizeShapes([shape], gw, gh, scale);
+    for (let i = 0; i < m.length; i++) if (m[i]) mask[i] = 1;
+  }
+  return mask;
+}
+
 // ---------------------------------------------------------------------------
 // Primitives (grid coords unless noted; `scale` converts image → grid)
 // ---------------------------------------------------------------------------

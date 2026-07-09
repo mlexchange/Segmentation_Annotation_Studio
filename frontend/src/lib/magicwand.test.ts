@@ -148,6 +148,19 @@ describe('maskToPolygonsWithHoles', () => {
     expect(out[0].points.length).toBeGreaterThanOrEqual(6);
   });
 
+  it('attaches the hole even when the outer region is concave (magic-like)', () => {
+    // A "C"/notched block (concave outer) with an enclosed square hole. The hole's
+    // centroid can fall in the notch (outside the outer), so this exercises the
+    // single-region direct-assign path rather than the centroid test.
+    const m = new Uint8Array(W * H);
+    for (let y = 8; y < 52; y++) for (let x = 8; x < 52; x++) m[y * W + x] = 1; // block
+    for (let y = 8; y < 30; y++) for (let x = 40; x < 52; x++) m[y * W + x] = 0; // notch (concavity)
+    for (let y = 34; y < 46; y++) for (let x = 16; x < 28; x++) m[y * W + x] = 0; // enclosed hole
+    const out = maskToPolygonsWithHoles(m, W, H, { minRegion: 8 });
+    expect(out.length).toBe(1);
+    expect(out[0].holes.length).toBe(1);
+  });
+
   it('returns no holes for a solid region', () => {
     const m = new Uint8Array(W * H);
     for (let y = 10; y < 50; y++) for (let x = 10; x < 50; x++) m[y * W + x] = 1;

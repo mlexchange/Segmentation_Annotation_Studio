@@ -350,15 +350,41 @@ export function maskToPolygonsWithHoles(
 
   const holeRings = maskToPolygons(holeMask, gw, gh, opts);
   for (const ring of holeRings) {
-    // Centroid of the ring as a containment probe.
-    let cx = 0, cy = 0;
-    const n = ring.length / 2;
-    for (let i = 0; i < ring.length; i += 2) { cx += ring[i]; cy += ring[i + 1]; }
-    cx /= n; cy /= n;
-    const owner = result.find((r) => pointInPolygonFlat(cx, cy, r.points));
+    // Single region (the common clip case): the hole is by construction inside
+    // the only outer, so assign directly — a centroid test can misfire on a
+    // concave outer (e.g. an irregular SAM/magic outline) and wrongly drop it.
+    let owner = result.length === 1 ? result[0] : undefined;
+    if (!owner) {
+      let cx = 0, cy = 0;
+      const n = ring.length / 2;
+      for (let i = 0; i < ring.length; i += 2) { cx += ring[i]; cy += ring[i + 1]; }
+      cx /= n; cy /= n;
+      owner = result.find((r) => pointInPolygonFlat(cx, cy, r.points))
+        // Fallback for concave outers: the outer whose bbox contains the ring.
+        ?? result.find((r) => bboxContainsRing(r.points, ring));
+    }
     if (owner) owner.holes.push(ring);
   }
   return result;
+}
+
+/** True if `outer`'s bounding box fully contains `ring`'s bounding box. */
+function bboxContainsRing(outer: number[], ring: number[]): boolean {
+  let ox0 = Infinity, oy0 = Infinity, ox1 = -Infinity, oy1 = -Infinity;
+  for (let i = 0; i < outer.length; i += 2) {
+    if (outer[i] < ox0) ox0 = outer[i];
+    if (outer[i] > ox1) ox1 = outer[i];
+    if (outer[i + 1] < oy0) oy0 = outer[i + 1];
+    if (outer[i + 1] > oy1) oy1 = outer[i + 1];
+  }
+  let rx0 = Infinity, ry0 = Infinity, rx1 = -Infinity, ry1 = -Infinity;
+  for (let i = 0; i < ring.length; i += 2) {
+    if (ring[i] < rx0) rx0 = ring[i];
+    if (ring[i] > rx1) rx1 = ring[i];
+    if (ring[i + 1] < ry0) ry0 = ring[i + 1];
+    if (ring[i + 1] > ry1) ry1 = ring[i + 1];
+  }
+  return rx0 >= ox0 && ry0 >= oy0 && rx1 <= ox1 && ry1 <= oy1;
 }
 
 /**
