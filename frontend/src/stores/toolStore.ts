@@ -3,7 +3,7 @@
  */
 import { create } from 'zustand';
 
-export type Tool = 'pan' | 'select' | 'polygon' | 'magnetic' | 'magic' | 'rectangle' | 'ellipse' | 'brush' | 'eraser';
+export type Tool = 'pan' | 'select' | 'polygon' | 'magnetic' | 'magic' | 'rectangle' | 'ellipse' | 'brush' | 'fill' | 'eraser';
 
 export type MagicMode = 'contiguous' | 'global';
 /** Magic-selection engine: SAM (learned object prior) or the classic wand. */
@@ -15,6 +15,8 @@ export interface ToolState {
   tool: Tool;
   brushSize: number;
   fillOpacity: number;
+  /** Fill (paint-bucket) similarity threshold (0–1): higher fills more. */
+  fillThreshold: number;
   /** Selected shape ids (multi-select via marquee/shift-click). */
   selectedShapeIds: string[];
   /** Magic-wand: similarity tolerance (0–1) and selection mode + denoise. */
@@ -40,6 +42,7 @@ export interface ToolState {
   setTool: (tool: Tool) => void;
   setBrushSize: (size: number) => void;
   setFillOpacity: (opacity: number) => void;
+  setFillThreshold: (t: number) => void;
   /** Convenience single-select (clears to [] when null). */
   setSelectedShapeId: (id: string | null) => void;
   setSelectedShapeIds: (ids: string[]) => void;
@@ -59,6 +62,7 @@ export const useToolStore = create<ToolState>((set) => ({
   tool: 'pan',
   brushSize: 10,
   fillOpacity: 0.5,
+  fillThreshold: 0.1,
   selectedShapeIds: [],
   magicTolerance: 0.08,
   magicMode: 'contiguous',
@@ -76,6 +80,8 @@ export const useToolStore = create<ToolState>((set) => ({
   setBrushSize: (brushSize) => set({ brushSize }),
   /** Sets the shape fill opacity (0–1). */
   setFillOpacity: (fillOpacity) => set({ fillOpacity }),
+  /** Sets the Fill (paint-bucket) similarity threshold (0–1). */
+  setFillThreshold: (fillThreshold) => set({ fillThreshold }),
   /** Single-selects a shape, or clears the selection when null. */
   setSelectedShapeId: (id) => set({ selectedShapeIds: id ? [id] : [] }),
   /** Replaces the multi-selection with the given shape ids. */

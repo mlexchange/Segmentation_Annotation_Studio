@@ -73,7 +73,7 @@ export function gradientField(gray: Float32Array, gw: number, gh: number): Float
  * 1600 keeps a 2560px slice at half-resolution (scale 2) — plenty of detail for
  * the edge-aware flood while keeping the per-click work ~4x cheaper than full res. */
 export function buildField(
-  image: HTMLImageElement,
+  image: CanvasImageSource,
   imgW: number,
   imgH: number,
   maxDim = 1600,

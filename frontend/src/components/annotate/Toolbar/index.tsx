@@ -1,9 +1,9 @@
 /**
  * Toolbar — tool selector (radiogroup), brush size, opacity, undo/redo.
- * Keybinds: a=polygon, w=ellipse, e=rectangle, q=eraser, b=brush, s=select,
- *           Space=pan (hold), x=next slice, f=fit to screen, z=undo
+ * Keybinds: p=polygon, l=ellipse, e=rectangle, r=eraser, b=brush, f=fill, s=select,
+ *           g=magic, m=magnetic, Space=pan (hold), x=next slice, t=fit to screen, Ctrl/Cmd+Z=undo
  */
-import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
+import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, PaintBrush, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
 import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
@@ -28,6 +28,19 @@ interface ToolButtonProps {
 /** Renders one tool as a radio button showing its icon, label, and keybind badge. */
 function ToolButton({ tool, label, icon, keybind, activeTool, disabled, onSelect }: ToolButtonProps) {
   const isActive = tool === activeTool && !disabled;
+  // Underline the hotkey letter within the label (first case-insensitive match).
+  const renderLabel = () => {
+    if (!keybind || keybind.length !== 1) return label;
+    const idx = label.toLowerCase().indexOf(keybind.toLowerCase());
+    if (idx < 0) return label;
+    return (
+      <>
+        {label.slice(0, idx)}
+        <span className="underline underline-offset-2">{label[idx]}</span>
+        {label.slice(idx + 1)}
+      </>
+    );
+  };
   return (
     <button
       role="radio"
@@ -47,7 +60,7 @@ function ToolButton({ tool, label, icon, keybind, activeTool, disabled, onSelect
       )}
     >
       {icon}
-      <span className="leading-tight">{label}</span>
+      <span className="leading-tight">{renderLabel()}</span>
       {keybind && (
         <span
           className={cn(
@@ -70,7 +83,7 @@ interface ToolbarProps {
 /** Renders the tool radiogroup, undo/redo, and the active tool's parameter controls. */
 export default function Toolbar({ disabled = false }: ToolbarProps) {
   const {
-    tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity,
+    tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity, fillThreshold, setFillThreshold,
     magicTolerance, setMagicTolerance, magicMode, setMagicMode, magicSigma, setMagicSigma,
     magicEdgeStop, setMagicEdgeStop, magicEngine, setMagicEngine,
     samDetail, setSamDetail, samThreshold, setSamThreshold,
@@ -85,13 +98,14 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
   const tools: Array<{ tool: Tool; label: string; icon: React.ReactNode; keybind: string }> = [
     { tool: 'pan',       label: 'Pan',     icon: <Hand size={18} />,        keybind: 'space' },
     { tool: 'select',    label: 'Select',  icon: <Cursor size={18} />,      keybind: 's' },
-    { tool: 'polygon',   label: 'Polygon', icon: <Polygon size={18} />,     keybind: 'a' },
+    { tool: 'polygon',   label: 'Polygon', icon: <Polygon size={18} />,     keybind: 'p' },
     { tool: 'magnetic',  label: 'Magnetic',icon: <MagnetStraight size={18} />, keybind: 'm' },
     { tool: 'magic',     label: 'Magic',   icon: <MagicWand size={18} />,   keybind: 'g' },
     { tool: 'rectangle', label: 'Rect',    icon: <Rectangle size={18} />,   keybind: 'e' },
-    { tool: 'ellipse',   label: 'Ellipse', icon: <Circle size={18} />,      keybind: 'w' },
-    { tool: 'brush',     label: 'Brush',   icon: <PaintBucket size={18} />, keybind: 'b' },
-    { tool: 'eraser',    label: 'Eraser',  icon: <Eraser size={18} />,      keybind: 'q' },
+    { tool: 'ellipse',   label: 'Ellipse', icon: <Circle size={18} />,      keybind: 'l' },
+    { tool: 'brush',     label: 'Brush',   icon: <PaintBrush size={18} />,  keybind: 'b' },
+    { tool: 'fill',      label: 'Fill',    icon: <PaintBucket size={18} />, keybind: 'f' },
+    { tool: 'eraser',    label: 'Eraser',  icon: <Eraser size={18} />,      keybind: 'r' },
   ];
 
   return (
@@ -102,7 +116,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
           type="button"
           onClick={() => undo()}
           disabled={!canUndo}
-          title="Undo (Z or Ctrl+Z)"
+          title="Undo (Ctrl/⌘+Z)"
           aria-label="Undo"
           className={cn(
             'flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border transition-colors',
@@ -154,8 +168,8 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
       <div className="text-[10px] leading-relaxed text-gray-400">
         <span className="font-mono font-semibold text-gray-500">Space</span> pan (hold) ·{' '}
         <span className="font-mono font-semibold text-gray-500">X</span> next slice ·{' '}
-        <span className="font-mono font-semibold text-gray-500">F</span> fit ·{' '}
-        <span className="font-mono font-semibold text-gray-500">Z</span> undo
+        <span className="font-mono font-semibold text-gray-500">T</span> fit ·{' '}
+        <span className="font-mono font-semibold text-gray-500">⌘/Ctrl+Z</span> undo
       </div>
 
       {(tool === 'brush' || tool === 'eraser') && (
@@ -171,6 +185,25 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
             onChange={(e) => setBrushSize(Number(e.target.value))}
             className="w-full"
           />
+        </div>
+      )}
+
+      {tool === 'fill' && (
+        <div className="flex flex-col gap-1 mt-1">
+          <label className="text-xs text-gray-500">
+            Fill threshold: {Math.round(fillThreshold * 100)}%
+          </label>
+          <input
+            type="range"
+            min={1}
+            max={100}
+            value={Math.round(fillThreshold * 100)}
+            onChange={(e) => setFillThreshold(Number(e.target.value) / 100)}
+            className="w-full"
+          />
+          <p className="text-[10px] text-gray-400 leading-snug">
+            Click a region to flood-fill pixels within this intensity threshold of the clicked point.
+          </p>
         </div>
       )}
 

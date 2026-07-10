@@ -319,6 +319,7 @@ export default function AnnotationCanvas({
   const samAvoidLabeled = useToolStore((s) => s.samAvoidLabeled);
   const fitRequestId = useToolStore((s) => s.fitRequestId);
   const clipToOtherClasses = useToolStore((s) => s.clipToOtherClasses);
+  const fillThreshold = useToolStore((s) => s.fillThreshold);
   const { classes } = useClassStore();
 
   const [stageSize, setStageSize] = useState({ width: 800, height: 600 });
@@ -390,12 +391,12 @@ export default function AnnotationCanvas({
   // slice greatly helps), so the encode is keyed on those — adjusting them
   // re-encodes. Building the source is deferred so it only runs on a real encode.
   const samEncodeKey = imageEl && meta
-    ? `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}`
+    ? `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}`
     : null;
-  /** Lazily render the brightness/contrast-adjusted slice that SAM encodes. */
+  /** Lazily render the display-adjusted slice (brightness/contrast/levels) that SAM encodes. */
   const makeSamSource = useCallback(
-    () => renderAdjusted(imageEl!, meta!.width, meta!.height, brightness, contrast),
-    [imageEl, meta, brightness, contrast],
+    () => renderAdjusted(imageEl!, meta!.width, meta!.height, brightness, contrast, levelsLo, levelsHi),
+    [imageEl, meta, brightness, contrast, levelsLo, levelsHi],
   );
 
   // Proactively encode the slice when SAM is active so the first click is fast.
@@ -574,17 +575,21 @@ export default function AnnotationCanvas({
     magicDragStartRef.current = null;
   }, []);
 
-  // Build (and cache, per rendered image) the grayscale field used by the wand.
+  // Build (and cache) the grayscale field used by the wand + Fill. Built from the
+  // DISPLAY-adjusted image (brightness/contrast/levels) so these tools operate on
+  // what the user sees, exactly like SAM. Cache key includes the display settings.
   const magicFieldRef = useRef<GrayField | null>(null);
-  const magicFieldForRef = useRef<HTMLImageElement | null>(null);
+  const magicFieldForRef = useRef<string | null>(null);
   const ensureMagicField = useCallback((): GrayField | null => {
     if (!imageEl || !meta) return null;
-    if (magicFieldRef.current && magicFieldForRef.current === imageEl) return magicFieldRef.current;
-    const f = buildField(imageEl, meta.width, meta.height);
+    const key = `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}`;
+    if (magicFieldRef.current && magicFieldForRef.current === key) return magicFieldRef.current;
+    const src = renderAdjusted(imageEl, meta.width, meta.height, brightness, contrast, levelsLo, levelsHi);
+    const f = buildField(src, meta.width, meta.height);
     magicFieldRef.current = f;
-    magicFieldForRef.current = imageEl;
+    magicFieldForRef.current = key;
     return f;
-  }, [imageEl, meta]);
+  }, [imageEl, meta, sourceKey, currentSlice, brightness, contrast, levelsLo, levelsHi]);
 
   // Auto negative ("not") prompts for SAM: interior points of nearby other-class
   // regions, so a new selection won't bleed into already-labeled areas. Anchored
@@ -624,7 +629,7 @@ export default function AnnotationCanvas({
   // mask → polygons. Classic engine: client-side flood/threshold via magicSelect.
   // Magic sliders already debounce their store commits (DebouncedSlider).
   useEffect(() => {
-    if (magicEngine === 'sam') {
+    if (tool === 'magic' && magicEngine === 'sam') {
       if ((magicSeeds.length === 0 && !magicBox) || !imageEl || !meta) { setMagicPreview([]); return; }
       let cancelled = false;
       setMagicLoading(true);
@@ -665,7 +670,9 @@ export default function AnnotationCanvas({
     }
 
     if (magicSeeds.length === 0) { setMagicPreview([]); return; }
-    // Classic wand — synchronous, coalesced to one run per frame.
+    // Classic flood — serves both the classic magic wand and the Fill tool
+    // (Fill = contiguous flood by `fillThreshold`). Synchronous, one run per frame.
+    const isFill = tool === 'fill';
     const field = ensureMagicField();
     if (!field) { setMagicPreview([]); return; }
     setMagicLoading(true);
@@ -674,10 +681,10 @@ export default function AnnotationCanvas({
       for (const seed of magicSeeds) {
         polys.push(
           ...magicSelect(field, seed.x, seed.y, {
-            toleranceFrac: magicTolerance,
-            mode: magicMode,
-            smooth: magicSigma,
-            edgeStop: magicEdgeStop,
+            toleranceFrac: isFill ? fillThreshold : magicTolerance,
+            mode: isFill ? 'contiguous' : magicMode,
+            smooth: isFill ? 1 : magicSigma,
+            edgeStop: isFill ? 0 : magicEdgeStop,
           }),
         );
       }
@@ -685,7 +692,7 @@ export default function AnnotationCanvas({
       setMagicLoading(false);
     });
     return () => cancelAnimationFrame(id);
-  }, [tool, magicSeeds, magicBox, autoNegPoints, samDetail, samThreshold, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tool, magicSeeds, magicBox, autoNegPoints, samDetail, samThreshold, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, fillThreshold, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Commit the magic preview polygons as new shapes (one batched undo step). */
   const commitMagic = useCallback(() => {
@@ -732,7 +739,7 @@ export default function AnnotationCanvas({
         setMarqueeRect(null);
         resetMagnetic();
         resetMagic();
-      } else if (e.key === 'Enter' && tool === 'magic' && !magicLoading && magicPreview.length > 0) {
+      } else if (e.key === 'Enter' && (tool === 'magic' || tool === 'fill') && !magicLoading && magicPreview.length > 0) {
         e.preventDefault();
         commitMagic();
       }
@@ -867,6 +874,26 @@ export default function AnnotationCanvas({
       magneticSeedRef.current = pos;
       magneticPrevRef.current = cm ? dijkstra(cm, imageToGrid(cm, pos.x, pos.y)) : null;
       setMagneticPreview([]);
+    } else if (tool === 'fill') {
+      // Paint bucket: a plain click seeds a single contiguous flood (within
+      // `fillThreshold`); Shift-click adds another region; Alt-click removes the
+      // nearest seed. The region(s) preview, then Add/Enter commits (clip-aware).
+      if (e.evt.altKey) {
+        setMagicSeeds((prev) => {
+          if (prev.length === 0) return prev;
+          let bestI = 0, bestD = Infinity;
+          prev.forEach((s, i) => {
+            const d = (s.x - pos.x) ** 2 + (s.y - pos.y) ** 2;
+            if (d < bestD) { bestD = d; bestI = i; }
+          });
+          return prev.filter((_, i) => i !== bestI);
+        });
+      } else if (e.evt.shiftKey) {
+        setMagicSeeds((prev) => [...prev, { x: pos.x, y: pos.y, label: 1 }]);
+      } else {
+        // Plain click replaces the current selection with this single region.
+        setMagicSeeds([{ x: pos.x, y: pos.y, label: 1 }]);
+      }
     } else if (tool === 'rectangle' || tool === 'ellipse') {
       setDragStart(pos);
       setDragCurrent(pos);
@@ -1691,7 +1718,7 @@ export default function AnnotationCanvas({
     <div
       ref={containerRef}
       className="relative w-full h-full bg-gray-900 overflow-hidden"
-      style={{ cursor: showBrushCursor ? 'none' : (tool === 'magnetic' || tool === 'magic') ? 'crosshair' : undefined }}
+      style={{ cursor: showBrushCursor ? 'none' : (tool === 'magnetic' || tool === 'magic' || tool === 'fill') ? 'crosshair' : undefined }}
     >
       <Stage
         ref={stageRef}
@@ -1848,7 +1875,7 @@ export default function AnnotationCanvas({
           })()}
 
           {/* Magic-wand preview regions (kept visible while panning). */}
-          {(tool === 'magic' || tool === 'pan') &&
+          {(tool === 'magic' || tool === 'fill' || tool === 'pan') &&
             magicPreview.map((pts, i) => (
               <Line
                 key={`magic-${i}`}
@@ -1864,7 +1891,7 @@ export default function AnnotationCanvas({
             ))}
           {/* Markers for each accumulated magic prompt: white dot = positive
               (include), red ring = negative (exclude, SAM only). */}
-          {(tool === 'magic' || tool === 'pan') &&
+          {(tool === 'magic' || tool === 'fill' || tool === 'pan') &&
             magicSeeds.map((s, i) => (
               <Circle
                 key={`magic-seed-${i}`}
@@ -2094,6 +2121,49 @@ export default function AnnotationCanvas({
               onClick={() => setMagicSeeds((prev) => prev.slice(0, -1))}
               className="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 text-white font-medium"
               title="Remove the last clicked region"
+            >
+              Undo last
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={resetMagic}
+            className="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 text-white font-medium"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* Fill: hint before a click, Add/Cancel panel after (preview + confirm). */}
+      {tool === 'fill' && !isPreviewing && magicSeeds.length === 0 && (
+        <div className="absolute top-2 left-2 bg-slate-800/85 text-slate-200 text-xs px-3 py-1.5 rounded-md pointer-events-none">
+          {`Click a region to flood-fill it · Shift-click adds more · ${REMOVE_KEY_LABEL}-click removes one`}
+        </div>
+      )}
+      {tool === 'fill' && !isPreviewing && magicSeeds.length > 0 && (
+        <div className="absolute top-2 left-2 flex items-center gap-2 bg-slate-800/90 text-slate-100 text-xs px-3 py-1.5 rounded-md shadow-lg">
+          <span className="text-slate-300">
+            {magicLoading
+              ? 'Filling…'
+              : magicPreview.length > 0
+                ? `${magicPreview.length} region${magicPreview.length === 1 ? '' : 's'} · Shift-click adds · ${REMOVE_KEY_LABEL}-click removes`
+                : 'No match — raise the fill threshold'}
+          </span>
+          <button
+            type="button"
+            onClick={commitMagic}
+            disabled={magicLoading || magicPreview.length === 0}
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-medium"
+          >
+            Add
+          </button>
+          {magicSeeds.length > 1 && (
+            <button
+              type="button"
+              onClick={() => setMagicSeeds((prev) => prev.slice(0, -1))}
+              className="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 text-white font-medium"
+              title="Remove the last added region"
             >
               Undo last
             </button>
