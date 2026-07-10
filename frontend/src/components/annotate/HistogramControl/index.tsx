@@ -1,9 +1,10 @@
 /**
- * HistogramControl — a compact intensity histogram (2D plot) with a min/max
- * window that drives a client-side levels remap of the displayed image (no
- * refetch). The shaded band shows the current [lo,hi] window; two sliders set it.
+ * HistogramControl — a compact intensity histogram (2D plot) with a single
+ * dual-knob range slider laid over the plot: drag the left/right handles (or the
+ * band between them) to set the min/max window that drives a client-side levels
+ * remap of the displayed image (no refetch). Knobs align with the 256-bin plot.
  */
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import { ArrowCounterClockwise } from '@phosphor-icons/react';
 
 export interface HistogramControlProps {
@@ -17,8 +18,13 @@ export interface HistogramControlProps {
 
 const VBW = 256;
 const VBH = 60;
+const MAXV = 255;
 
 export default function HistogramControl({ bins, lo, hi, onChange, onReset }: HistogramControlProps) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  // Active drag target + the window state captured at press (for band drags).
+  const drag = useRef<{ target: 'lo' | 'hi' | 'band'; startV: number; startLo: number; startHi: number } | null>(null);
+
   // Log-scaled bar heights so sparse bright tails stay visible.
   const path = useMemo(() => {
     if (!bins || bins.length === 0) return '';
@@ -32,12 +38,79 @@ export default function HistogramControl({ bins, lo, hi, onChange, onReset }: Hi
   }, [bins]);
 
   const clampLo = (v: number) => Math.max(0, Math.min(v, hi - 1));
-  const clampHi = (v: number) => Math.min(255, Math.max(v, lo + 1));
+  const clampHi = (v: number) => Math.min(MAXV, Math.max(v, lo + 1));
+
+  /** Pointer clientX → intensity value (0–255) across the track width. */
+  const xToValue = (clientX: number): number => {
+    const el = trackRef.current;
+    if (!el) return lo;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return lo;
+    const t = (clientX - rect.left) / rect.width;
+    return Math.round(Math.max(0, Math.min(1, t)) * MAXV);
+  };
+
+  const applyDrag = (clientX: number) => {
+    if (!drag.current) return;
+    const v = xToValue(clientX);
+    if (drag.current.target === 'lo') {
+      onChange(clampLo(v), hi);
+    } else if (drag.current.target === 'hi') {
+      onChange(lo, clampHi(v));
+    } else {
+      // Band: translate the whole window, preserving its width.
+      const width = drag.current.startHi - drag.current.startLo;
+      let nlo = drag.current.startLo + (v - drag.current.startV);
+      nlo = Math.max(0, Math.min(nlo, MAXV - width));
+      onChange(nlo, nlo + width);
+    }
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    const v = xToValue(e.clientX);
+    const dLo = Math.abs(v - lo);
+    const dHi = Math.abs(v - hi);
+    // Inside the band and clearly away from both knobs → drag the window.
+    let target: 'lo' | 'hi' | 'band';
+    if (v > lo && v < hi && Math.min(dLo, dHi) > 6) target = 'band';
+    else target = dLo <= dHi ? 'lo' : 'hi';
+    drag.current = { target, startV: v, startLo: lo, startHi: hi };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    applyDrag(e.clientX);
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (drag.current) applyDrag(e.clientX);
+  };
+
+  const onPointerUp = (e: React.PointerEvent) => {
+    drag.current = null;
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* noop */ }
+  };
+
+  /** Keyboard nudge for a focused knob (±1, Shift ±10). */
+  const onKnobKey = (which: 'lo' | 'hi') => (e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 10 : 1;
+    let delta = 0;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') delta = -step;
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') delta = step;
+    else return;
+    e.preventDefault();
+    if (which === 'lo') onChange(clampLo(lo + delta), hi);
+    else onChange(lo, clampHi(hi + delta));
+  };
+
+  const pct = (v: number) => `${(v / MAXV) * 100}%`;
+  const knobCls =
+    'absolute top-0 h-full w-3 -translate-x-1/2 flex items-center justify-center cursor-ew-resize';
+  const knobGrip = 'w-1.5 h-5 rounded-sm bg-sky-600 border border-white shadow';
 
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between">
-        <span className="text-[11px] text-gray-500">Levels (min / max)</span>
+        <span className="text-[11px] text-gray-500">
+          Levels <span className="tabular-nums text-gray-400">{lo} – {hi}</span>
+        </span>
         <button
           aria-label="Reset levels"
           title="Reset levels"
@@ -48,37 +121,52 @@ export default function HistogramControl({ bins, lo, hi, onChange, onReset }: Hi
         </button>
       </div>
 
-      <svg
-        viewBox={`0 0 ${VBW} ${VBH}`}
-        preserveAspectRatio="none"
-        className="w-full h-12 rounded bg-gray-100 border border-gray-200"
+      {/* Track: histogram plot + dual-knob range slider overlaid on it. */}
+      <div
+        ref={trackRef}
+        className="relative w-full h-12 touch-none select-none"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
       >
-        {/* Selected window band */}
-        <rect x={lo} y={0} width={Math.max(0, hi - lo)} height={VBH} fill="#38bdf8" opacity={0.15} />
-        {/* Histogram bars */}
-        <path d={path} stroke="#64748b" strokeWidth={1} fill="none" vectorEffect="non-scaling-stroke" />
-        {/* Handle lines */}
-        <line x1={lo} y1={0} x2={lo} y2={VBH} stroke="#0284c7" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-        <line x1={hi} y1={0} x2={hi} y2={VBH} stroke="#0284c7" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-      </svg>
+        <svg
+          viewBox={`0 0 ${VBW} ${VBH}`}
+          preserveAspectRatio="none"
+          className="absolute inset-0 w-full h-full rounded bg-gray-100 border border-gray-200"
+        >
+          <rect x={lo} y={0} width={Math.max(0, hi - lo)} height={VBH} fill="#38bdf8" opacity={0.15} />
+          <path d={path} stroke="#64748b" strokeWidth={1} fill="none" vectorEffect="non-scaling-stroke" />
+          <line x1={lo} y1={0} x2={lo} y2={VBH} stroke="#0284c7" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+          <line x1={hi} y1={0} x2={hi} y2={VBH} stroke="#0284c7" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+        </svg>
 
-      <div className="flex items-center gap-2">
-        <input
-          type="range" min={0} max={255} step={1} value={lo}
-          onChange={(e) => onChange(clampLo(Number(e.target.value)), hi)}
-          className="flex-1 accent-sky-600"
+        {/* Knob grips (crisp HTML overlay, aligned to the plot by percentage). */}
+        <div
+          className={knobCls}
+          style={{ left: pct(lo) }}
+          role="slider"
+          tabIndex={0}
           aria-label="Levels minimum"
-        />
-        <span className="w-8 text-right text-[10px] tabular-nums text-gray-500">{lo}</span>
-      </div>
-      <div className="flex items-center gap-2">
-        <input
-          type="range" min={0} max={255} step={1} value={hi}
-          onChange={(e) => onChange(lo, clampHi(Number(e.target.value)))}
-          className="flex-1 accent-sky-600"
+          aria-valuemin={0}
+          aria-valuemax={MAXV}
+          aria-valuenow={lo}
+          onKeyDown={onKnobKey('lo')}
+        >
+          <span className={knobGrip} />
+        </div>
+        <div
+          className={knobCls}
+          style={{ left: pct(hi) }}
+          role="slider"
+          tabIndex={0}
           aria-label="Levels maximum"
-        />
-        <span className="w-8 text-right text-[10px] tabular-nums text-gray-500">{hi}</span>
+          aria-valuemin={0}
+          aria-valuemax={MAXV}
+          aria-valuenow={hi}
+          onKeyDown={onKnobKey('hi')}
+        >
+          <span className={knobGrip} />
+        </div>
       </div>
     </div>
   );
