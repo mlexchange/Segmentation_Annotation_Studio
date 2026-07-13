@@ -4,10 +4,11 @@
  * Deleting a class removes all of its annotations (with confirmation).
  */
 import { useState } from 'react';
-import { Eye, EyeSlash, Pencil, Trash, Plus } from '@phosphor-icons/react';
+import { Eye, EyeSlash, Pencil, Trash, Plus, Info } from '@phosphor-icons/react';
 import { useClassStore, DEFAULT_COLORS, type AnnotationClass } from '@/stores/classStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
+import { useReferenceGuideStore, type GuideClass } from '@/stores/referenceGuideStore';
 import { cn } from '@/lib/utils';
 
 /** Counts all shapes assigned to a class across every image/slice in the annotation store. */
@@ -27,15 +28,19 @@ interface ClassRowProps {
   isActive: boolean;
   onActivate: () => void;
   onClassDeleted: (deletedClassId: number) => void;
+  /** Matching guide entry (description + example crops), if the guide defines this class. */
+  guide?: GuideClass;
 }
 
 /** Renders a single class row with inline rename, visibility toggle, and delete. */
-function ClassRow({ cls, isActive, onActivate, onClassDeleted }: ClassRowProps) {
+function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRowProps) {
   const { updateClass, deleteClass, toggleVisibility } = useClassStore();
   const removeShapesByClassId = useAnnotationStore((s) => s.removeShapesByClassId);
   const setSelectedShapeId = useToolStore((s) => s.setSelectedShapeId);
   const [editing, setEditing] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
   const [labelInput, setLabelInput] = useState(cls.label);
+  const hasGuide = !!guide && (!!guide.description || guide.exampleCrops.length > 0);
 
   /** Saves the edited label (if non-empty) to the class store and exits edit mode. */
   const commitLabel = () => {
@@ -67,52 +72,82 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted }: ClassRowProps) 
   };
 
   return (
-    <div
-      className={cn(
-        'flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer select-none',
-        isActive ? 'bg-sky-100 dark:bg-sky-900' : 'hover:bg-gray-100 dark:hover:bg-gray-800'
-      )}
-      onClick={onActivate}
-    >
-      <span
-        className="w-4 h-4 rounded-sm flex-shrink-0 border border-black/10"
-        style={{ backgroundColor: cls.color }}
-      />
-      {editing ? (
-        <input
-          autoFocus
-          className="flex-1 text-sm border rounded px-1 py-0.5"
-          value={labelInput}
-          onChange={(e) => setLabelInput(e.target.value)}
-          onBlur={commitLabel}
-          onKeyDown={(e) => { if (e.key === 'Enter') commitLabel(); if (e.key === 'Escape') setEditing(false); }}
-          onClick={(e) => e.stopPropagation()}
+    <div>
+      <div
+        className={cn(
+          'flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer select-none',
+          isActive ? 'bg-sky-100 dark:bg-sky-900' : 'hover:bg-gray-100 dark:hover:bg-gray-800'
+        )}
+        onClick={onActivate}
+      >
+        <span
+          className="w-4 h-4 rounded-sm flex-shrink-0 border border-black/10"
+          style={{ backgroundColor: cls.color }}
         />
-      ) : (
-        <span className="flex-1 text-sm truncate">{cls.label}</span>
+        {editing ? (
+          <input
+            autoFocus
+            className="flex-1 text-sm border rounded px-1 py-0.5"
+            value={labelInput}
+            onChange={(e) => setLabelInput(e.target.value)}
+            onBlur={commitLabel}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitLabel(); if (e.key === 'Escape') setEditing(false); }}
+            onClick={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <span className="flex-1 text-sm truncate">{cls.label}</span>
+        )}
+        {hasGuide && (
+          <button
+            aria-label="Show annotation guide for this class"
+            aria-pressed={showGuide}
+            className={cn('p-0.5 hover:text-sky-600', showGuide && 'text-sky-600')}
+            onClick={(e) => { e.stopPropagation(); setShowGuide((v) => !v); }}
+          >
+            <Info size={14} />
+          </button>
+        )}
+        <button
+          aria-pressed={cls.isVisible}
+          aria-label={cls.isVisible ? 'Hide class' : 'Show class'}
+          className="p-0.5 hover:text-sky-600"
+          onClick={(e) => { e.stopPropagation(); toggleVisibility(cls.classId); }}
+        >
+          {cls.isVisible ? <Eye size={14} /> : <EyeSlash size={14} className="text-gray-400" />}
+        </button>
+        <button
+          aria-label="Edit class label"
+          className="p-0.5 hover:text-sky-600"
+          onClick={(e) => { e.stopPropagation(); setEditing(true); setLabelInput(cls.label); }}
+        >
+          <Pencil size={14} />
+        </button>
+        <button
+          aria-label="Delete class and its annotations"
+          className="p-0.5 hover:text-red-500"
+          onClick={handleDelete}
+        >
+          <Trash size={14} />
+        </button>
+      </div>
+
+      {hasGuide && showGuide && guide && (
+        <div className="mx-2 mt-1 mb-1 rounded-md border border-sky-100 bg-sky-50/60 p-2 text-xs text-gray-600">
+          {guide.description && <p className="whitespace-pre-wrap">{guide.description}</p>}
+          {guide.exampleCrops.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {guide.exampleCrops.map((src, i) => (
+                <img
+                  key={i}
+                  src={src}
+                  alt={`${cls.label} example ${i + 1}`}
+                  className="h-12 w-12 rounded border border-gray-200 object-cover"
+                />
+              ))}
+            </div>
+          )}
+        </div>
       )}
-      <button
-        aria-pressed={cls.isVisible}
-        aria-label={cls.isVisible ? 'Hide class' : 'Show class'}
-        className="p-0.5 hover:text-sky-600"
-        onClick={(e) => { e.stopPropagation(); toggleVisibility(cls.classId); }}
-      >
-        {cls.isVisible ? <Eye size={14} /> : <EyeSlash size={14} className="text-gray-400" />}
-      </button>
-      <button
-        aria-label="Edit class label"
-        className="p-0.5 hover:text-sky-600"
-        onClick={(e) => { e.stopPropagation(); setEditing(true); setLabelInput(cls.label); }}
-      >
-        <Pencil size={14} />
-      </button>
-      <button
-        aria-label="Delete class and its annotations"
-        className="p-0.5 hover:text-red-500"
-        onClick={handleDelete}
-      >
-        <Trash size={14} />
-      </button>
     </div>
   );
 }
@@ -123,15 +158,22 @@ export interface ClassManagerProps {
   onClassDeleted?: (deletedClassId: number) => void;
 }
 
-/** Common segmentation classes offered as one-click chips. */
-const SUGGESTED_CLASSES = ['air', 'sample', 'void', 'pore', 'background', 'substrate'];
+/** Fallback quick-add chips when the dataset has no annotation guide. */
+const DEFAULT_SUGGESTED_CLASSES = ['air', 'sample', 'void', 'pore', 'background', 'substrate'];
 
 /** Renders the class list, add form, and quick-add suggestion chips. */
 export default function ClassManager({ activeClassId, onActivate, onClassDeleted }: ClassManagerProps) {
   const { classes, addClass } = useClassStore();
+  const guideEntries = useReferenceGuideStore((s) => s.entries);
   const [showAdd, setShowAdd] = useState(false);
   const [newLabel, setNewLabel] = useState('');
   const [newColor, setNewColor] = useState('');
+
+  // Guide-defined classes drive suggestions + colors so annotators stay consistent
+  // with the lead's intended labels; fall back to generic defaults when no guide.
+  const guideByLabel = new Map(
+    guideEntries.filter((g) => g.label.trim()).map((g) => [g.label.trim().toLowerCase(), g]),
+  );
 
   /** Notifies the parent of a deletion and re-activates the first remaining class if the active one was removed. */
   const handleClassDeleted = (deletedClassId: number) => {
@@ -168,15 +210,21 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
     setShowAdd(false);
   };
 
-  /** One-click add (or re-activate) a suggested class. */
+  /** One-click add (or re-activate) a suggested class, inheriting the guide color if defined. */
   const handleQuickAdd = (label: string) => {
     const existing = classes.find((c) => c.label.toLowerCase() === label.toLowerCase());
     if (existing) { onActivate(existing.classId); return; }
-    const classId = addClass(label, nextColor());
+    const guideColor = guideByLabel.get(label.toLowerCase())?.color;
+    const classId = addClass(label, guideColor || nextColor());
     onActivate(classId);
   };
 
-  const suggestions = SUGGESTED_CLASSES.filter(
+  // Prefer the guide's classes (in guide order); otherwise the generic defaults.
+  const suggestionLabels =
+    guideByLabel.size > 0
+      ? guideEntries.map((g) => g.label.trim()).filter(Boolean)
+      : DEFAULT_SUGGESTED_CLASSES;
+  const suggestions = suggestionLabels.filter(
     (label) => !classes.some((c) => c.label.toLowerCase() === label.toLowerCase()),
   );
 
@@ -227,6 +275,7 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
               key={label}
               type="button"
               onClick={() => handleQuickAdd(label)}
+              title={guideByLabel.get(label.toLowerCase())?.description || undefined}
               className="flex items-center gap-0.5 text-xs px-1.5 py-0.5 rounded-full border border-gray-200 text-gray-600 hover:bg-sky-50 hover:border-sky-300 hover:text-sky-700 transition-colors"
             >
               <Plus size={10} />
@@ -247,6 +296,7 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
             isActive={cls.classId === activeClassId}
             onActivate={() => onActivate(cls.classId)}
             onClassDeleted={handleClassDeleted}
+            guide={guideByLabel.get(cls.label.trim().toLowerCase())}
           />
         ))}
       </div>

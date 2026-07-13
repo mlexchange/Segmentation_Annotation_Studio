@@ -35,6 +35,7 @@ from pydantic import BaseModel
 import arrays as arrays_mod
 import drafts as drafts_mod
 import export_jobs
+import guides as guides_mod
 import images as images_mod
 import ingest as ingest_mod
 import local_fs
@@ -48,7 +49,7 @@ from browse_helpers import (
     _SINGLE_VALUE_FACET_RAW_KEYS,
 )
 from cache import TTLCache
-from schemas import DraftPayload, ExportRequest, ExportSourceItem, ImageMeta, SaveVersionRequest
+from schemas import DraftPayload, ExportRequest, ExportSourceItem, GuidePayload, ImageMeta, MeasureRequest, SaveVersionRequest
 from thumbnails import render_thumbnail
 from tiled_clients import (
     api_key_for_uri,
@@ -624,6 +625,89 @@ async def list_drafts_route() -> list[dict]:
     return await asyncio.to_thread(drafts_mod.list_drafts)
 
 
+@app.get("/api/guide")
+async def get_guide(source_key: str = Query(...)) -> dict:
+    """Return the annotation guide for source_key, or 404 if none exists."""
+    result = await asyncio.to_thread(guides_mod.load_guide, source_key)
+    if result is None:
+        raise HTTPException(404, "No guide found")
+    return result
+
+
+@app.put("/api/guide")
+async def put_guide(
+    source_key: str = Query(...),
+    guide: GuidePayload = ...,
+) -> dict:
+    """Persist the annotation guide for source_key (dataset-scoped)."""
+    return await asyncio.to_thread(guides_mod.save_guide, source_key, guide.model_dump())
+
+
+@app.post("/api/measure")
+async def measure_region(
+    source_key: str = Query(...),
+    body: MeasureRequest = ...,
+) -> dict:
+    """Return raw-intensity statistics inside the union of the given shapes on a
+    slice: min/max/mean/std and pixel count. Uses the raw array values (not the
+    display-rendered image), so results are meaningful for scientific data.
+    """
+    def _run() -> dict:
+        import numpy as np
+        import arrays as arrays_mod
+        from coco_export import shape_to_mask
+        from source_keys import parse_source_key
+
+        parsed = parse_source_key(source_key)
+        kind = parsed["kind"] or "local"
+        node = arrays_mod.resolve_array(parsed["path"] or "", kind, parsed["server_uri"])
+        meta = arrays_mod.array_shape_meta(node)
+        sidx = max(0, min(int(body.slice_index), meta["n_slices"] - 1))
+        arr = np.asarray(arrays_mod.read_slice(node, meta, sidx))
+        # Collapse RGB to luminance so intensity stats are single-channel.
+        if arr.ndim == 3 and arr.shape[2] in (3, 4):
+            arr = (0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2])
+        h, w = arr.shape[:2]
+
+        union = np.zeros((h, w), dtype=bool)
+        for shape in body.shapes:
+            try:
+                union |= shape_to_mask(shape, h, w)
+            except Exception:
+                continue
+
+        vals = arr[union]
+        if vals.size == 0:
+            return {"pixel_count": 0, "min": None, "max": None, "mean": None, "std": None}
+        return {
+            "pixel_count": int(vals.size),
+            "min": float(np.min(vals)),
+            "max": float(np.max(vals)),
+            "mean": float(np.mean(vals)),
+            "std": float(np.std(vals)),
+        }
+
+    return await asyncio.to_thread(_run)
+
+
+@app.post("/api/guide/generate")
+async def generate_guide_route(
+    source_key: str = Query(...),
+    payload: DraftPayload = ...,
+) -> dict:
+    """Build a guide skeleton (per-class label/color + example crops) from an
+    annotation payload (the current draft or a fetched version).
+
+    Descriptions are returned blank for the lead to fill in. Does not persist —
+    the client merges the result into the guide and saves via PUT /api/guide.
+    """
+    def _run() -> dict:
+        import guide_gen
+        return guide_gen.generate_guide(source_key, payload.model_dump())
+
+    return await asyncio.to_thread(_run)
+
+
 @app.post("/api/annotations/preview-thumbnail")
 async def preview_annotation_thumbnail(
     source_key: str = Query(...),
@@ -775,6 +859,12 @@ async def export_coco(payload: ExportRequest) -> dict:
         stem = first_source.replace("/", "_").replace("\\", "_")[-30:].strip("_") or "dataset"
         folder_name = f"{stem}_{ts}"
 
+    # Stamp the annotator into the folder so gathered downloads are self-identifying.
+    annotator = (payload.annotator or "").strip()
+    if annotator:
+        from coco_export import _safe_name
+        folder_name = f"{_safe_name(annotator)}__{folder_name}"
+
     out_root = (export_root / folder_name).resolve()
     if not str(out_root).startswith(str(export_root)):
         raise HTTPException(403, "Derived output path escapes EXPORT_ROOT")
@@ -886,6 +976,27 @@ def _run_export_job(
                 bucket["images"].extend(split_data["images"])
                 bucket["annotations"].extend(split_data["annotations"])
 
+        # Stamp the annotator so downloads are self-identifying for external
+        # inter-annotator-agreement analysis (folder name + COCO info + manifest).
+        from datetime import datetime as _dt, timezone as _tz
+        annotator = (payload.annotator or "").strip()
+        exported_at = _dt.now(_tz.utc).isoformat()
+        if annotator:
+            merged_info = {**(merged_info or {}), "annotator": annotator}
+        source_keys = [
+            (f"tiled:{item.server_uri or ''}:{item.source}" if item.kind == "tiled"
+             else f"local:{item.source}")
+            for item in source_items
+        ]
+        manifest = {
+            "annotator": annotator,
+            "exported_at": exported_at,
+            "source_keys": source_keys,
+            "classes": [
+                (c.model_dump() if hasattr(c, "model_dump") else dict(c)) for c in payload.classes
+            ],
+        }
+
         # Write files AND build the download .zip in one pass. ZIP_STORED: the
         # PNGs are already compressed, so re-deflating them is wasted CPU.
         import zipfile
@@ -893,6 +1004,10 @@ def _run_export_job(
         zip_path = f"{out_root}.zip"
         written: dict = {}
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
+            out_root.mkdir(parents=True, exist_ok=True)
+            manifest_json = json.dumps(manifest, indent=2)
+            (out_root / "manifest.json").write_text(manifest_json)
+            zf.writestr("manifest.json", manifest_json)
             for split_name, split_data in merged_splits.items():
                 export_jobs.log(jid, f"Writing split '{split_name}' ({len(split_data['images'])} images + masks)…")
                 written[split_name] = write_coco_split(

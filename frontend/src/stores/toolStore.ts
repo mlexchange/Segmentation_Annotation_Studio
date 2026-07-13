@@ -37,6 +37,9 @@ export interface ToolState {
   /** When true, new annotations are clipped so they can't overlap other classes'
    *  regions on the current slice (neighbor classes act as a hard boundary). */
   clipToOtherClasses: boolean;
+  /** When true, a new annotation that overlaps existing shapes of the SAME class
+   *  is unioned with them into one merged shape on commit. */
+  mergeOverlappingSameClass: boolean;
   /** Bumped to request the canvas re-fit the image to the viewport (F shortcut). */
   fitRequestId: number;
   setTool: (tool: Tool) => void;
@@ -55,6 +58,7 @@ export interface ToolState {
   setSamThreshold: (t: number) => void;
   setSamAvoidLabeled: (v: boolean) => void;
   setClipToOtherClasses: (v: boolean) => void;
+  setMergeOverlappingSameClass: (v: boolean) => void;
   requestFit: () => void;
 }
 
@@ -73,6 +77,7 @@ export const useToolStore = create<ToolState>((set) => ({
   samThreshold: 0,
   samAvoidLabeled: true,
   clipToOtherClasses: false,
+  mergeOverlappingSameClass: false,
   fitRequestId: 0,
   /** Switches the active tool and clears the current shape selection. */
   setTool: (tool) => set({ tool, selectedShapeIds: [] }),
@@ -104,6 +109,8 @@ export const useToolStore = create<ToolState>((set) => ({
   setSamAvoidLabeled: (samAvoidLabeled) => set({ samAvoidLabeled }),
   /** Toggles clipping new annotations against other classes' regions. */
   setClipToOtherClasses: (clipToOtherClasses) => set({ clipToOtherClasses }),
+  /** Toggles auto-merging new annotations with overlapping same-class shapes. */
+  setMergeOverlappingSameClass: (mergeOverlappingSameClass) => set({ mergeOverlappingSameClass }),
   /** Bumps fitRequestId to signal the canvas to re-fit the image to the viewport. */
   requestFit: () => set((s) => ({ fitRequestId: s.fitRequestId + 1 })),
 }));

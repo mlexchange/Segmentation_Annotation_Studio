@@ -7,6 +7,7 @@ import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
 import { useRatingStore } from '@/stores/ratingStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { useExportJob } from '@/hooks/useExportJob';
 
@@ -68,6 +69,8 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
   const { byImage, splitBySlice, negativeSlices } = useAnnotationStore();
   const { classes } = useClassStore();
   const ratings = useRatingStore((s) => s.ratings);
+  const annotatorName = useSettingsStore((s) => s.annotatorName);
+  const setAnnotatorName = useSettingsStore((s) => s.setAnnotatorName);
 
   const [scope, setScope] = useState<Scope>('current');
   const [includePolygons, setIncludePolygons] = useState(false);
@@ -145,7 +148,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
       return;
     }
     if (sources.length === 0) { window.alert('No samples match the selected scope.'); return; }
-    start({ sources, classes, mode: 'merge', include_polygons: includePolygons });
+    start({ sources, classes, mode: 'merge', include_polygons: includePolygons, annotator: annotatorName.trim() });
   };
 
   /** True when the chosen scope can actually write back to Tiled. */
@@ -218,6 +221,20 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
             ))}
           </div>
         </div>
+
+        {/* Annotator identity — stamped into the export so downloads are self-identifying. */}
+        {status === 'idle' && (
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400 uppercase tracking-wide">Annotator</label>
+            <input
+              type="text"
+              value={annotatorName}
+              onChange={(e) => setAnnotatorName(e.target.value)}
+              placeholder="Your name (recorded in the export)"
+              className="w-full rounded-md border border-slate-600 bg-slate-900/60 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none"
+            />
+          </div>
+        )}
 
         {/* Options */}
         {status === 'idle' && (

@@ -6,6 +6,7 @@
 import { ArrowCounterClockwise } from '@phosphor-icons/react';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import HistogramControl from '@/components/annotate/HistogramControl';
+import { COLORMAP_NAMES, colormapGradient, type ColormapName } from '@/lib/colormaps';
 
 export interface DisplayControlsProps {
   brightness: number;
@@ -19,6 +20,11 @@ export interface DisplayControlsProps {
   levelsHi: number;
   onLevelsChange: (lo: number, hi: number) => void;
   onLevelsReset: () => void;
+  /** False-color map + gamma (display-only). */
+  colormap: ColormapName;
+  gamma: number;
+  onColormapChange: (c: ColormapName) => void;
+  onGammaChange: (g: number) => void;
 }
 
 /** Renders the brightness/contrast sliders + levels histogram with reset buttons. */
@@ -33,6 +39,10 @@ export default function DisplayControls({
   levelsHi,
   onLevelsChange,
   onLevelsReset,
+  colormap,
+  gamma,
+  onColormapChange,
+  onGammaChange,
 }: DisplayControlsProps) {
   return (
     <div className="flex flex-col gap-2">
@@ -81,6 +91,40 @@ export default function DisplayControls({
         onChange={onLevelsChange}
         onReset={onLevelsReset}
       />
+
+      {/* Colormap (false-color LUT) + gamma — display only. */}
+      <div className="flex flex-col gap-1">
+        <span className="text-[11px] text-gray-500">Colormap</span>
+        <div className="flex items-center gap-1">
+          {COLORMAP_NAMES.map((name) => (
+            <button
+              key={name}
+              type="button"
+              onClick={() => onColormapChange(name)}
+              title={name}
+              aria-pressed={colormap === name}
+              className={[
+                'h-5 flex-1 rounded border',
+                colormap === name ? 'border-sky-500 ring-1 ring-sky-400' : 'border-gray-200',
+              ].join(' ')}
+              style={{ backgroundImage: colormapGradient(name) }}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-0.5">
+        <DebouncedSlider
+          label="Gamma"
+          format={(v) => v.toFixed(2)}
+          min={0.2}
+          max={3}
+          step={0.05}
+          value={gamma}
+          onChange={onGammaChange}
+          debounceMs={0}
+        />
+      </div>
     </div>
   );
 }

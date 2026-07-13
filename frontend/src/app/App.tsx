@@ -4,10 +4,11 @@ import './App.css';
 import { RouteItem } from '@/types/navigationRouterTypes';
 import HubAppLayout from '@/components/HubAppLayout';
 import { useHubSelectedTabs } from '@/hooks/useHubSelectedTabs';
-import { PlugsConnected, PencilSimple, MagnifyingGlass } from '@phosphor-icons/react';
+import { PlugsConnected, PencilSimple, MagnifyingGlass, BookOpen } from '@phosphor-icons/react';
 import ConnectPage from './pages/ConnectPage';
 import AnnotatePage from './pages/AnnotatePage';
 import BrowsePage from './pages/BrowsePage';
+import ReferencePage from './pages/ReferencePage';
 import CustomizePages from '@/components/CustomizePages';
 
 const allRoutes: RouteItem[] = [
@@ -23,6 +24,12 @@ const allRoutes: RouteItem[] = [
     icon: <MagnifyingGlass size={32} />,
     element: <BrowsePage />,
     isBackgroundTransparent: true,
+  },
+  {
+    path: '/reference',
+    label: 'Reference',
+    icon: <BookOpen size={32} />,
+    element: <ReferencePage />,
   },
   {
     path: '/annotate',

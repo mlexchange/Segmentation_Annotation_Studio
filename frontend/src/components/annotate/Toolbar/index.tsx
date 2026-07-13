@@ -89,6 +89,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     samDetail, setSamDetail, samThreshold, setSamThreshold,
     samAvoidLabeled, setSamAvoidLabeled,
     clipToOtherClasses, setClipToOtherClasses,
+    mergeOverlappingSameClass, setMergeOverlappingSameClass,
   } = useToolStore();
   const sam = useSam(tool === 'magic' && magicEngine === 'sam');
   const { undo, redo } = useStore(useAnnotationStore.temporal);
@@ -384,6 +385,19 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
           className="accent-sky-600"
         />
         Clip to other classes
+      </label>
+
+      <label
+        className="flex items-center gap-2 text-[11px] text-gray-600 cursor-pointer"
+        title="A new annotation overlapping existing regions of the same class is merged with them into one shape"
+      >
+        <input
+          type="checkbox"
+          checked={mergeOverlappingSameClass}
+          onChange={(e) => setMergeOverlappingSameClass(e.target.checked)}
+          className="accent-sky-600"
+        />
+        Merge overlapping same class
       </label>
     </div>
   );

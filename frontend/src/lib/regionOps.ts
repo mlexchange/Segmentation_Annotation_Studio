@@ -7,14 +7,16 @@
  */
 import type { Shape } from '@/stores/annotationStore';
 import { gridFor, rasterizeShapes } from '@/lib/rasterize';
-import { maskToPolygons } from '@/lib/magicwand';
-import { dilate, erode, removeSmallComponents, fillHoles } from '@/lib/morphology';
+import { maskToPolygons, maskToPolygonsWithHoles } from '@/lib/magicwand';
+import { dilate, erode, removeSmallComponents } from '@/lib/morphology';
 
 export type RegionOp = 'merge' | 'grow' | 'shrink' | 'islands';
 
 export interface RegionResult {
   classId: number;
   points: number[];
+  /** Inner rings (unlabeled interior gaps) preserved as even-odd holes. */
+  holes?: number[][];
 }
 
 /**
@@ -39,10 +41,17 @@ export function computeRegionOps(
 
   for (const [classId, group] of byClass) {
     let mask = rasterizeShapes(group, gw, gh, scale);
+    if (op === 'merge') {
+      // Union only — do NOT fill interior gaps that aren't labeled; preserve them
+      // as holes so the merged shape covers exactly the labeled pixels.
+      for (const p of maskToPolygonsWithHoles(mask, gw, gh, { minRegion: 4, scale })) {
+        if (p.points.length >= 6) {
+          results.push({ classId, points: p.points, ...(p.holes.length ? { holes: p.holes } : {}) });
+        }
+      }
+      continue;
+    }
     switch (op) {
-      case 'merge':
-        mask = fillHoles(mask, gw, gh); // union already implicit; close pinholes
-        break;
       case 'grow':
         mask = dilate(mask, gw, gh, Math.max(1, Math.round(param / scale)));
         break;

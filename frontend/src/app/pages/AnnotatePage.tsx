@@ -3,22 +3,26 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
-import { DownloadSimple, FloppyDisk, ClockCounterClockwise, CircleDashed } from '@phosphor-icons/react';
+import { DownloadSimple, FloppyDisk, ClockCounterClockwise, CircleDashed, ChartBar } from '@phosphor-icons/react';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
 import { useClassStore } from '@/stores/classStore';
 import { useDraftSync } from '@/hooks/useDraftSync';
+import { useGuideLoad } from '@/hooks/useGuideSync';
 import { useSave, type VersionPayload } from '@/hooks/useSave';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { useKeybinds } from '@/hooks/useKeybinds';
+import type { ColormapName } from '@/lib/colormaps';
 import Toolbar from '@/components/annotate/Toolbar';
 import ClassManager from '@/components/annotate/ClassManager';
 import DisplayControls from '@/components/annotate/DisplayControls';
 import SliceNavigator from '@/components/annotate/SliceNavigator';
 import MaskToolsPanel from '@/components/annotate/MaskToolsPanel';
+import MeasurementPanel from '@/components/annotate/MeasurementPanel';
 import AnnotationCanvas from '@/components/annotate/AnnotationCanvas';
 import DownloadModal from '@/components/annotate/DownloadModal';
+import InsightsModal from '@/components/annotate/InsightsModal';
 import VersionHistoryModal from '@/components/annotate/VersionHistoryModal';
 import VersionPreviewBar from '@/components/annotate/VersionPreviewBar';
 import SaveModal from '@/components/annotate/SaveModal';
@@ -57,7 +61,13 @@ export default function AnnotatePage() {
   const [levelsLo, setLevelsLo] = useState(0);
   const [levelsHi, setLevelsHi] = useState(255);
   const [histogramBins, setHistogramBins] = useState<number[] | null>(null);
+  // Display-only false-color map + gamma.
+  const [colormap, setColormap] = useState<ColormapName>('gray');
+  const [gamma, setGamma] = useState(1);
   const [showDownload, setShowDownload] = useState(false);
+  const [showInsights, setShowInsights] = useState(false);
+  // Region to zoom to + highlight on the canvas (from an Insights QA flag).
+  const [focusRegion, setFocusRegion] = useState<{ x: number; y: number; w: number; h: number; nonce: number } | null>(null);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [saveModalPayload, setSaveModalPayload] = useState<SaveDraftPayload | null>(null);
@@ -73,11 +83,19 @@ export default function AnnotatePage() {
 
   // Crash-recovery autosave (local draft only, no Tiled sync)
   useDraftSync(sourceKey);
+  // Load the dataset's annotation guide (read-only) for class suggestions/examples.
+  useGuideLoad(sourceKey);
 
   // Explicit versioned save
   const { isDirty, isSaving, lastSavedAt, save, buildSavePayload, saveSummary, versions, fetchVersionPayload, restoreVersion } = useSave(sourceKey);
 
-  const { currentSlice } = useDatasetStore();
+  const { currentSlice, setSlice } = useDatasetStore();
+
+  /** From an Insights QA flag: jump to its slice and zoom/highlight its region. */
+  const handleInsightFocus = useCallback((slice: number, bbox?: { x: number; y: number; w: number; h: number }) => {
+    setSlice(slice);
+    setFocusRegion(bbox ? { ...bbox, nonce: Date.now() } : null);
+  }, [setSlice]);
 
   // Load the previewed version's payload (cached) whenever the slider moves.
   useEffect(() => {
@@ -187,17 +205,23 @@ export default function AnnotatePage() {
             contrast={contrast}
             onBrightnessChange={setBrightness}
             onContrastChange={setContrast}
-            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); }}
+            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); }}
             histogramBins={histogramBins}
             levelsLo={levelsLo}
             levelsHi={levelsHi}
             onLevelsChange={(lo, hi) => { setLevelsLo(lo); setLevelsHi(hi); }}
             onLevelsReset={() => { setLevelsLo(0); setLevelsHi(255); }}
+            colormap={colormap}
+            gamma={gamma}
+            onColormapChange={setColormap}
+            onGammaChange={setGamma}
           />
           <hr />
           <SliceNavigator />
           <hr />
           <MaskToolsPanel sourceKey={sourceKey} activeClassId={activeClassId} />
+          <hr />
+          <MeasurementPanel sourceKey={sourceKey} />
           <hr />
 
           {/* Save button + status */}
@@ -239,6 +263,16 @@ export default function AnnotatePage() {
             </div>
           </div>
 
+          {/* Insights */}
+          <button
+            type="button"
+            onClick={() => setShowInsights(true)}
+            className="flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 transition-colors"
+          >
+            <ChartBar size={16} />
+            Insights
+          </button>
+
           {/* Download / export */}
           <button
             type="button"
@@ -257,12 +291,15 @@ export default function AnnotatePage() {
             contrast={contrast}
             levelsLo={levelsLo}
             levelsHi={levelsHi}
+            colormap={colormap}
+            gamma={gamma}
             onHistogram={setHistogramBins}
             activeClassId={activeClassId}
             activeBrushShapeId={activeBrushShapeId}
             onNewBrushInstance={setActiveBrushShapeId}
             previewShapes={previewShapes}
             previewClasses={previewPayload?.classes ?? null}
+            focusRegion={focusRegion}
           />
           {previewVersion !== null && (
             <VersionPreviewBar
@@ -278,6 +315,13 @@ export default function AnnotatePage() {
       </div>
 
       {showDownload && <DownloadModal onClose={() => setShowDownload(false)} />}
+      {showInsights && (
+        <InsightsModal
+          sourceKey={sourceKey}
+          onClose={() => setShowInsights(false)}
+          onFocus={handleInsightFocus}
+        />
+      )}
       {showSaveModal && saveModalPayload && sourceKey && (
         <SaveModal
           sourceKey={sourceKey}

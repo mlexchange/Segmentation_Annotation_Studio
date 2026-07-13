@@ -4,9 +4,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { FloppyDisk, X, CircleDashed, Image as ImageIcon } from '@phosphor-icons/react';
 import { API_BASE } from '@/config';
+import { useSettingsStore } from '@/stores/settingsStore';
 import type { SaveDraftPayload } from '@/hooks/useSave';
 
-const ANNOTATOR_STORAGE_KEY = 'sam3_annotator_name';
+// Legacy per-modal key, migrated into the shared settings store on first save.
+const LEGACY_ANNOTATOR_KEY = 'sam3_annotator_name';
 
 export interface SaveModalProps {
   sourceKey: string;
@@ -63,9 +65,12 @@ export default function SaveModal({
   onSave,
   onClose,
 }: SaveModalProps) {
+  const storeAnnotator = useSettingsStore((s) => s.annotatorName);
+  const setStoreAnnotator = useSettingsStore((s) => s.setAnnotatorName);
   const [annotatedBy, setAnnotatedBy] = useState(() => {
+    if (storeAnnotator) return storeAnnotator;
     try {
-      return localStorage.getItem(ANNOTATOR_STORAGE_KEY) ?? '';
+      return localStorage.getItem(LEGACY_ANNOTATOR_KEY) ?? '';
     } catch {
       return '';
     }
@@ -101,11 +106,8 @@ export default function SaveModal({
   /** Persists the annotator name to localStorage, encodes the thumbnail, and invokes onSave. */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    try {
-      localStorage.setItem(ANNOTATOR_STORAGE_KEY, annotatedBy.trim());
-    } catch {
-      // ignore storage errors
-    }
+    // Share the annotator name across Save + Export via the settings store.
+    setStoreAnnotator(annotatedBy.trim());
     let thumbnailBase64: string | undefined;
     if (previewBlobRef.current) {
       try {

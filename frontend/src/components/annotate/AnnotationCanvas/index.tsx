@@ -20,7 +20,7 @@ import { Trash } from '@phosphor-icons/react';
 import type Konva from 'konva';
 import { v4 as uuidv4 } from 'uuid';
 import { useDatasetStore } from '@/stores/datasetStore';
-import { useAnnotationStore, type Shape, type BrushStroke, type EraseStroke } from '@/stores/annotationStore';
+import { useAnnotationStore, type Shape, type PolygonShape, type BrushStroke, type EraseStroke } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
 import { useClassStore, type AnnotationClass } from '@/stores/classStore';
 import { toImage, normalizeRect, normalizeEllipse } from '@/lib/geometry';
@@ -33,7 +33,9 @@ import { renderAdjusted } from '@/lib/sam/adjust';
 import { gridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
 import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
+import { mergeNewWithSameClass, expandSameClassOverlap } from '@/lib/mergeSameClass';
 import { useClipboardStore } from '@/stores/clipboardStore';
+import { colormapTables, type ColormapName } from '@/lib/colormaps';
 
 // macOS labels the Alt key "Option" (⌥). e.altKey is true for it either way,
 // so only the on-screen label needs to differ.
@@ -49,6 +51,9 @@ interface AnnotationCanvasProps {
   /** Client-side levels window (0–255) applied to the displayed image. */
   levelsLo: number;
   levelsHi: number;
+  /** Display-only false-color map + gamma (do not affect exported pixels or tools). */
+  colormap?: ColormapName;
+  gamma?: number;
   /** Emits the current slice's 256-bin luminance histogram when it loads. */
   onHistogram?: (bins: number[]) => void;
   activeClassId: number | null;
@@ -58,6 +63,9 @@ interface AnnotationCanvasProps {
   previewShapes?: Shape[] | null;
   /** Class definitions used for preview shape colors (the version's own classes). */
   previewClasses?: AnnotationClass[] | null;
+  /** Zoom to + highlight this image-coord region (e.g. from an Insights QA flag).
+   *  `nonce` changes to re-trigger the same region. */
+  focusRegion?: { x: number; y: number; w: number; h: number; nonce: number } | null;
 }
 
 // ---- Point-in-shape hit testing (used by the eraser to pick a target) ----
@@ -111,7 +119,13 @@ function distToSegment(px: number, py: number, ax: number, ay: number, bx: numbe
 /** True if image-coord point (x,y) lies inside any shape kind; brush strokes
  *  count as filled within `radius` of their segments (erase strokes ignored). */
 function shapeContainsPoint(shape: Shape, x: number, y: number): boolean {
-  if (shape.kind === 'polygon') return pointInPolygon(x, y, shape.points);
+  if (shape.kind === 'polygon') {
+    if (!pointInPolygon(x, y, shape.points)) return false;
+    // A point inside a hole is NOT inside the polygon (so an encompassed shape in
+    // the hole stays selectable and this polygon doesn't claim the click).
+    for (const hole of shape.holes ?? []) if (pointInPolygon(x, y, hole)) return false;
+    return true;
+  }
   if (shape.kind === 'rectangle') {
     return x >= shape.x && x <= shape.x + shape.w && y >= shape.y && y <= shape.y + shape.h;
   }
@@ -131,6 +145,37 @@ function shapeContainsPoint(shape: Shape, x: number, y: number): boolean {
     }
   }
   return false;
+}
+
+/** Insert a vertex on the polygon edge (outer ring or a hole) nearest to (px,py),
+ *  at the projected point on that segment. Used for double-click "add node". */
+function insertVertexNearest(shape: PolygonShape, px: number, py: number): PolygonShape {
+  let best = { d: Infinity, ring: -1, insertVi: 0, x: 0, y: 0 }; // ring -1 = outer
+  const scan = (pts: number[], ring: number) => {
+    const n = pts.length / 2;
+    if (n < 2) return;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const ax = pts[i * 2], ay = pts[i * 2 + 1], bx = pts[j * 2], by = pts[j * 2 + 1];
+      const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+      let t = len2 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const cx = ax + t * dx, cy = ay + t * dy;
+      const d = Math.hypot(px - cx, py - cy);
+      // Insert before vertex j; when j wraps to 0, append at the ring's end.
+      if (d < best.d) best = { d, ring, insertVi: j === 0 ? n : j, x: cx, y: cy };
+    }
+  };
+  scan(shape.points, -1);
+  (shape.holes ?? []).forEach((h, hi) => scan(h, hi));
+  if (best.ring === -1) {
+    const np = shape.points.slice();
+    np.splice(best.insertVi * 2, 0, best.x, best.y);
+    return { ...shape, points: np };
+  }
+  const hc = (shape.holes ?? []).map((r) => r.slice());
+  hc[best.ring].splice(best.insertVi * 2, 0, best.x, best.y);
+  return { ...shape, holes: hc };
 }
 
 /** A representative point that lies inside *shape* (best-effort), in image
@@ -267,12 +312,15 @@ export default function AnnotationCanvas({
   contrast,
   levelsLo,
   levelsHi,
+  colormap = 'gray',
+  gamma = 1,
   onHistogram,
   activeClassId,
   activeBrushShapeId,
   onNewBrushInstance,
   previewShapes = null,
   previewClasses = null,
+  focusRegion = null,
 }: AnnotationCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<Konva.Image>(null);
@@ -319,6 +367,7 @@ export default function AnnotationCanvas({
   const samAvoidLabeled = useToolStore((s) => s.samAvoidLabeled);
   const fitRequestId = useToolStore((s) => s.fitRequestId);
   const clipToOtherClasses = useToolStore((s) => s.clipToOtherClasses);
+  const mergeOverlappingSameClass = useToolStore((s) => s.mergeOverlappingSameClass);
   const fillThreshold = useToolStore((s) => s.fillThreshold);
   const { classes } = useClassStore();
 
@@ -331,7 +380,7 @@ export default function AnnotationCanvas({
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(null);
   // Live polygon vertex edit (select tool): { id, points } while dragging a handle.
-  const [editPoly, setEditPoly] = useState<{ id: string; points: number[] } | null>(null);
+  const [editPoly, setEditPoly] = useState<{ id: string; points: number[]; holes?: number[][] } | null>(null);
 
   // Magic-wand selection: seed click + preview polygons (image coords) before commit.
   // Marquee rubber-band (select tool): drag a box to select multiple shapes.
@@ -422,9 +471,16 @@ export default function AnnotationCanvas({
     const range = Math.max(1, levelsHi - levelsLo);
     const A = adjust * (255 / range);
     const Bconst = (255 / range) * (adjust * b255 + 127.5 * (1 - adjust)) - (255 * levelsLo) / range;
-    const identity = brightness === 0 && contrast === 0 && levelsLo <= 0 && levelsHi >= 255;
+    // The filter is a no-op only when brightness/contrast/levels AND gamma AND
+    // colormap are all identity — otherwise it must stay applied.
+    const identity =
+      brightness === 0 && contrast === 0 && levelsLo <= 0 && levelsHi >= 255 &&
+      gamma === 1 && colormap === 'gray';
     return { slope: A, intercept: Bconst / 255, identity };
-  }, [brightness, contrast, levelsLo, levelsHi]);
+  }, [brightness, contrast, levelsLo, levelsHi, gamma, colormap]);
+
+  // Colormap LUT (per-channel tableValues) for the display filter; null = gray.
+  const cmapTables = useMemo(() => colormapTables(colormap), [colormap]);
 
   useEffect(() => {
     const layer = imageLayerRef.current;
@@ -496,6 +552,34 @@ export default function AnnotationCanvas({
     fitToScreen();
   }, [fitRequestId, fitToScreen]);
 
+  // Focus region (from an Insights QA flag): zoom to the box + flash a highlight.
+  const [focusHighlight, setFocusHighlight] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const focusNonceRef = useRef<number | null>(null);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!focusRegion || !meta || focusRegion.nonce === focusNonceRef.current) return;
+    focusNonceRef.current = focusRegion.nonce;
+    const { x, y, w, h } = focusRegion;
+    // Zoom so the box fills ~60% of the viewport, centered; capped scale.
+    const pad = 1.6;
+    const s = Math.min(
+      stageSize.width / Math.max(1, w * pad),
+      stageSize.height / Math.max(1, h * pad),
+      8,
+    );
+    const scale = Math.max(s, 0.01);
+    const cx = x + w / 2, cy = y + h / 2;
+    setTransform({
+      scaleX: scale, scaleY: scale,
+      x: stageSize.width / 2 - cx * scale,
+      y: stageSize.height / 2 - cy * scale,
+    });
+    setFocusHighlight({ x, y, w, h });
+    if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+    focusTimerRef.current = setTimeout(() => setFocusHighlight(null), 4000);
+  }, [focusRegion, meta, stageSize.width, stageSize.height]);
+  useEffect(() => () => { if (focusTimerRef.current) clearTimeout(focusTimerRef.current); }, []);
+
   const isPreviewing = previewShapes !== null;
   // Stable empty fallback: a fresh `[]` here changes identity every render, which
   // would make the `autoNegPoints` memo (and the SAM preview effect that depends
@@ -531,7 +615,8 @@ export default function AnnotationCanvas({
     renderClasses.find((c) => c.classId === classId)?.color ?? '#ff0000';
 
   /** Commit new shapes, clipping them against other classes when the toggle is on
-   *  (neighbor classes act as a hard boundary). One undo step. */
+   *  (neighbor classes act as a hard boundary), and merging with overlapping
+   *  same-class shapes when that toggle is on. One undo step. */
   const commitShapes = useCallback((newShapes: Shape[]) => {
     if (!sourceKey || newShapes.length === 0) return;
     const slice = useDatasetStore.getState().currentSlice;
@@ -540,8 +625,20 @@ export default function AnnotationCanvas({
     if (clipToOtherClasses && meta && newShapes.some((s) => hasOtherClass(sliceShapes, s.classId))) {
       toAdd = clipShapesToOthers(newShapes, sliceShapes, meta.width, meta.height);
     }
+    // Auto-merge with overlapping same-class shapes (replaces those + the new shape
+    // with one unioned polygon). Runs after clipping so other-class bounds still hold.
+    if (mergeOverlappingSameClass && meta && toAdd.length) {
+      const { add, removeIds } = mergeNewWithSameClass(toAdd, sliceShapes, meta.width, meta.height);
+      if (removeIds.length) {
+        // Remove the consumed originals + add the merged result in one undo step.
+        const kept = sliceShapes.filter((s) => !removeIds.includes(s.id));
+        setShapes(sourceKey, slice, [...kept, ...add]);
+        return;
+      }
+      toAdd = add;
+    }
     if (toAdd.length) addShapes(sourceKey, slice, toAdd);
-  }, [sourceKey, clipToOtherClasses, meta, addShapes]);
+  }, [sourceKey, clipToOtherClasses, mergeOverlappingSameClass, meta, addShapes, setShapes]);
 
   const activeColor =
     activeClassId !== null ? colorForClass(activeClassId) : '#4090ff';
@@ -781,30 +878,58 @@ export default function AnnotationCanvas({
       return;
     }
 
-    // Clip-to-other-classes (paint only): if this stroke makes the brush overlap
-    // another class, convert the whole brush instance to a clipped polygon.
-    if (mode === 'paint' && clipToOtherClasses && meta) {
+    // Paint stroke with clip and/or same-class merge on: convert the brush instance
+    // to a polygon, subtracting other-class pixels (clip) and unioning overlapping
+    // same-class shapes (merge). Only converts when something actually changes;
+    // otherwise the brush stays a brush.
+    if (mode === 'paint' && meta && (clipToOtherClasses || mergeOverlappingSameClass)) {
       const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
       const brush = sliceShapes.find((s) => s.id === shapeId);
-      const others = brush ? sliceShapes.filter((s) => s.classId !== brush.classId) : [];
-      if (brush && brush.kind === 'brush' && others.length > 0) {
+      if (brush && brush.kind === 'brush') {
         const { gw, gh, scale } = gridFor(meta.width, meta.height);
         const prospective = { ...brush, strokes: [...brush.strokes, { points: finalPoints, radius, mode: 'paint' as const }] };
         const mine = rasterizeShapes([prospective], gw, gh, scale);
-        const otherMask = rasterizeUnion(others, gw, gh, scale);
-        let overlap = false;
-        for (let i = 0; i < mine.length; i++) { if (mine[i] && otherMask[i]) { overlap = true; break; } }
-        if (overlap) {
-          for (let i = 0; i < mine.length; i++) if (otherMask[i]) mine[i] = 0;
+        let converted = false;
+        const removeIds: string[] = [];
+
+        // Clip: carve out pixels already labeled by other classes.
+        if (clipToOtherClasses) {
+          const others = sliceShapes.filter((s) => s.classId !== brush.classId);
+          if (others.length > 0) {
+            const otherMask = rasterizeUnion(others, gw, gh, scale);
+            let overlap = false;
+            for (let i = 0; i < mine.length; i++) { if (mine[i] && otherMask[i]) { overlap = true; break; } }
+            if (overlap) {
+              for (let i = 0; i < mine.length; i++) if (otherMask[i]) mine[i] = 0;
+              converted = true;
+            }
+          }
+        }
+
+        // Merge: union with overlapping same-class shapes (they get consumed).
+        if (mergeOverlappingSameClass) {
+          const sameClass = sliceShapes.filter((s) => s.id !== shapeId && s.classId === brush.classId);
+          for (const s of sameClass) {
+            const sm = rasterizeShapes([s], gw, gh, scale);
+            let hit = false;
+            for (let i = 0; i < mine.length; i++) { if (mine[i] && sm[i]) { hit = true; break; } }
+            if (!hit) continue;
+            for (let i = 0; i < mine.length; i++) if (sm[i]) mine[i] = 1;
+            removeIds.push(s.id);
+            converted = true;
+          }
+        }
+
+        if (converted) {
           const polys = maskToPolygonsWithHoles(mine, gw, gh, { minRegion: 4, scale })
             .filter((p) => p.points.length >= 6)
             .map((p) => ({
               id: uuidv4(), classId: brush.classId, kind: 'polygon' as const,
               points: p.points, ...(p.holes.length ? { holes: p.holes } : {}),
             }));
-          const kept = sliceShapes.filter((s) => s.id !== shapeId);
+          const kept = sliceShapes.filter((s) => s.id !== shapeId && !removeIds.includes(s.id));
           setShapes(sourceKey, currentSlice, [...kept, ...polys]);
-          onNewBrushInstance(''); // this brush instance no longer exists
+          onNewBrushInstance(''); // this brush instance is now polygon(s)
           return;
         }
       }
@@ -1348,16 +1473,32 @@ export default function AnnotationCanvas({
   /** Select a clicked shape; shift-click toggles it in the multi-selection. */
   const selectShape = (e: Konva.KonvaEventObject<MouseEvent>, id: string) => {
     e.cancelBubble = true;
-    // Shift-click toggles the shape in/out of the current multi-selection.
+    // Shift-click toggles the literally-clicked shape in/out of the selection.
     if (e.evt.shiftKey) {
       setSelectedShapeIds(
         selectedShapeIds.includes(id)
           ? selectedShapeIds.filter((sid) => sid !== id)
           : [...selectedShapeIds, id],
       );
-    } else {
-      setSelectedShapeId(id);
+      return;
     }
+    // Plain click: prefer a shape of the ACTIVE class under the pointer, so an
+    // overlapping other-class shape drawn on top doesn't block selecting yours.
+    let targetId = id;
+    const pos = getPointerImagePos();
+    if (pos && activeClassId !== null) {
+      const isVisible = (s: Shape) =>
+        classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+      let topActive: string | null = null;
+      for (const s of storeShapes) {
+        // Later in draw order = rendered on top → keep the last (topmost) match.
+        if (s.classId === activeClassId && isVisible(s) && shapeContainsPoint(s, pos.x, pos.y)) {
+          topActive = s.id;
+        }
+      }
+      if (topActive) targetId = topActive;
+    }
+    setSelectedShapeId(targetId);
   };
 
   /** Render a shape as an interactive, draggable hit target with a selection outline. */
@@ -1379,13 +1520,26 @@ export default function AnnotationCanvas({
 
     if (shape.kind === 'polygon') {
       const livePoints = editPoly?.id === shape.id ? editPoly.points : shape.points;
-      const holes = shape.holes ?? [];
+      const holes = (editPoly?.id === shape.id && editPoly.holes ? editPoly.holes : shape.holes) ?? [];
       const hasHoles = holes.length > 0;
       return (
         <Group
           key={shape.id}
           draggable={single}
           {...handlers}
+          onDblClick={(e) => {
+            // Double-click the body/edge of the selected polygon → insert a vertex
+            // on the nearest edge (outer ring or a hole). Vertex circles handle
+            // their own double-click (delete) and stop this from firing.
+            if (!single) return;
+            const pos = getPointerImagePos();
+            if (!pos) return;
+            e.cancelBubble = true;
+            updateShape(sourceKey, currentSlice, shape.id, (s) =>
+              s.kind === 'polygon' ? insertVertexNearest(s, pos.x, pos.y) : s,
+            );
+            setEditPoly(null);
+          }}
           onDragEnd={(e) => {
             // Only the Group itself moving = a whole-shape move; vertex-circle
             // drags set their own target and are handled below.
@@ -1438,6 +1592,18 @@ export default function AnnotationCanvas({
                 strokeWidth={1 / transform.scaleX}
                 draggable
                 onClick={(e) => { e.cancelBubble = true; }}
+                onDblClick={(e) => {
+                  // Delete this outer vertex (keep at least a triangle).
+                  e.cancelBubble = true;
+                  if (livePoints.length / 2 <= 3) return;
+                  updateShape(sourceKey, currentSlice, shape.id, (s) => {
+                    if (s.kind !== 'polygon') return s;
+                    const np = s.points.slice();
+                    np.splice(vi * 2, 2);
+                    return { ...s, points: np };
+                  });
+                  setEditPoly(null);
+                }}
                 onDragMove={(e) => {
                   const np = [...livePoints];
                   np[vi * 2] = e.target.x();
@@ -1468,6 +1634,26 @@ export default function AnnotationCanvas({
                 strokeWidth={1 / transform.scaleX}
                 draggable
                 onClick={(e) => { e.cancelBubble = true; }}
+                onDblClick={(e) => {
+                  // Delete this hole vertex; if the hole would become degenerate
+                  // (< 3 points), drop the whole hole.
+                  e.cancelBubble = true;
+                  updateShape(sourceKey, currentSlice, shape.id, (s) => {
+                    if (s.kind !== 'polygon' || !s.holes) return s;
+                    const hc = s.holes.map((r) => r.slice());
+                    if (hc[hi].length / 2 <= 3) hc.splice(hi, 1);
+                    else hc[hi].splice(vi * 2, 2);
+                    return { ...s, holes: hc.length ? hc : undefined };
+                  });
+                  setEditPoly(null);
+                }}
+                onDragMove={(e) => {
+                  // Live-update the dashed outline as the hole vertex moves.
+                  const hc = holes.map((r) => r.slice());
+                  hc[hi][vi * 2] = e.target.x();
+                  hc[hi][vi * 2 + 1] = e.target.y();
+                  setEditPoly({ id: shape.id, points: livePoints, holes: hc });
+                }}
                 onDragEnd={(e) => {
                   const nx = e.target.x(), ny = e.target.y();
                   updateShape(sourceKey, currentSlice, shape.id, (s) => {
@@ -1477,6 +1663,7 @@ export default function AnnotationCanvas({
                     hc[hi][vi * 2 + 1] = ny;
                     return { ...s, holes: hc };
                   });
+                  setEditPoly(null);
                 }}
               />
             )),
@@ -1645,11 +1832,20 @@ export default function AnnotationCanvas({
   const [regionOp, setRegionOp] = useState<RegionOp | null>(null);
   const [regionParam, setRegionParam] = useState(4);
 
+  // For the merge op, absorb overlapping same-class shapes that aren't explicitly
+  // selected, so selecting one region merges the whole overlapping same-class cluster.
+  const mergeShapes = useMemo(() => {
+    if (regionOp !== 'merge' || !meta || selectedShapes.length === 0) return selectedShapes;
+    return expandSameClassOverlap(selectedShapes, storeShapes, meta.width, meta.height);
+  }, [regionOp, selectedShapes, storeShapes, meta]);
+
   // Live region-op preview polygons (per class), recomputed as op/param/selection change.
   const regionPreview = useMemo(() => {
-    if (!regionOp || !meta || selectedShapes.length === 0) return [];
-    return computeRegionOps(selectedShapes, meta.width, meta.height, regionOp, regionParam);
-  }, [regionOp, regionParam, selectedShapes, meta]);
+    if (!regionOp || !meta) return [];
+    const input = regionOp === 'merge' ? mergeShapes : selectedShapes;
+    if (input.length === 0) return [];
+    return computeRegionOps(input, meta.width, meta.height, regionOp, regionParam);
+  }, [regionOp, regionParam, selectedShapes, mergeShapes, meta]);
 
   // Cancel a pending region op whenever the selection empties or the tool changes.
   useEffect(() => {
@@ -1684,13 +1880,18 @@ export default function AnnotationCanvas({
     }));
   }, [sourceKey, meta, selectedShape, updateShape, currentSlice]);
 
-  /** Commit the region-op preview: replace the selected shapes with the result. */
+  /** Commit the region-op preview: replace the operated shapes with the result.
+   *  Merge also consumes the overlapping same-class shapes it absorbed. */
   const handleApplyRegion = useCallback(() => {
     if (!sourceKey || regionPreview.length === 0) return;
-    const selSet = new Set(selectedShapeIds);
-    const kept = storeShapes.filter((s) => !selSet.has(s.id));
+    // Merge operates on the expanded (overlap-absorbed) set; others on the selection.
+    const consumedIds = new Set(
+      (regionOp === 'merge' ? mergeShapes : selectedShapes).map((s) => s.id),
+    );
+    const kept = storeShapes.filter((s) => !consumedIds.has(s.id));
     const created: Shape[] = regionPreview.map((r) => ({
       id: uuidv4(), classId: r.classId, kind: 'polygon' as const, points: r.points,
+      ...(r.holes && r.holes.length ? { holes: r.holes } : {}),
     }));
     const finalCreated = clipToOtherClasses && meta
       ? clipShapesToOthers(created, kept, meta.width, meta.height)
@@ -1698,7 +1899,7 @@ export default function AnnotationCanvas({
     setShapes(sourceKey, currentSlice, [...kept, ...finalCreated]);
     setSelectedShapeIds(finalCreated.map((s) => s.id));
     setRegionOp(null);
-  }, [sourceKey, regionPreview, selectedShapeIds, storeShapes, setShapes, currentSlice, setSelectedShapeIds, clipToOtherClasses, meta]);
+  }, [sourceKey, regionPreview, regionOp, mergeShapes, selectedShapes, storeShapes, setShapes, currentSlice, setSelectedShapeIds, clipToOtherClasses, meta]);
 
   /** Set every stroke's radius on the selected brush shape (post-draw re-thickness). */
   const handleBrushThickness = useCallback((radius: number) => {
@@ -1783,6 +1984,9 @@ export default function AnnotationCanvas({
           <Layer>
             {storeShapes
               .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
+              // Render the single-selected shape LAST so its vertex handles (incl.
+              // amber hole vertices) sit above any shape enclosed in its holes.
+              .sort((a, b) => (a.id === selectedId ? 1 : 0) - (b.id === selectedId ? 1 : 0))
               .map(renderInteractive)}
             <Transformer
               ref={transformerRef}
@@ -1934,20 +2138,40 @@ export default function AnnotationCanvas({
               />
             ))}
 
-          {/* Region-op preview (select tool): dashed outline of the pending result. */}
+          {/* Region-op preview (select tool): dashed outline of the pending result.
+              Renders holes (even-odd) so merged interior gaps show as unfilled. */}
           {regionOp && regionPreview.map((r, i) => (
-            <Line
-              key={`region-${i}`}
-              points={r.points}
-              closed
-              fill={colorForClass(r.classId)}
-              stroke={colorForClass(r.classId)}
-              strokeWidth={1.5 / transform.scaleX}
-              dash={[5 / transform.scaleX, 3 / transform.scaleX]}
-              opacity={0.6}
-              listening={false}
-              perfectDrawEnabled={false}
-            />
+            r.holes && r.holes.length ? (
+              <KonvaShape
+                key={`region-${i}`}
+                stroke={colorForClass(r.classId)}
+                strokeWidth={1.5 / transform.scaleX}
+                dash={[5 / transform.scaleX, 3 / transform.scaleX]}
+                opacity={0.6}
+                listening={false}
+                perfectDrawEnabled={false}
+                sceneFunc={(ctx: Konva.Context, node: Konva.Shape) => {
+                  buildRingsPath(ctx, [r.points, ...r.holes!]);
+                  const raw = (ctx as unknown as { _context: CanvasRenderingContext2D })._context;
+                  raw.fillStyle = colorForClass(r.classId);
+                  raw.fill('evenodd');
+                  ctx.strokeShape(node);
+                }}
+              />
+            ) : (
+              <Line
+                key={`region-${i}`}
+                points={r.points}
+                closed
+                fill={colorForClass(r.classId)}
+                stroke={colorForClass(r.classId)}
+                strokeWidth={1.5 / transform.scaleX}
+                dash={[5 / transform.scaleX, 3 / transform.scaleX]}
+                opacity={0.6}
+                listening={false}
+                perfectDrawEnabled={false}
+              />
+            )
           ))}
         </Layer>
 
@@ -1982,6 +2206,24 @@ export default function AnnotationCanvas({
             perfectDrawEnabled={false}
           />
         </Layer>
+
+        {/* Focus highlight: flashes the region of an Insights QA flag. */}
+        {focusHighlight && (
+          <Layer listening={false}>
+            <Rect
+              x={focusHighlight.x}
+              y={focusHighlight.y}
+              width={focusHighlight.w}
+              height={focusHighlight.h}
+              stroke="#f43f5e"
+              strokeWidth={3 / transform.scaleX}
+              dash={[8 / transform.scaleX, 5 / transform.scaleX]}
+              shadowColor="#f43f5e"
+              shadowBlur={8 / transform.scaleX}
+              perfectDrawEnabled={false}
+            />
+          </Layer>
+        )}
       </Stage>
 
       {/* Selection toolbar (select tool) */}
@@ -2199,11 +2441,28 @@ export default function AnnotationCanvas({
           transform). Referenced by the image layer canvas via CSS filter:url(). */}
       <svg width="0" height="0" aria-hidden="true" style={{ position: 'absolute' }}>
         <filter id={displayFilterId} colorInterpolationFilters="sRGB">
+          {/* 1. Brightness/contrast/levels as one linear per-channel transform. */}
           <feComponentTransfer>
             <feFuncR type="linear" slope={displayAffine.slope} intercept={displayAffine.intercept} />
             <feFuncG type="linear" slope={displayAffine.slope} intercept={displayAffine.intercept} />
             <feFuncB type="linear" slope={displayAffine.slope} intercept={displayAffine.intercept} />
           </feComponentTransfer>
+          {/* 2. Gamma (skip when 1). */}
+          {gamma !== 1 && (
+            <feComponentTransfer>
+              <feFuncR type="gamma" exponent={gamma} />
+              <feFuncG type="gamma" exponent={gamma} />
+              <feFuncB type="gamma" exponent={gamma} />
+            </feComponentTransfer>
+          )}
+          {/* 3. Colormap LUT — grayscale in (R=G=B), false-color out. */}
+          {cmapTables && (
+            <feComponentTransfer>
+              <feFuncR type="table" tableValues={cmapTables.r.join(' ')} />
+              <feFuncG type="table" tableValues={cmapTables.g.join(' ')} />
+              <feFuncB type="table" tableValues={cmapTables.b.join(' ')} />
+            </feComponentTransfer>
+          )}
         </filter>
       </svg>
     </div>
