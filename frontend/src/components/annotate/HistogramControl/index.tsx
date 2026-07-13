@@ -4,7 +4,7 @@
  * band between them) to set the min/max window that drives a client-side levels
  * remap of the displayed image (no refetch). Knobs align with the 256-bin plot.
  */
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { ArrowCounterClockwise } from '@phosphor-icons/react';
 
 export interface HistogramControlProps {
@@ -40,6 +40,22 @@ export default function HistogramControl({ bins, lo, hi, onChange, onReset }: Hi
   const clampLo = (v: number) => Math.max(0, Math.min(v, hi - 1));
   const clampHi = (v: number) => Math.min(MAXV, Math.max(v, lo + 1));
 
+  // Coalesce drag updates to one per animation frame (throttle, not debounce):
+  // pointermove can fire faster than the display refresh, so we collapse bursts
+  // into a single onChange per frame to keep React updates minimal + smooth.
+  const rafRef = useRef<number | null>(null);
+  const pendingRef = useRef<[number, number] | null>(null);
+  const scheduleChange = (nlo: number, nhi: number) => {
+    pendingRef.current = [nlo, nhi];
+    if (rafRef.current == null) {
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null;
+        if (pendingRef.current) onChange(pendingRef.current[0], pendingRef.current[1]);
+      });
+    }
+  };
+  useEffect(() => () => { if (rafRef.current != null) cancelAnimationFrame(rafRef.current); }, []);
+
   /** Pointer clientX → intensity value (0–255) across the track width. */
   const xToValue = (clientX: number): number => {
     const el = trackRef.current;
@@ -54,15 +70,15 @@ export default function HistogramControl({ bins, lo, hi, onChange, onReset }: Hi
     if (!drag.current) return;
     const v = xToValue(clientX);
     if (drag.current.target === 'lo') {
-      onChange(clampLo(v), hi);
+      scheduleChange(clampLo(v), hi);
     } else if (drag.current.target === 'hi') {
-      onChange(lo, clampHi(v));
+      scheduleChange(lo, clampHi(v));
     } else {
       // Band: translate the whole window, preserving its width.
       const width = drag.current.startHi - drag.current.startLo;
       let nlo = drag.current.startLo + (v - drag.current.startV);
       nlo = Math.max(0, Math.min(nlo, MAXV - width));
-      onChange(nlo, nlo + width);
+      scheduleChange(nlo, nlo + width);
     }
   };
 

@@ -49,6 +49,8 @@ export default function DebouncedSlider({
   /** Update the local value immediately and (re)arm the debounced onChange commit. */
   const handle = (next: number) => {
     setLocal(next); // instant thumb + label feedback
+    // debounceMs <= 0 → commit synchronously (no debounce), for cheap live updates.
+    if (debounceMs <= 0) { onChange(next); return; }
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => onChange(next), debounceMs);
   };

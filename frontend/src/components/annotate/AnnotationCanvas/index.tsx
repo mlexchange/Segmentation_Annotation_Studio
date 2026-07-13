@@ -11,7 +11,7 @@
  * committed to the Zustand store ONCE on mouseup, eliminating the per-frame
  * store updates + zundo history snapshots that caused cursor lag.
  */
-import { useRef, useState, useEffect, useCallback, useMemo } from 'react';
+import { useRef, useState, useEffect, useCallback, useMemo, useId } from 'react';
 import {
   Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Group, Circle, Transformer,
   Shape as KonvaShape,
@@ -30,7 +30,6 @@ import { buildSourceKey } from '@/lib/sourceKey';
 import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type GrayField } from '@/lib/magicwand';
 import { useSam } from '@/hooks/useSam';
 import { renderAdjusted } from '@/lib/sam/adjust';
-import { LevelsFilter } from '@/lib/levelsFilter';
 import { gridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
 import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
@@ -277,6 +276,7 @@ export default function AnnotationCanvas({
 }: AnnotationCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<Konva.Image>(null);
+  const imageLayerRef = useRef<Konva.Layer>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const shapesLayerRef = useRef<Konva.Layer>(null);
   // Resize handles for the selected rect/ellipse (select tool).
@@ -408,20 +408,32 @@ export default function AnnotationCanvas({
     }
   }, [samActive, samEncodeKey, makeSamSource, sam.ensureEncoded]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Display adjustments (brightness + contrast + levels) applied as a single
+  // GPU-composited SVG filter on the image layer's canvas — NOT Konva CPU pixel
+  // filters. Folds all three into one per-channel linear transform
+  // (out = slope*in + intercept), so dragging the sliders re-composites on the
+  // GPU with zero per-pixel JS and no re-cache → lag-free at any image size.
+  // Math mirrors `renderAdjusted` exactly, so the tools (SAM/wand/Fill) stay in
+  // sync with what's displayed.
+  const displayFilterId = 'display-adjust-' + useId().replace(/[^a-zA-Z0-9]/g, '');
+  const displayAffine = useMemo(() => {
+    const b255 = brightness * 255;
+    const adjust = Math.pow((contrast + 100) / 100, 2);
+    const range = Math.max(1, levelsHi - levelsLo);
+    const A = adjust * (255 / range);
+    const Bconst = (255 / range) * (adjust * b255 + 127.5 * (1 - adjust)) - (255 * levelsLo) / range;
+    const identity = brightness === 0 && contrast === 0 && levelsLo <= 0 && levelsHi >= 255;
+    return { slope: A, intercept: Bconst / 255, identity };
+  }, [brightness, contrast, levelsLo, levelsHi]);
+
   useEffect(() => {
-    if (!imageRef.current) return;
-    imageRef.current.cache();
-    imageRef.current.filters([
-      (window as any).Konva?.Filters?.Brighten ?? (() => {}),
-      (window as any).Konva?.Filters?.Contrast ?? (() => {}),
-      LevelsFilter,
-    ]);
-    imageRef.current.brightness(brightness);
-    imageRef.current.contrast(contrast);
-    imageRef.current.setAttr('levelsLo', levelsLo);
-    imageRef.current.setAttr('levelsHi', levelsHi);
-    imageRef.current.getLayer()?.batchDraw();
-  }, [brightness, contrast, levelsLo, levelsHi, imageEl]);
+    const layer = imageLayerRef.current;
+    if (!layer) return;
+    const canvas =
+      (layer as unknown as { getNativeCanvasElement?: () => HTMLCanvasElement }).getNativeCanvasElement?.() ??
+      (layer.getCanvas() as unknown as { _canvas: HTMLCanvasElement })._canvas;
+    if (canvas) canvas.style.filter = displayAffine.identity ? 'none' : `url(#${displayFilterId})`;
+  }, [displayAffine.identity, displayFilterId, imageEl, stageSize]);
 
   // Compute a 256-bin luminance histogram of the current slice (downsampled) for
   // the levels control. Runs once per loaded image.
@@ -1744,8 +1756,8 @@ export default function AnnotationCanvas({
           setTransform((t) => ({ ...t, x: e.target.x(), y: e.target.y() }));
         }}
       >
-        {/* Layer 0: image */}
-        <Layer>
+        {/* Layer 0: image (display adjustments applied via the GPU SVG filter below) */}
+        <Layer ref={imageLayerRef}>
           {imageEl && meta && (
             <KonvaImage
               ref={imageRef}
@@ -2182,6 +2194,18 @@ export default function AnnotationCanvas({
       <div className="absolute bottom-2 right-2 bg-black/50 text-white text-xs px-2 py-0.5 rounded pointer-events-none">
         {Math.round(transform.scaleX * 100)}%
       </div>
+
+      {/* GPU display-adjust filter (brightness/contrast/levels as one linear
+          transform). Referenced by the image layer canvas via CSS filter:url(). */}
+      <svg width="0" height="0" aria-hidden="true" style={{ position: 'absolute' }}>
+        <filter id={displayFilterId} colorInterpolationFilters="sRGB">
+          <feComponentTransfer>
+            <feFuncR type="linear" slope={displayAffine.slope} intercept={displayAffine.intercept} />
+            <feFuncG type="linear" slope={displayAffine.slope} intercept={displayAffine.intercept} />
+            <feFuncB type="linear" slope={displayAffine.slope} intercept={displayAffine.intercept} />
+          </feComponentTransfer>
+        </filter>
+      </svg>
     </div>
   );
 }

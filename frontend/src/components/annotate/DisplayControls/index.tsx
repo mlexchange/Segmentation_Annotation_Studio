@@ -57,6 +57,7 @@ export default function DisplayControls({
           step={0.05}
           value={brightness}
           onChange={onBrightnessChange}
+          debounceMs={0}
         />
       </div>
 
@@ -69,6 +70,7 @@ export default function DisplayControls({
           step={1}
           value={contrast}
           onChange={onContrastChange}
+          debounceMs={0}
         />
       </div>
 
