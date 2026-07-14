@@ -29,7 +29,7 @@ import { useImageSlice } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type GrayField } from '@/lib/magicwand';
 import { useSam } from '@/hooks/useSam';
-import { renderAdjusted } from '@/lib/sam/adjust';
+import { renderAdjusted, renderPreprocessOnly } from '@/lib/sam/adjust';
 import { gridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
 import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
@@ -54,6 +54,10 @@ interface AnnotationCanvasProps {
   /** Display-only false-color map + gamma (do not affect exported pixels or tools). */
   colormap?: ColormapName;
   gamma?: number;
+  /** Display-only nonlinear preprocessors baked into the image base (affect the
+   *  tools' baked view but NOT the exported pixels). */
+  clahe?: boolean;
+  sharpen?: boolean;
   /** Emits the current slice's 256-bin luminance histogram when it loads. */
   onHistogram?: (bins: number[]) => void;
   activeClassId: number | null;
@@ -314,6 +318,8 @@ export default function AnnotationCanvas({
   levelsHi,
   colormap = 'gray',
   gamma = 1,
+  clahe = false,
+  sharpen = false,
   onHistogram,
   activeClassId,
   activeBrushShapeId,
@@ -406,7 +412,7 @@ export default function AnnotationCanvas({
   const [magneticCommitted, setMagneticCommitted] = useState<number[]>([]);
   const [magneticPreview, setMagneticPreview] = useState<number[]>([]);
   const magneticCostRef = useRef<CostMap | null>(null);
-  const magneticBuiltForRef = useRef<HTMLImageElement | null>(null);
+  const magneticBuiltForRef = useRef<CanvasImageSource | null>(null);
   const magneticPrevRef = useRef<Int32Array | null>(null);
   const magneticSeedRef = useRef<{ x: number; y: number } | null>(null);
   // True while a brush/eraser stroke is actively being drawn — suppresses the
@@ -436,16 +442,29 @@ export default function AnnotationCanvas({
     }
   }, [sam.status, sam.error, magicEngine, setMagicEngine]);
 
-  // SAM sees the brightness/contrast-adjusted image (windowing a low-contrast
-  // slice greatly helps), so the encode is keyed on those — adjusting them
-  // re-encodes. Building the source is deferred so it only runs on a real encode.
+  // Display-only nonlinear preprocessors baked into an offscreen canvas that
+  // becomes the Konva image base; brightness/contrast/levels/gamma/colormap still
+  // apply on top via the GPU SVG filter. Cache-key fragment so encodes/fields
+  // refresh when toggled.
+  const preprocess = useMemo(() => ({ clahe, sharpen }), [clahe, sharpen]);
+  const preprocessKey = `${clahe ? 1 : 0}${sharpen ? 1 : 0}`;
+  const displayBase = useMemo<CanvasImageSource | null>(() => {
+    if (!imageEl || !meta) return imageEl;
+    return (clahe || sharpen)
+      ? renderPreprocessOnly(imageEl, meta.width, meta.height, preprocess)
+      : imageEl;
+  }, [imageEl, meta, clahe, sharpen, preprocess]);
+
+  // SAM sees the preprocessed + brightness/contrast/levels-adjusted image
+  // (windowing a low-contrast slice greatly helps), so the encode is keyed on
+  // those — adjusting them re-encodes. Source building is deferred to a real encode.
   const samEncodeKey = imageEl && meta
-    ? `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}`
+    ? `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}|pp${preprocessKey}`
     : null;
-  /** Lazily render the display-adjusted slice (brightness/contrast/levels) that SAM encodes. */
+  /** Lazily render the display-adjusted slice (preprocess → brightness/contrast/levels) that SAM encodes. */
   const makeSamSource = useCallback(
-    () => renderAdjusted(imageEl!, meta!.width, meta!.height, brightness, contrast, levelsLo, levelsHi),
-    [imageEl, meta, brightness, contrast, levelsLo, levelsHi],
+    () => renderAdjusted(imageEl!, meta!.width, meta!.height, brightness, contrast, levelsLo, levelsHi, preprocess),
+    [imageEl, meta, brightness, contrast, levelsLo, levelsHi, preprocess],
   );
 
   // Proactively encode the slice when SAM is active so the first click is fast.
@@ -654,15 +673,17 @@ export default function AnnotationCanvas({
     return toImage(pos, transform);
   };
 
-  // Build (and cache, per rendered image) the live-wire edge cost map.
+  // Build (and cache, per rendered base) the live-wire edge cost map. Uses the
+  // preprocessed display base so the magnetic lasso traces the enhanced image.
   const ensureCostMap = (): CostMap | null => {
     if (!imageEl || !meta) return null;
-    if (magneticCostRef.current && magneticBuiltForRef.current === imageEl) {
+    const base = displayBase ?? imageEl;
+    if (magneticCostRef.current && magneticBuiltForRef.current === base) {
       return magneticCostRef.current;
     }
-    const cm = buildCostMap(imageEl, meta.width, meta.height);
+    const cm = buildCostMap(base, meta.width, meta.height);
     magneticCostRef.current = cm;
-    magneticBuiltForRef.current = imageEl;
+    magneticBuiltForRef.current = base;
     return cm;
   };
 
@@ -691,14 +712,14 @@ export default function AnnotationCanvas({
   const magicFieldForRef = useRef<string | null>(null);
   const ensureMagicField = useCallback((): GrayField | null => {
     if (!imageEl || !meta) return null;
-    const key = `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}`;
+    const key = `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}|pp${preprocessKey}`;
     if (magicFieldRef.current && magicFieldForRef.current === key) return magicFieldRef.current;
-    const src = renderAdjusted(imageEl, meta.width, meta.height, brightness, contrast, levelsLo, levelsHi);
+    const src = renderAdjusted(imageEl, meta.width, meta.height, brightness, contrast, levelsLo, levelsHi, preprocess);
     const f = buildField(src, meta.width, meta.height);
     magicFieldRef.current = f;
     magicFieldForRef.current = key;
     return f;
-  }, [imageEl, meta, sourceKey, currentSlice, brightness, contrast, levelsLo, levelsHi]);
+  }, [imageEl, meta, sourceKey, currentSlice, brightness, contrast, levelsLo, levelsHi, preprocessKey, preprocess]);
 
   // Auto negative ("not") prompts for SAM: interior points of nearby other-class
   // regions, so a new selection won't bleed into already-labeled areas. Anchored
@@ -1957,12 +1978,13 @@ export default function AnnotationCanvas({
           setTransform((t) => ({ ...t, x: e.target.x(), y: e.target.y() }));
         }}
       >
-        {/* Layer 0: image (display adjustments applied via the GPU SVG filter below) */}
+        {/* Layer 0: image — preprocessed base (CLAHE/Sharpen baked); linear
+            brightness/contrast/levels/gamma/colormap applied via the GPU SVG filter below. */}
         <Layer ref={imageLayerRef}>
           {imageEl && meta && (
             <KonvaImage
               ref={imageRef}
-              image={imageEl}
+              image={displayBase ?? imageEl}
               width={meta.width}
               height={meta.height}
               listening={false}

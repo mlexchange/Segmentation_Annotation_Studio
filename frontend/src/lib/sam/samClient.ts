@@ -73,6 +73,14 @@ class SamClient {
       };
       this.worker.postMessage({ type: 'init' });
     });
+    // Allow a fresh init attempt after a failure (e.g. once the model is
+    // vendored) without reloading the page: clear the cached rejected promise
+    // and tear down the dead worker. The original rejection still reaches callers.
+    this.initPromise.catch(() => {
+      this.initPromise = null;
+      try { this.worker?.terminate(); } catch { /* noop */ }
+      this.worker = null;
+    });
     return this.initPromise;
   }
 

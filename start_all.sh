@@ -3,12 +3,16 @@
 # Usage: ./start_all.sh
 # Stop everything: Ctrl+C
 #
-# NOTE: Tiled runs as a PUBLIC server (anonymous read+write). No API key is
-# used. Auth posture is declared in tiled/config.yml via:
+# NOTE: Tiled auth lives in tiled/config.yml:
 #   authentication:
-#     allow_anonymous_access: true
+#     allow_anonymous_access: true      # anonymous access is READ-ONLY
+#     single_user_api_key: "${TILED_API_KEY}"   # required for WRITES (e.g. ingest)
+# No key is hardcoded: this script GENERATES a strong TILED_API_KEY into
+# backend/.env (gitignored) on first run and exports it; tiled/config.yml pulls it
+# via ${TILED_API_KEY}, and the backend resolves the same value server-side
+# (backend/tiled_config.py) — never exposing it to the frontend.
 # Server binds to 127.0.0.1 (local-only). Do NOT change --host to 0.0.0.0
-# without reconsidering anonymous write access.
+# without reconsidering the auth posture.
 
 set -e
 
@@ -292,12 +296,81 @@ set -a
 source "$BACKEND_DIR/.env"
 set +a
 
+# Generate a strong Tiled API key so nothing is hardcoded. Runs when the key is
+# blank (fresh install) OR still the old committed/leaked value (auto-rotate it).
+# Persisted to backend/.env (gitignored) and exported so the Tiled server pulls it
+# via ${TILED_API_KEY} in tiled/config.yml and the backend resolves the same value.
+LEAKED_TILED_KEY="3b1d23cdd45e7ada521c729cbd71763dd51b058e0a3e0c1cdeddbcbe13168c88"
+if [ -z "${TILED_API_KEY// }" ] || [ "$TILED_API_KEY" = "$LEAKED_TILED_KEY" ]; then
+  # Alphanumeric only (Tiled validates single_user_api_key against [a-zA-Z0-9]+).
+  NEW_KEY="$(openssl rand -base64 16 2>/dev/null | tr -dc 'A-Za-z0-9')"
+  [ -z "$NEW_KEY" ] && NEW_KEY="$("$PYTHON" -c 'import secrets,base64,re;print(re.sub(r"[^A-Za-z0-9]","",base64.b64encode(secrets.token_bytes(16)).decode()))')"
+  "$PYTHON" - "$BACKEND_DIR/.env" "$NEW_KEY" <<'PYEOF'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); key = sys.argv[2]
+lines = p.read_text().splitlines() if p.exists() else []
+out, found = [], False
+for ln in lines:
+    out.append(f"TILED_API_KEY={key}" if ln.strip().startswith("TILED_API_KEY=") else ln)
+    found = found or ln.strip().startswith("TILED_API_KEY=")
+if not found:
+    out.append(f"TILED_API_KEY={key}")
+p.write_text("\n".join(out) + "\n")
+PYEOF
+  export TILED_API_KEY="$NEW_KEY"
+  echo -e "${GREEN}    Generated a new Tiled API key → backend/.env${NC}"
+fi
+
+# Defensive: a blank TILED_* key exported here would make the Tiled client build an
+# "Authorization: Apikey " (trailing space) header that httpx rejects. Unset any
+# blank key vars (no-op once a key is generated above).
+[ -z "${TILED_API_KEY// }" ] && unset TILED_API_KEY
+[ -z "${TILED_LOCAL_API_KEY// }" ] && unset TILED_LOCAL_API_KEY
+
 # ---------------------------------------------------------------------------
-# Tiled — PUBLIC server, anonymous read+write (no API key).
-# Auth posture lives in tiled/config.yml (allow_anonymous_access: true).
-# (must match backend/tiled_config.py default: port 8010)
+# SAM (Magic tool) model — vendor SlimSAM locally so "Smart (AI)" works offline.
+# Best-effort + backgrounded: never blocks or fails startup (SAM falls back to
+# the remote HF model if this can't complete).
 # ---------------------------------------------------------------------------
-echo -e "${CYAN}==> Starting Tiled (port ${TILED_PORT}, public / anonymous)...${NC}"
+ensure_sam_model() {
+  local MODEL_DIR="$FRONTEND_DIR/public/models/slimsam-77-uniform"
+  if [ -d "$MODEL_DIR" ] && [ -n "$(ls -A "$MODEL_DIR" 2>/dev/null)" ]; then
+    echo -e "${GREEN}    SAM model already vendored.${NC}"
+    return 0
+  fi
+  echo -e "${CYAN}==> Vendoring SlimSAM model for the Magic tool (background)...${NC}"
+  (
+    # The .venv is uv-managed and has no pip; install huggingface_hub via uv,
+    # falling back to python -m pip only if uv is unavailable.
+    if ! "$PYTHON" -c "import huggingface_hub" >/dev/null 2>&1; then
+      if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$PYTHON" -q huggingface_hub >/dev/null 2>&1 || true
+      else
+        "$PYTHON" -m pip install -q huggingface_hub >/dev/null 2>&1 || true
+      fi
+    fi
+    if "$PYTHON" - "$MODEL_DIR" <<'PYEOF'
+import sys
+from huggingface_hub import snapshot_download
+snapshot_download("Xenova/slimsam-77-uniform", local_dir=sys.argv[1])
+print("SAM model vendored to", sys.argv[1])
+PYEOF
+    then
+      echo -e "${GREEN}    SAM model vendored — hard-refresh the app to enable Smart (AI).${NC}"
+    else
+      echo -e "${YELLOW}    SAM model vendoring skipped (no huggingface_hub / offline) — Smart (AI) falls back to remote.${NC}"
+    fi
+  ) &
+}
+ensure_sam_model
+
+# ---------------------------------------------------------------------------
+# Tiled — local server. Anonymous access is READ-ONLY (allow_anonymous_access);
+# writes (ingest) authenticate with tiled/config.yml's single_user_api_key,
+# resolved server-side by backend/tiled_config.py. Keys are never sent to the
+# frontend. (Port must match backend/tiled_config.py default: 8010.)
+# ---------------------------------------------------------------------------
+echo -e "${CYAN}==> Starting Tiled (port ${TILED_PORT})...${NC}"
 
 # Repair catalog asset paths in case the repo was moved or cloned to a new location.
 "$PYTHON" "$SCRIPT_DIR/backend/scripts/repair_catalog_paths.py"
@@ -317,6 +390,9 @@ if [ ! -f "$SCRIPT_DIR/.tiled/catalog.db" ]; then
   }
 fi
 
+# tiled_cmd is a shell function (can't be exec'd); the subshell waits on the real
+# tiled child. The ready-check below curls the port before declaring failure, so a
+# dead wrapper alone won't trip a false "Tiled failed to start".
 (cd "$SCRIPT_DIR" && tiled_cmd serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT") &
 TILED_PID=$!
 echo "$TILED_PID" > "$TILED_PID_FILE"
@@ -331,7 +407,15 @@ for i in $(seq 1 40); do
     TILED_READY=1
     break
   fi
+  # Only treat a dead PID as failure if the port is ALSO not serving (avoids a
+  # false negative from a wrapper exiting while Tiled itself is up).
   if ! kill -0 "$TILED_PID" 2>/dev/null; then
+    code=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${TILED_PORT}/" 2>/dev/null || echo "000")
+    if [[ "$code" =~ ^(200|301|302|401|403|404)$ ]]; then
+      echo -e "${GREEN}    Tiled ready at http://127.0.0.1:${TILED_PORT}${NC}"
+      TILED_READY=1
+      break
+    fi
     echo -e "${RED}    Tiled failed to start. Install: pip install 'tiled[server]' (see backend/requirements.txt).${NC}"
     exit 1
   fi

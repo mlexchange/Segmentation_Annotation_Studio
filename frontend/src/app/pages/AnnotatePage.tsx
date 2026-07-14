@@ -64,6 +64,9 @@ export default function AnnotatePage() {
   // Display-only false-color map + gamma.
   const [colormap, setColormap] = useState<ColormapName>('gray');
   const [gamma, setGamma] = useState(1);
+  // Display-only nonlinear preprocessors (CLAHE / Sharpen).
+  const [clahe, setClahe] = useState(false);
+  const [sharpen, setSharpen] = useState(false);
   const [showDownload, setShowDownload] = useState(false);
   const [showInsights, setShowInsights] = useState(false);
   // Region to zoom to + highlight on the canvas (from an Insights QA flag).
@@ -205,7 +208,7 @@ export default function AnnotatePage() {
             contrast={contrast}
             onBrightnessChange={setBrightness}
             onContrastChange={setContrast}
-            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); }}
+            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); setClahe(false); setSharpen(false); }}
             histogramBins={histogramBins}
             levelsLo={levelsLo}
             levelsHi={levelsHi}
@@ -215,6 +218,10 @@ export default function AnnotatePage() {
             gamma={gamma}
             onColormapChange={setColormap}
             onGammaChange={setGamma}
+            clahe={clahe}
+            sharpen={sharpen}
+            onClaheChange={setClahe}
+            onSharpenChange={setSharpen}
           />
           <hr />
           <SliceNavigator />
@@ -293,6 +300,8 @@ export default function AnnotatePage() {
             levelsHi={levelsHi}
             colormap={colormap}
             gamma={gamma}
+            clahe={clahe}
+            sharpen={sharpen}
             onHistogram={setHistogramBins}
             activeClassId={activeClassId}
             activeBrushShapeId={activeBrushShapeId}

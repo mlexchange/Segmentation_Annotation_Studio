@@ -25,6 +25,11 @@ export interface DisplayControlsProps {
   gamma: number;
   onColormapChange: (c: ColormapName) => void;
   onGammaChange: (g: number) => void;
+  /** Nonlinear display preprocessors (display-only; do not affect export). */
+  clahe: boolean;
+  sharpen: boolean;
+  onClaheChange: (v: boolean) => void;
+  onSharpenChange: (v: boolean) => void;
 }
 
 /** Renders the brightness/contrast sliders + levels histogram with reset buttons. */
@@ -43,6 +48,10 @@ export default function DisplayControls({
   gamma,
   onColormapChange,
   onGammaChange,
+  clahe,
+  sharpen,
+  onClaheChange,
+  onSharpenChange,
 }: DisplayControlsProps) {
   return (
     <div className="flex flex-col gap-2">
@@ -124,6 +133,24 @@ export default function DisplayControls({
           onChange={onGammaChange}
           debounceMs={0}
         />
+      </div>
+
+      {/* Nonlinear enhancers (display-only; can combine: CLAHE → Sharpen). */}
+      <div className="flex items-center gap-3 pt-0.5">
+        <label
+          className="flex items-center gap-1.5 text-[11px] text-gray-600 cursor-pointer"
+          title="Contrast-Limited Adaptive Histogram Equalization — boosts local contrast on faint scans"
+        >
+          <input type="checkbox" checked={clahe} onChange={(e) => onClaheChange(e.target.checked)} className="accent-sky-600" />
+          CLAHE
+        </label>
+        <label
+          className="flex items-center gap-1.5 text-[11px] text-gray-600 cursor-pointer"
+          title="3×3 Laplacian high-boost sharpen"
+        >
+          <input type="checkbox" checked={sharpen} onChange={(e) => onSharpenChange(e.target.checked)} className="accent-sky-600" />
+          Sharpen
+        </label>
       </div>
     </div>
   );

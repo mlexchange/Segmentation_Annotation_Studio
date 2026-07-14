@@ -32,17 +32,19 @@ import {
   type Processor,
 } from '@huggingface/transformers';
 
-// SlimSAM-77 (uniform) — smallest turnkey SAM. Served from the HF CDN by
-// default (browser-cached after first load). To run fully offline, vendor the
-// files under frontend/public/models/ and flip USE_LOCAL_MODEL (see
-// frontend/scripts/fetch-sam-model.mjs).
-const USE_LOCAL_MODEL = false;
-const MODEL_ID = USE_LOCAL_MODEL ? 'slimsam-77-uniform' : 'Xenova/slimsam-77-uniform';
+// SlimSAM-77 (uniform) — smallest turnkey SAM. Loaded LOCAL-FIRST from vendored
+// files under frontend/public/models/slimsam-77-uniform/ (run start_all.sh or
+// `node frontend/scripts/fetch-sam-model.mjs` to populate them), falling back to
+// the HF CDN when the local files aren't present. Local avoids the CDN 403 that
+// greys out "Smart (AI)".
+type ModelSource = { id: string; remote: boolean };
+const MODEL_SOURCES: ModelSource[] = [
+  { id: 'slimsam-77-uniform', remote: false },        // vendored local (/models/)
+  { id: 'Xenova/slimsam-77-uniform', remote: true },  // HF CDN fallback
+];
 
-if (USE_LOCAL_MODEL) {
-  env.allowRemoteModels = false;
-  env.localModelPath = '/models/';
-}
+env.allowLocalModels = true;
+env.localModelPath = '/models/';
 if (env.backends?.onnx?.wasm) env.backends.onnx.wasm.numThreads = 1;
 
 interface PromptPoint { x: number; y: number; label: 0 | 1 }
@@ -72,27 +74,31 @@ function post(msg: unknown, transfer?: Transferable[]) {
   (self as unknown as Worker).postMessage(msg, transfer ?? []);
 }
 
-/** Load the SAM model + processor onto a specific device and record the backend. */
-async function loadOn(device: Device) {
+/** Load the SAM model + processor from a source onto a device; records the backend. */
+async function loadOn(device: Device, source: ModelSource) {
+  env.allowRemoteModels = source.remote;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  model = await SamModel.from_pretrained(MODEL_ID, { device } as any);
-  processor = await AutoProcessor.from_pretrained(MODEL_ID);
+  model = await SamModel.from_pretrained(source.id, { device } as any);
+  processor = await AutoProcessor.from_pretrained(source.id);
   backend = device;
 }
 
-/** Load on the best available device, trying WebGPU first then WASM; returns the
- *  device that succeeded or throws if none load. */
+/** Load on the best available device (WebGPU first, then WASM), preferring the
+ *  vendored local model and falling back to the HF CDN. Returns the device that
+ *  succeeded or throws if nothing loads. */
 async function load(): Promise<Device> {
   const hasGpu = typeof (navigator as Navigator & { gpu?: unknown }).gpu !== 'undefined';
   const devices: Device[] = hasGpu ? ['webgpu', 'wasm'] : ['wasm'];
   let lastErr: unknown;
   for (const device of devices) {
-    try {
-      await loadOn(device);
-      return device;
-    } catch (err) {
-      lastErr = err;
-      console.error(`[SAM] load on ${device} failed`, err);
+    for (const source of MODEL_SOURCES) {
+      try {
+        await loadOn(device, source);
+        return device;
+      } catch (err) {
+        lastErr = err;
+        console.error(`[SAM] load ${source.id} on ${device} failed`, err);
+      }
     }
   }
   throw lastErr ?? new Error('SAM model failed to load');
@@ -101,8 +107,17 @@ async function load(): Promise<Device> {
 /** Reload the model on WASM after a WebGPU runtime failure and re-announce ready. */
 async function fallbackToWasm(reason: unknown) {
   console.warn('[SAM] WebGPU runtime failure — falling back to WASM', reason);
-  await loadOn('wasm');
-  post({ type: 'status', status: 'ready', backend: 'wasm' });
+  let lastErr: unknown;
+  for (const source of MODEL_SOURCES) {
+    try {
+      await loadOn('wasm', source);
+      post({ type: 'status', status: 'ready', backend: 'wasm' });
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr ?? new Error('SAM WASM fallback failed');
 }
 
 /** Fresh RawImage from the cached pixels (preprocessing mutates it). */
