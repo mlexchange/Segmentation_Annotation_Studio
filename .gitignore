@@ -52,3 +52,6 @@ coverage.xml
 
 # Vendored SAM model (large, fetched via frontend/scripts/fetch-sam-model.mjs)
 frontend/public/models/
+
+# MkDocs build output (regenerate with `mkdocs build`)
+site/

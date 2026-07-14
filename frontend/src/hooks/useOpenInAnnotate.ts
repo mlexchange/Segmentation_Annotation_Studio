@@ -5,7 +5,8 @@ import { useCallback } from 'react';
 import { useNavigate } from 'react-router';
 import { API_BASE } from '@/config';
 import { useDatasetStore } from '@/stores/datasetStore';
-import { useClassStore, DEFAULT_COLORS, type AnnotationClass } from '@/stores/classStore';
+import { useClassStore, type AnnotationClass } from '@/stores/classStore';
+import { getClassPalette } from '@/lib/classColors';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { loadDraft } from '@/hooks/useDraftSync';
 import { buildSourceKey } from '@/lib/sourceKey';
@@ -13,6 +14,7 @@ import type { Shape } from '@/stores/annotationStore';
 
 /** Build annotation classes from a dataset's ingest keyword tags (one per tag). */
 function classesFromKeywords(keywords: string[]): AnnotationClass[] {
+  const palette = getClassPalette();
   const seen = new Set<string>();
   const classes: AnnotationClass[] = [];
   for (const raw of keywords) {
@@ -24,7 +26,7 @@ function classesFromKeywords(keywords: string[]): AnnotationClass[] {
     classes.push({
       classId: classes.length + 1,
       label,
-      color: DEFAULT_COLORS[classes.length % DEFAULT_COLORS.length],
+      color: palette[classes.length % palette.length],
       isVisible: true,
     });
   }

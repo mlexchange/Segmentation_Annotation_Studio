@@ -18,13 +18,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 TILED_CONFIG="$SCRIPT_DIR/tiled/config.yml"
+MKDOCS_CONFIG="$SCRIPT_DIR/mkdocs.yml"
 TILED_PORT="${TILED_PORT:-8010}"
 BACKEND_PORT="${BACKEND_PORT:-8002}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+DOCS_PORT="${DOCS_PORT:-8000}"
 RUN_DIR="$SCRIPT_DIR/.run"
 TILED_PID_FILE="$RUN_DIR/tiled.pid"
 BACKEND_PID_FILE="$RUN_DIR/backend.pid"
 FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
+DOCS_PID_FILE="$RUN_DIR/docs.pid"
 ENV_DIR=""
 ENV_KIND=""
 REQUIRED_PYTHON_MAJOR=3
@@ -116,6 +119,7 @@ stop_managed_process() {
 
 cleanup_managed_processes() {
   mkdir -p "$RUN_DIR"
+  stop_managed_process "$DOCS_PID_FILE" "docs"
   stop_managed_process "$FRONTEND_PID_FILE" "frontend"
   stop_managed_process "$BACKEND_PID_FILE" "backend"
   stop_managed_process "$TILED_PID_FILE" "Tiled"
@@ -214,6 +218,7 @@ reclaim_orphaned_repo_ports() {
   fi
   stop_repo_listener_on_port "$FRONTEND_PORT" "frontend" "$FRONTEND_DIR" "vite" ""
   stop_repo_listener_on_port "$BACKEND_PORT" "backend" "$BACKEND_DIR" "annotation_server:app" "uvicorn"
+  stop_repo_listener_on_port "$DOCS_PORT" "docs" "$SCRIPT_DIR" "mkdocs" ""
   # Repo-scoped: only reclaim OUR own stale Tiled (its command line contains this
   # repo's config path). A foreign Tiled on the port is left alone — we coexist by
   # falling back to a second port (pick_free_port) and the frontend adapts.
@@ -285,6 +290,22 @@ ensure_frontend_runtime() {
   exit 1
 }
 
+# Ensure MkDocs + Material live in the .venv. Best-effort: never abort startup
+# (docs are a convenience — a failure here just means the in-app Docs link won't
+# resolve). Returns non-zero if mkdocs is unavailable so the caller can skip it.
+ensure_docs_env() {
+  if [ -x "$ENV_DIR/bin/mkdocs" ] && "$PYTHON" -c "import material" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo -e "${YELLOW}    Installing docs dependencies (mkdocs-material) via uv...${NC}"
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install --python "$PYTHON" -q -r "$SCRIPT_DIR/docs/requirements.txt" >/dev/null 2>&1 || true
+  else
+    "$PYTHON" -m pip install -q -r "$SCRIPT_DIR/docs/requirements.txt" >/dev/null 2>&1 || true
+  fi
+  [ -x "$ENV_DIR/bin/mkdocs" ] && "$PYTHON" -c "import material" >/dev/null 2>&1
+}
+
 tiled_cmd() {
   if [ -x "$ENV_DIR/bin/tiled" ]; then
     "$ENV_DIR/bin/tiled" "$@"
@@ -300,11 +321,12 @@ tiled_cmd() {
 cleanup() {
   echo ""
   echo -e "${YELLOW}Shutting down...${NC}"
-  kill "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
-  wait "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+  kill "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
+  wait "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
   cleanup_pid_file "$TILED_PID_FILE"
   cleanup_pid_file "$BACKEND_PID_FILE"
   cleanup_pid_file "$FRONTEND_PID_FILE"
+  cleanup_pid_file "$DOCS_PID_FILE"
   echo -e "${GREEN}Done.${NC}"
   exit 0
 }
@@ -339,6 +361,15 @@ FRONTEND_PORT="$(pick_free_port "$FRONTEND_PORT" "Frontend")"
 if [ "$FRONTEND_PORT" != "$_orig_frontend_port" ]; then
   echo -e "${YELLOW}    Frontend port ${_orig_frontend_port} is in use — using ${FRONTEND_PORT} instead.${NC}"
 fi
+
+# Docs (MkDocs): fall back to the next free port if busy. The in-app "Docs" link
+# targets whatever port we choose (via VITE_DOCS_URL, read in frontend/src/config.ts).
+_orig_docs_port="$DOCS_PORT"
+DOCS_PORT="$(pick_free_port "$DOCS_PORT" "Docs")"
+if [ "$DOCS_PORT" != "$_orig_docs_port" ]; then
+  echo -e "${YELLOW}    Docs port ${_orig_docs_port} is in use — using ${DOCS_PORT} instead.${NC}"
+fi
+export VITE_DOCS_URL="http://127.0.0.1:${DOCS_PORT}"
 
 # ---------------------------------------------------------------------------
 # Load .env — create it from .env.example if missing
@@ -525,6 +556,21 @@ for i in $(seq 1 20); do
 done
 
 # ---------------------------------------------------------------------------
+# Docs (MkDocs Material) — served live so the in-app "Docs" link works. Best-effort:
+# a failure here never blocks the app (the button simply won't resolve).
+# ---------------------------------------------------------------------------
+DOCS_PID=""
+if [ -f "$MKDOCS_CONFIG" ] && ensure_docs_env; then
+  echo -e "${CYAN}==> Starting docs (port ${DOCS_PORT})...${NC}"
+  (cd "$SCRIPT_DIR" && "$ENV_DIR/bin/mkdocs" serve -f "$MKDOCS_CONFIG" -a "127.0.0.1:${DOCS_PORT}") &
+  DOCS_PID=$!
+  echo "$DOCS_PID" > "$DOCS_PID_FILE"
+  echo -e "${GREEN}    Docs PID: $DOCS_PID${NC}"
+else
+  echo -e "${YELLOW}==> Skipping docs (mkdocs-material unavailable) — the in-app Docs link may not resolve.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
 # Frontend
 # ---------------------------------------------------------------------------
 echo -e "${CYAN}==> Starting frontend (port ${FRONTEND_PORT})...${NC}"
@@ -550,6 +596,9 @@ echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}  Tiled    : http://127.0.0.1:${TILED_PORT} (public / anonymous)${NC}"
 echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
 echo -e "${GREEN}  Backend  : http://127.0.0.1:${BACKEND_PORT}${NC}"
+if [ -n "$DOCS_PID" ]; then
+  echo -e "${GREEN}  Docs     : http://127.0.0.1:${DOCS_PORT}${NC}"
+fi
 echo -e "${GREEN}  Press Ctrl+C to stop all servers.${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo ""

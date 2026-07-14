@@ -10,6 +10,7 @@ export type HubAppLayoutProps = {
     headerTitle?: string;
     headerTitleClassName?: string;
     headerLogoUrl?: string;
+    docsUrl?: string;
     mainContentClassName?: string;
     headerClassName?: string;
     sidebarClassName?: string;
@@ -22,6 +23,7 @@ export default function HubAppLayout ( {
     routes,
     headerTitle,
     headerLogoUrl,
+    docsUrl,
     mainContentClassName, 
     headerClassName,
     headerTitleClassName,
@@ -41,6 +43,7 @@ return (
                     className={sidebarClassName} 
                     activeLinkClassName={sidebarActiveLinkClassName}
                     inactiveLinkClassName={sidebarInactiveLinkClassName}
+                    docsUrl={docsUrl}
                     onOpenTabSelector={onOpenTabSelector}
                 />
             </div>

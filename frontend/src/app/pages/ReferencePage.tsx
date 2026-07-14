@@ -14,7 +14,7 @@ import { useReferenceGuideStore, type GuideClass } from '@/stores/referenceGuide
 import { useGuideSync, generateGuide } from '@/hooks/useGuideSync';
 import { useSave } from '@/hooks/useSave';
 import { buildSourceKey } from '@/lib/sourceKey';
-import { DEFAULT_COLORS } from '@/stores/classStore';
+import { getClassPalette } from '@/lib/classColors';
 
 /** Reads a File as a base64 data URL. */
 function fileToDataUrl(file: File): Promise<string> {
@@ -159,10 +159,11 @@ export default function ReferencePage() {
     }
   };
 
-  /** Next unused default color, given colors already in the guide. */
+  /** Next unused color from the active palette, given colors already in the guide. */
   const nextColor = () => {
+    const palette = getClassPalette();
     const used = new Set(entries.map((e) => e.color));
-    return DEFAULT_COLORS.find((c) => !used.has(c)) ?? DEFAULT_COLORS[entries.length % DEFAULT_COLORS.length];
+    return palette.find((c) => !used.has(c)) ?? palette[entries.length % palette.length];
   };
 
   /** Download the guide (classes + descriptions + embedded example crops) as a shareable JSON file. */

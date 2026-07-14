@@ -1,0 +1,5 @@
+# Documentation build dependencies for SAM3 Annotation Studio.
+# Install with:  pip install -r docs/requirements.txt
+mkdocs>=1.6
+mkdocs-material>=9.6
+pymdown-extensions>=10.7

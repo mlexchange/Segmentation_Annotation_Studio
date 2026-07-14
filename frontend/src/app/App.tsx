@@ -4,6 +4,7 @@ import './App.css';
 import { RouteItem } from '@/types/navigationRouterTypes';
 import HubAppLayout from '@/components/HubAppLayout';
 import { useHubSelectedTabs } from '@/hooks/useHubSelectedTabs';
+import { DOCS_URL } from '@/config';
 import { PlugsConnected, PencilSimple, MagnifyingGlass, BookOpen } from '@phosphor-icons/react';
 import ConnectPage from './pages/ConnectPage';
 import AnnotatePage from './pages/AnnotatePage';
@@ -92,6 +93,7 @@ function App() {
       <HubAppLayout
         routes={filteredRoutes}
         headerTitle="Segmentation Annotation Tool"
+        docsUrl={DOCS_URL}
       />
       <CustomizePages
         routes={allRoutes}

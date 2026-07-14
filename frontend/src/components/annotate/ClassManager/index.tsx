@@ -4,11 +4,13 @@
  * Deleting a class removes all of its annotations (with confirmation).
  */
 import { useState } from 'react';
-import { Eye, EyeSlash, Pencil, Trash, Plus, Info } from '@phosphor-icons/react';
-import { useClassStore, DEFAULT_COLORS, type AnnotationClass } from '@/stores/classStore';
+import { Eye, EyeSlash, Pencil, Trash, Plus, Info, Eyedropper, Check } from '@phosphor-icons/react';
+import { useClassStore, type AnnotationClass } from '@/stores/classStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
 import { useReferenceGuideStore, type GuideClass } from '@/stores/referenceGuideStore';
+import { useSettingsStore } from '@/stores/settingsStore';
+import { getClassPalette } from '@/lib/classColors';
 import { cn } from '@/lib/utils';
 
 /** Counts all shapes assigned to a class across every image/slice in the annotation store. */
@@ -42,10 +44,21 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
   const [labelInput, setLabelInput] = useState(cls.label);
   const hasGuide = !!guide && (!!guide.description || guide.exampleCrops.length > 0);
 
-  /** Saves the edited label (if non-empty) to the class store and exits edit mode. */
+  /** Saves the edited label (if non-empty and changed) without leaving edit mode. */
   const commitLabel = () => {
     const trimmed = labelInput.trim();
-    if (trimmed) updateClass(cls.classId, { label: trimmed });
+    if (trimmed && trimmed !== cls.label) updateClass(cls.classId, { label: trimmed });
+  };
+
+  /** Commits the label and exits edit mode. */
+  const finishEditing = () => {
+    commitLabel();
+    setEditing(false);
+  };
+
+  /** Discards any label edit and exits edit mode (color changes are applied live). */
+  const cancelEditing = () => {
+    setLabelInput(cls.label);
     setEditing(false);
   };
 
@@ -80,10 +93,22 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
         )}
         onClick={onActivate}
       >
-        <span
-          className="w-4 h-4 rounded-sm flex-shrink-0 border border-black/10"
-          style={{ backgroundColor: cls.color }}
-        />
+        {editing ? (
+          <input
+            type="color"
+            aria-label="Class color"
+            title="Change class color"
+            value={cls.color}
+            onChange={(e) => updateClass(cls.classId, { color: e.target.value })}
+            onClick={(e) => e.stopPropagation()}
+            className="w-4 h-4 flex-shrink-0 cursor-pointer rounded-sm border border-black/10 bg-transparent p-0"
+          />
+        ) : (
+          <span
+            className="w-4 h-4 rounded-sm flex-shrink-0 border border-black/10"
+            style={{ backgroundColor: cls.color }}
+          />
+        )}
         {editing ? (
           <input
             autoFocus
@@ -91,7 +116,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
             value={labelInput}
             onChange={(e) => setLabelInput(e.target.value)}
             onBlur={commitLabel}
-            onKeyDown={(e) => { if (e.key === 'Enter') commitLabel(); if (e.key === 'Escape') setEditing(false); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') finishEditing(); if (e.key === 'Escape') cancelEditing(); }}
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
@@ -116,11 +141,17 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
           {cls.isVisible ? <Eye size={14} /> : <EyeSlash size={14} className="text-gray-400" />}
         </button>
         <button
-          aria-label="Edit class label"
-          className="p-0.5 hover:text-sky-600"
-          onClick={(e) => { e.stopPropagation(); setEditing(true); setLabelInput(cls.label); }}
+          aria-label={editing ? 'Finish editing class' : 'Edit class label and color'}
+          aria-pressed={editing}
+          title={editing ? 'Done' : 'Edit label and color'}
+          className={cn('p-0.5 hover:text-sky-600', editing && 'text-sky-600')}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (editing) { finishEditing(); }
+            else { setLabelInput(cls.label); setEditing(true); }
+          }}
         >
-          <Pencil size={14} />
+          {editing ? <Check size={14} /> : <Pencil size={14} />}
         </button>
         <button
           aria-label="Delete class and its annotations"
@@ -165,9 +196,16 @@ const DEFAULT_SUGGESTED_CLASSES = ['air', 'sample', 'void', 'pore', 'background'
 export default function ClassManager({ activeClassId, onActivate, onClassDeleted }: ClassManagerProps) {
   const { classes, addClass } = useClassStore();
   const guideEntries = useReferenceGuideStore((s) => s.entries);
+  const colorblindMode = useSettingsStore((s) => s.colorblindMode);
+  const setColorblindMode = useSettingsStore((s) => s.setColorblindMode);
   const [showAdd, setShowAdd] = useState(false);
   const [newLabel, setNewLabel] = useState('');
   const [newColor, setNewColor] = useState('');
+
+  // Toggle the colorblind-safe palette preference. This only affects the color
+  // auto-assigned to NEWLY added classes; existing classes keep their colors so
+  // we never silently rewrite already-annotated datasets.
+  const handleToggleColorblind = () => setColorblindMode(!colorblindMode);
 
   // Guide-defined classes drive suggestions + colors so annotators stay consistent
   // with the lead's intended labels; fall back to generic defaults when no guide.
@@ -186,10 +224,11 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
     }
   };
 
-  /** Returns the first unused default color, or cycles back if all are taken. */
+  /** Returns the first unused color from the active palette, or cycles back if all are taken. */
   const nextColor = () => {
+    const palette = getClassPalette();
     const used = new Set(classes.map((c) => c.color));
-    return DEFAULT_COLORS.find((c) => !used.has(c)) ?? DEFAULT_COLORS[classes.length % DEFAULT_COLORS.length];
+    return palette.find((c) => !used.has(c)) ?? palette[classes.length % palette.length];
   };
 
   /** Validates the new-class form (rejecting duplicate labels), adds the class, and activates it. */
@@ -210,12 +249,14 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
     setShowAdd(false);
   };
 
-  /** One-click add (or re-activate) a suggested class, inheriting the guide color if defined. */
+  /** One-click add (or re-activate) a suggested class. Inherits the guide color if
+   *  defined, unless colorblind mode is on — then the colorblind-safe palette wins. */
   const handleQuickAdd = (label: string) => {
     const existing = classes.find((c) => c.label.toLowerCase() === label.toLowerCase());
     if (existing) { onActivate(existing.classId); return; }
     const guideColor = guideByLabel.get(label.toLowerCase())?.color;
-    const classId = addClass(label, guideColor || nextColor());
+    const color = colorblindMode ? nextColor() : (guideColor || nextColor());
+    const classId = addClass(label, color);
     onActivate(classId);
   };
 
@@ -240,6 +281,20 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
           <Plus size={14} />
         </button>
       </div>
+
+      <label
+        className="flex items-center gap-1.5 mb-1 text-xs text-gray-600 cursor-pointer select-none"
+        title="Color newly added classes from a colorblind-safe palette (Okabe–Ito). Existing classes keep their colors."
+      >
+        <input
+          type="checkbox"
+          checked={colorblindMode}
+          onChange={handleToggleColorblind}
+          className="h-3.5 w-3.5 cursor-pointer accent-sky-600"
+        />
+        <Eyedropper size={13} className={colorblindMode ? 'text-sky-600' : 'text-gray-400'} />
+        <span>Colorblind-safe colors</span>
+      </label>
 
       {showAdd && (
         <div className="flex flex-col gap-1 bg-gray-50 rounded p-2 mb-1 text-sm">
