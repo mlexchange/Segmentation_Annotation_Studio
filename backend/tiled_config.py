@@ -78,6 +78,16 @@ def single_user_api_key_from_tiled_config(path: Path | None = None) -> str | Non
         return None
 
 
+def local_uri() -> str:
+    """Local Tiled base URI.
+
+    ``TILED_URI`` (set by ``start_all.sh`` to whatever port Tiled actually bound —
+    it may fall back off the default 8010 if that port is busy) takes precedence;
+    otherwise the built-in default.
+    """
+    return _stripped("TILED_URI") or _LOCAL_URI
+
+
 def _local_api_key() -> str | None:
     return (
         _stripped("TILED_LOCAL_API_KEY")
@@ -109,18 +119,18 @@ def get_tiled_servers() -> dict[str, dict[str, str | None]]:
         }
         i += 1
 
-    if not any(cfg["uri"] == _LOCAL_URI for cfg in servers.values()):
-        servers.setdefault(
-            "Local Data (port 8010)",
-            {"uri": _LOCAL_URI, "api_key": _local_api_key()},
-        )
+    lu = local_uri()
+    if not any(cfg["uri"] == lu for cfg in servers.values()):
+        port = lu.rsplit(":", 1)[-1]
+        name = f"Local Data (port {port})" if port.isdigit() else "Local Data"
+        servers.setdefault(name, {"uri": lu, "api_key": _local_api_key()})
 
     return servers
 
 
 def get_tiled_base() -> str:
     """Return the default Tiled base URI."""
-    return _stripped("TILED_URI") or _LOCAL_URI
+    return local_uri()
 
 
 def get_tiled_api_key() -> str | None:

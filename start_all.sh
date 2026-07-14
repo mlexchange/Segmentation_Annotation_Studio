@@ -64,6 +64,21 @@ require_free_port() {
   fi
 }
 
+# Echo the first free port at/above $1 (scanning up to +50), or exit if none.
+# Only the chosen port goes to stdout; status messages go to stderr.
+pick_free_port() {
+  local port="$1" label="$2" p="$1" max=$(( $1 + 50 ))
+  while [ "$p" -le "$max" ]; do
+    if ! port_is_listening "$p"; then
+      echo "$p"
+      return 0
+    fi
+    p=$(( p + 1 ))
+  done
+  echo -e "${RED}Error: no free ${label} port in ${port}..${max} on 127.0.0.1.${NC}" >&2
+  exit 1
+}
+
 cleanup_pid_file() {
   local pid_file="$1"
   rm -f "$pid_file"
@@ -296,7 +311,17 @@ ensure_backend_env
 ensure_frontend_runtime
 cleanup_managed_processes
 reclaim_orphaned_repo_ports
-require_free_port "$TILED_PORT" "Tiled"
+# Tiled: fall back to the next free port if the default is taken by something we
+# don't manage (e.g. another app's Tiled). Point the backend at the chosen port.
+_orig_tiled_port="$TILED_PORT"
+TILED_PORT="$(pick_free_port "$TILED_PORT" "Tiled")"
+if [ "$TILED_PORT" != "$_orig_tiled_port" ]; then
+  echo -e "${YELLOW}    Tiled port ${_orig_tiled_port} is in use — using ${TILED_PORT} instead.${NC}"
+fi
+# Export so the backend (tiled_config.py) and its server list resolve the same
+# local Tiled instance rather than the hardcoded default.
+export TILED_URI="http://127.0.0.1:${TILED_PORT}"
+
 require_free_port "$BACKEND_PORT" "Backend"
 require_free_port "$FRONTEND_PORT" "Frontend"
 
