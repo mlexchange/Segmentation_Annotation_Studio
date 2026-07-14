@@ -287,17 +287,25 @@ function shapeIntersectsRect(shape: Shape, r: BBox): boolean {
   if (shape.kind === 'polygon') {
     const p = shape.points;
     if (p.length < 6) return false;
-    for (let i = 0; i < p.length; i += 2) if (inRect(p[i], p[i + 1])) return true;
-    for (const [x, y] of corners) if (pointInPolygon(x, y, p)) return true;
-    for (let i = 0; i < p.length; i += 2) {
-      const ax = p[i], ay = p[i + 1];
-      const bx = p[(i + 2) % p.length], by = p[(i + 3) % p.length];
-      for (let k = 0; k < 4; k++) {
-        const [c1x, c1y] = corners[k];
-        const [c2x, c2y] = corners[(k + 1) % 4];
-        if (segIntersects(ax, ay, bx, by, c1x, c1y, c2x, c2y)) return true;
+    // Test the outer ring AND any holes: a ring vertex inside the rect, or a ring
+    // edge crossing a rect edge, means the marquee touches the shape boundary.
+    const rings = [p, ...(shape.holes ?? [])];
+    for (const ring of rings) {
+      for (let i = 0; i < ring.length; i += 2) if (inRect(ring[i], ring[i + 1])) return true;
+      for (let i = 0; i < ring.length; i += 2) {
+        const ax = ring[i], ay = ring[i + 1];
+        const bx = ring[(i + 2) % ring.length], by = ring[(i + 3) % ring.length];
+        for (let k = 0; k < 4; k++) {
+          const [c1x, c1y] = corners[k];
+          const [c2x, c2y] = corners[(k + 1) % 4];
+          if (segIntersects(ax, ay, bx, by, c1x, c1y, c2x, c2y)) return true;
+        }
       }
     }
+    // A rect corner inside the SOLID part only (inside the outer ring, outside every
+    // hole) — so a marquee that lies entirely within a hole does NOT select this
+    // shape (e.g. selecting an inner shape sitting in the hole of an outer one).
+    for (const [x, y] of corners) if (shapeContainsPoint(shape, x, y)) return true;
     return false;
   }
 
