@@ -110,6 +110,16 @@ function pointInPolygon(px: number, py: number, pts: number[]): boolean {
   return inside;
 }
 
+/** hex (#rgb or #rrggbb) → an rgba() string with the given alpha. Falls back to
+ *  the input untouched if it isn't a hex color. */
+function withAlpha(hex: string, a: number): string {
+  let h = hex.replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return hex;
+  const n = parseInt(h, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
 /** Shortest distance from point (px,py) to segment AB. */
 function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax, dy = by - ay;
@@ -382,6 +392,10 @@ export default function AnnotationCanvas({
 
   // Draft polygon vertices (click-vertex mode)
   const [draftPoly, setDraftPoly] = useState<number[]>([]);
+  // Whether the pointer is over the canvas — drives the brush/eraser cursor preview
+  // visibility reactively (so it survives re-renders and tool switches, unlike a
+  // purely imperative toggle).
+  const [pointerInside, setPointerInside] = useState(false);
   // Draft rect/ellipse start
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(null);
@@ -921,7 +935,10 @@ export default function AnnotationCanvas({
       // rather than storing an erase stroke: the vertices always match the visible
       // shape, splits produce independent polygons, and undo is a single clean
       // shape-replacement step (no lingering "invisible" carve-outs to track).
-      const { gw, gh, scale } = gridFor(meta.width, meta.height);
+      // Re-vectorize at full resolution (scale 1) for reasonably sized images so the
+      // rebuilt outline barely shifts; only downsample very large images.
+      const emax = Math.max(meta.width, meta.height);
+      const { gw, gh, scale } = gridFor(meta.width, meta.height, emax <= 4096 ? emax : 1600);
       const next: Shape[] = [];
       const replacedSelection: string[] = [];
       let clearedActiveBrush = false;
@@ -1197,6 +1214,7 @@ export default function AnnotationCanvas({
       brushCursorRef.current.position({ x: pos.x, y: pos.y });
       brushCursorLayerRef.current?.batchDraw();
     }
+    if (!pointerInside) setPointerInside(true);
 
     // Marquee rubber-band: update the box while dragging on empty canvas.
     if (tool === 'select' && marqueeStart && e.evt.buttons === 1) {
@@ -1338,11 +1356,7 @@ export default function AnnotationCanvas({
 
   /** Hides the brush cursor and commits any in-progress stroke/drag on exit. */
   const handleStageMouseLeave = () => {
-    // Hide brush cursor
-    if (brushCursorRef.current) {
-      brushCursorRef.current.visible(false);
-      brushCursorLayerRef.current?.batchDraw();
-    }
+    setPointerInside(false); // hides the cursor preview (reactive visible prop)
     // Commit any in-progress stroke
     if (isDrawing) {
       commitDraftStroke();
@@ -1354,19 +1368,26 @@ export default function AnnotationCanvas({
 
   /** Re-shows the brush/eraser size cursor when the pointer re-enters the stage. */
   const handleStageMouseEnter = () => {
-    if (showBrushCursor && brushCursorRef.current) {
-      brushCursorRef.current.visible(true);
+    setPointerInside(true);
+    // Snap the preview to the current pointer so it doesn't flash at a stale spot.
+    const pos = getPointerImagePos();
+    if (showBrushCursor && pos && brushCursorRef.current) {
+      brushCursorRef.current.position({ x: pos.x, y: pos.y });
       brushCursorLayerRef.current?.batchDraw();
     }
   };
 
-  // Hide brush cursor when switching away from brush/eraser tools
+  // When switching TO the brush/eraser while the pointer is already over the canvas
+  // (no mouse-enter fires), snap the preview to the current pointer position so it
+  // appears immediately rather than only after the next move.
   useEffect(() => {
-    if (!showBrushCursor && brushCursorRef.current) {
-      brushCursorRef.current.visible(false);
+    if (!showBrushCursor) return;
+    const pos = getPointerImagePos();
+    if (pos && brushCursorRef.current) {
+      brushCursorRef.current.position({ x: pos.x, y: pos.y });
       brushCursorLayerRef.current?.batchDraw();
     }
-  }, [showBrushCursor]);
+  }, [showBrushCursor]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Zoom in/out toward the cursor, keeping the point under the pointer fixed. */
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
@@ -2098,63 +2119,9 @@ export default function AnnotationCanvas({
           </Layer>
         )}
 
-        {/* Layer 2: draft polygon + drag preview */}
+        {/* Layer 2: drag preview (dimmed to match annotation fill opacity) */}
         <Layer opacity={fillOpacity}>
-          {draftPoly.length >= 2 && (
-            <>
-              <Line
-                points={draftPoly}
-                stroke={activeColor}
-                strokeWidth={1 / transform.scaleX}
-                dash={[4 / transform.scaleX, 2 / transform.scaleX]}
-                listening={false}
-                perfectDrawEnabled={false}
-              />
-              {draftPoly.map((_, i) =>
-                i % 2 === 0 ? (
-                  <Circle
-                    key={i}
-                    x={draftPoly[i]} y={draftPoly[i + 1]}
-                    radius={4 / transform.scaleX}
-                    fill={activeColor}
-                    listening={false}
-                  />
-                ) : null
-              )}
-            </>
-          )}
           {renderDraftShape()}
-
-          {/* Magnetic lasso: committed path (solid) + live edge-traced preview (dashed).
-              Kept visible while panning (tool flips to 'pan') so the trace survives. */}
-          {(tool === 'magnetic' || tool === 'pan') && magneticCommitted.length >= 2 && (
-            <Line
-              points={magneticCommitted}
-              stroke={activeColor}
-              strokeWidth={1.5 / transform.scaleX}
-              listening={false}
-              perfectDrawEnabled={false}
-            />
-          )}
-          {tool === 'magnetic' && magneticPreview.length >= 2 && (
-            <Line
-              points={magneticPreview}
-              stroke={activeColor}
-              strokeWidth={1.5 / transform.scaleX}
-              dash={[5 / transform.scaleX, 3 / transform.scaleX]}
-              listening={false}
-              perfectDrawEnabled={false}
-            />
-          )}
-          {(tool === 'magnetic' || tool === 'pan') && magneticSeedRef.current && (
-            <Circle
-              x={magneticSeedRef.current.x}
-              y={magneticSeedRef.current.y}
-              radius={4 / transform.scaleX}
-              fill={activeColor}
-              listening={false}
-            />
-          )}
 
           {/* SAM box prompt: committed box (solid) + live drag (dashed). */}
           {(tool === 'magic' || tool === 'pan') && (magicBox || magicBoxDraft) && (() => {
@@ -2256,6 +2223,72 @@ export default function AnnotationCanvas({
           ))}
         </Layer>
 
+        {/* Layer 2b: in-progress vector guides (polygon draft + magnetic lasso path).
+            Rendered at FULL opacity — these are guide lines, not fills, so they must
+            stay crisp regardless of the annotation fill opacity. */}
+        <Layer listening={false}>
+          {draftPoly.length >= 2 && (
+            <>
+              <Line
+                points={draftPoly}
+                stroke={activeColor}
+                strokeWidth={2.5 / transform.scaleX}
+                dash={[5 / transform.scaleX, 3 / transform.scaleX]}
+                lineCap="round"
+                lineJoin="round"
+                listening={false}
+                perfectDrawEnabled={false}
+              />
+              {draftPoly.map((_, i) =>
+                i % 2 === 0 ? (
+                  <Circle
+                    key={i}
+                    x={draftPoly[i]} y={draftPoly[i + 1]}
+                    radius={4 / transform.scaleX}
+                    fill={activeColor}
+                    listening={false}
+                  />
+                ) : null
+              )}
+            </>
+          )}
+
+          {/* Magnetic lasso: committed path (solid) + live edge-traced preview (dashed).
+              Kept visible while panning (tool flips to 'pan') so the trace survives. */}
+          {(tool === 'magnetic' || tool === 'pan') && magneticCommitted.length >= 2 && (
+            <Line
+              points={magneticCommitted}
+              stroke={activeColor}
+              strokeWidth={2.5 / transform.scaleX}
+              lineCap="round"
+              lineJoin="round"
+              listening={false}
+              perfectDrawEnabled={false}
+            />
+          )}
+          {tool === 'magnetic' && magneticPreview.length >= 2 && (
+            <Line
+              points={magneticPreview}
+              stroke={activeColor}
+              strokeWidth={2.5 / transform.scaleX}
+              dash={[5 / transform.scaleX, 3 / transform.scaleX]}
+              lineCap="round"
+              lineJoin="round"
+              listening={false}
+              perfectDrawEnabled={false}
+            />
+          )}
+          {(tool === 'magnetic' || tool === 'pan') && magneticSeedRef.current && (
+            <Circle
+              x={magneticSeedRef.current.x}
+              y={magneticSeedRef.current.y}
+              radius={4 / transform.scaleX}
+              fill={activeColor}
+              listening={false}
+            />
+          )}
+        </Layer>
+
         {/* Layer 3: in-progress brush stroke (imperatively updated, no React re-renders per move) */}
         <Layer ref={draftStrokeLayerRef} listening={false} opacity={fillOpacity} {...imageClip}>
           <Line
@@ -2274,11 +2307,13 @@ export default function AnnotationCanvas({
           <Circle
             ref={brushCursorRef}
             radius={brushSize}
-            visible={false}
-            fill={tool === 'eraser' ? '#ffffff' : activeColor}
-            opacity={tool === 'eraser' ? 0.2 : 0.25}
-            stroke={tool === 'eraser' ? '#e2e8f0' : activeColor}
-            strokeWidth={2 / transform.scaleX}
+            visible={showBrushCursor && pointerInside}
+            // Translucent fill (via rgba alpha) with a mostly-opaque, same-color
+            // border (node opacity ≈ 1) so the outline stays easy to see.
+            fill={tool === 'eraser' ? 'rgba(255,255,255,0.15)' : withAlpha(activeColor, 0.2)}
+            opacity={0.95}
+            stroke={tool === 'eraser' ? '#f8fafc' : activeColor}
+            strokeWidth={2.5 / transform.scaleX}
             dash={
               tool === 'eraser'
                 ? [5 / transform.scaleX, 4 / transform.scaleX]
