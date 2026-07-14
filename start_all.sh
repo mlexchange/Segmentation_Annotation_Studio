@@ -322,8 +322,21 @@ fi
 # local Tiled instance rather than the hardcoded default.
 export TILED_URI="http://127.0.0.1:${TILED_PORT}"
 
-require_free_port "$BACKEND_PORT" "Backend"
-require_free_port "$FRONTEND_PORT" "Frontend"
+# Backend: fall back to the next free port if busy. The Vite dev proxy targets
+# whatever port we choose (via API_PROXY_TARGET, read in vite.config.ts).
+_orig_backend_port="$BACKEND_PORT"
+BACKEND_PORT="$(pick_free_port "$BACKEND_PORT" "Backend")"
+if [ "$BACKEND_PORT" != "$_orig_backend_port" ]; then
+  echo -e "${YELLOW}    Backend port ${_orig_backend_port} is in use — using ${BACKEND_PORT} instead.${NC}"
+fi
+export API_PROXY_TARGET="http://127.0.0.1:${BACKEND_PORT}"
+
+# Frontend: fall back to the next free port if busy (Vite serves on --port below).
+_orig_frontend_port="$FRONTEND_PORT"
+FRONTEND_PORT="$(pick_free_port "$FRONTEND_PORT" "Frontend")"
+if [ "$FRONTEND_PORT" != "$_orig_frontend_port" ]; then
+  echo -e "${YELLOW}    Frontend port ${_orig_frontend_port} is in use — using ${FRONTEND_PORT} instead.${NC}"
+fi
 
 # ---------------------------------------------------------------------------
 # Load .env — create it from .env.example if missing

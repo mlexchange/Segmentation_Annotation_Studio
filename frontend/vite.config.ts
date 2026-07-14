@@ -14,7 +14,9 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:8002',
+      // Backend origin — start_all.sh sets API_PROXY_TARGET to the port the
+      // backend actually bound (it may fall back off 8002 if that port is busy).
+      '/api': process.env.API_PROXY_TARGET || 'http://127.0.0.1:8002',
     },
   },
   test: {
