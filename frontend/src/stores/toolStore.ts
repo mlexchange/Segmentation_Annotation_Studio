@@ -40,6 +40,9 @@ export interface ToolState {
   /** When true, a new annotation that overlaps existing shapes of the SAME class
    *  is unioned with them into one merged shape on commit. */
   mergeOverlappingSameClass: boolean;
+  /** Eraser scope: when true the eraser carves any visible class under the cursor;
+   *  when false (default) it only carves shapes of the active class. */
+  eraseAllClasses: boolean;
   /** Bumped to request the canvas re-fit the image to the viewport (F shortcut). */
   fitRequestId: number;
   setTool: (tool: Tool) => void;
@@ -59,6 +62,7 @@ export interface ToolState {
   setSamAvoidLabeled: (v: boolean) => void;
   setClipToOtherClasses: (v: boolean) => void;
   setMergeOverlappingSameClass: (v: boolean) => void;
+  setEraseAllClasses: (v: boolean) => void;
   requestFit: () => void;
 }
 
@@ -78,6 +82,7 @@ export const useToolStore = create<ToolState>((set) => ({
   samAvoidLabeled: true,
   clipToOtherClasses: false,
   mergeOverlappingSameClass: false,
+  eraseAllClasses: false,
   fitRequestId: 0,
   /** Switches the active tool and clears the current shape selection. */
   setTool: (tool) => set({ tool, selectedShapeIds: [] }),
@@ -111,6 +116,8 @@ export const useToolStore = create<ToolState>((set) => ({
   setClipToOtherClasses: (clipToOtherClasses) => set({ clipToOtherClasses }),
   /** Toggles auto-merging new annotations with overlapping same-class shapes. */
   setMergeOverlappingSameClass: (mergeOverlappingSameClass) => set({ mergeOverlappingSameClass }),
+  /** Toggles whether the eraser carves any visible class or just the active one. */
+  setEraseAllClasses: (eraseAllClasses) => set({ eraseAllClasses }),
   /** Bumps fitRequestId to signal the canvas to re-fit the image to the viewport. */
   requestFit: () => set((s) => ({ fitRequestId: s.fitRequestId + 1 })),
 }));

@@ -357,9 +357,9 @@ export default function AnnotationCanvas({
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
-  const { byImage, addShape, addShapes, appendBrushStroke, appendEraseStroke, updateShape, removeShapes, setShapes, setClassForShapes } = useAnnotationStore();
+  const { byImage, addShape, addShapes, appendBrushStroke, updateShape, removeShapes, setShapes, setClassForShapes } = useAnnotationStore();
   const clipboard = useClipboardStore();
-  const { tool, brushSize, fillOpacity, selectedShapeIds, setSelectedShapeId, setSelectedShapeIds } = useToolStore();
+  const { tool, brushSize, fillOpacity, eraseAllClasses, selectedShapeIds, setSelectedShapeId, setSelectedShapeIds } = useToolStore();
   // Single-selection id — drives move/resize/vertex editing (those need exactly one).
   const selectedId = selectedShapeIds.length === 1 ? selectedShapeIds[0] : null;
   const magicTolerance = useToolStore((s) => s.magicTolerance);
@@ -882,7 +882,7 @@ export default function AnnotationCanvas({
   const commitDraftStroke = () => {
     const draft = draftStrokeRef.current;
     if (!draft || !sourceKey) return;
-    const { shapeId, mode, points, radius, eraseTargetKind } = draft;
+    const { shapeId, mode, points, radius } = draft;
     draftStrokeRef.current = null;
 
     // Hide the draft line imperatively
@@ -894,8 +894,64 @@ export default function AnnotationCanvas({
     if (points.length < 2) return;
     // Duplicate single point so Konva renders it as a dot
     const finalPoints = points.length === 2 ? [...points, ...points] : points;
-    if (mode === 'erase' && eraseTargetKind === 'vector') {
-      appendEraseStroke(sourceKey, currentSlice, shapeId, { points: finalPoints, radius });
+    if (mode === 'erase') {
+      if (!meta) return;
+      const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
+      const visible = (s: Shape) =>
+        classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+      const inScope = (s: Shape) => eraseAllClasses || s.classId === activeClassId;
+      const strokeHits = (s: Shape) => {
+        for (let i = 0; i + 1 < finalPoints.length; i += 2) {
+          if (shapeContainsPoint(s, finalPoints[i], finalPoints[i + 1])) return true;
+        }
+        return false;
+      };
+      // Erase carves EVERY in-scope, visible shape the stroke passes over (plus the
+      // shape it started on, if any) — so a drag across several regions erases all
+      // of them, not just the first. "Erase all classes" widens the scope past the
+      // active class.
+      const targetIds = new Set(
+        sliceShapes
+          .filter((s) => s.id === shapeId || (visible(s) && inScope(s) && strokeHits(s)))
+          .map((s) => s.id),
+      );
+      if (targetIds.size === 0) return;
+
+      // Bake the erase directly into polygon geometry for every target (any kind),
+      // rather than storing an erase stroke: the vertices always match the visible
+      // shape, splits produce independent polygons, and undo is a single clean
+      // shape-replacement step (no lingering "invisible" carve-outs to track).
+      const { gw, gh, scale } = gridFor(meta.width, meta.height);
+      const next: Shape[] = [];
+      const replacedSelection: string[] = [];
+      let clearedActiveBrush = false;
+      for (const s of sliceShapes) {
+        if (!targetIds.has(s.id)) { next.push(s); continue; }
+        // Rasterize the shape WITH the erase applied, then re-vectorize. For a brush
+        // the erase is an erase-mode stroke; for other kinds it's an `erased` entry —
+        // rasterizeShapes honors both, so the resulting mask is the post-erase pixels.
+        const prospective: Shape = s.kind === 'brush'
+          ? { ...s, strokes: [...s.strokes, { points: finalPoints, radius, mode: 'erase' as const }] }
+          : { ...s, erased: [...(s.erased ?? []), { points: finalPoints, radius }] };
+        const mask = rasterizeShapes([prospective], gw, gh, scale);
+        const polys = maskToPolygonsWithHoles(mask, gw, gh, { minRegion: 4, scale })
+          .filter((p) => p.points.length >= 6)
+          .map((p) => ({
+            id: uuidv4(), classId: s.classId, kind: 'polygon' as const,
+            points: p.points, ...(p.holes.length ? { holes: p.holes } : {}),
+          }));
+        next.push(...polys);
+        if (selectedShapeIds.includes(s.id)) replacedSelection.push(...polys.map((p) => p.id));
+        if (s.id === activeBrushShapeId) clearedActiveBrush = true;
+      }
+      setShapes(sourceKey, currentSlice, next);
+      if (clearedActiveBrush) onNewBrushInstance(''); // the erased brush is now polygon(s)
+      // Keep vertex editing live on any rebuilt polygon that was selected; drop ids
+      // of shapes that were fully erased away.
+      setSelectedShapeIds([
+        ...selectedShapeIds.filter((id) => !targetIds.has(id)),
+        ...replacedSelection,
+      ]);
       return;
     }
 
@@ -1095,33 +1151,36 @@ export default function AnnotationCanvas({
       const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
       // Erase carves only from the topmost shape of the ACTIVE class under the
       // cursor, so it never eats into another layer. Falls back to the active
-      // brush instance if the click isn't over a shape.
+      // brush instance if the click isn't over a shape. If nothing is under the
+      // cursor we still start the stroke (so the preview shows and the user can
+      // drag ONTO a shape) — the target is resolved from the whole stroke on
+      // commit (see commitDraftStroke).
       const visible = (s: Shape) =>
         classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+      // "Erase all classes" ignores the active-class restriction (any visible shape).
+      const inScope = (s: Shape) => eraseAllClasses || s.classId === activeClassId;
       let target: Shape | undefined;
       for (let i = sliceShapes.length - 1; i >= 0; i--) {
         const s = sliceShapes[i];
-        if (s.classId === activeClassId && visible(s) && shapeContainsPoint(s, pos.x, pos.y)) { target = s; break; }
+        if (inScope(s) && visible(s) && shapeContainsPoint(s, pos.x, pos.y)) { target = s; break; }
       }
       if (!target && activeBrushShapeId) {
         target = sliceShapes.find((s) => s.id === activeBrushShapeId && s.kind === 'brush');
       }
-      if (target) {
-        draftStrokeRef.current = {
-          shapeId: target.id,
-          mode: 'erase',
-          points: [pos.x, pos.y],
-          radius: brushSize,
-          eraseTargetKind: target.kind === 'brush' ? 'brush' : 'vector',
-        };
-        // Show a white dash to indicate erasing.
-        if (draftLineRef.current) {
-          draftLineRef.current.stroke('#ffffff');
-          draftLineRef.current.strokeWidth(brushSize * 2);
-          draftLineRef.current.points([pos.x, pos.y]);
-          draftLineRef.current.visible(true);
-          draftStrokeLayerRef.current?.batchDraw();
-        }
+      draftStrokeRef.current = {
+        shapeId: target?.id ?? '',
+        mode: 'erase',
+        points: [pos.x, pos.y],
+        radius: brushSize,
+        eraseTargetKind: target && target.kind !== 'brush' ? 'vector' : 'brush',
+      };
+      // Show a white dash to indicate erasing.
+      if (draftLineRef.current) {
+        draftLineRef.current.stroke('#ffffff');
+        draftLineRef.current.strokeWidth(brushSize * 2);
+        draftLineRef.current.points([pos.x, pos.y]);
+        draftLineRef.current.visible(true);
+        draftStrokeLayerRef.current?.batchDraw();
       }
     }
   };

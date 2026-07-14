@@ -83,13 +83,14 @@ interface ToolbarProps {
 /** Renders the tool radiogroup, undo/redo, and the active tool's parameter controls. */
 export default function Toolbar({ disabled = false }: ToolbarProps) {
   const {
-    tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity, fillThreshold, setFillThreshold,
+    tool, setTool, brushSize, setBrushSize, fillThreshold, setFillThreshold,
     magicTolerance, setMagicTolerance, magicMode, setMagicMode, magicSigma, setMagicSigma,
     magicEdgeStop, setMagicEdgeStop, magicEngine, setMagicEngine,
     samDetail, setSamDetail, samThreshold, setSamThreshold,
     samAvoidLabeled, setSamAvoidLabeled,
     clipToOtherClasses, setClipToOtherClasses,
     mergeOverlappingSameClass, setMergeOverlappingSameClass,
+    eraseAllClasses, setEraseAllClasses,
   } = useToolStore();
   const sam = useSam(tool === 'magic' && magicEngine === 'sam');
   const { undo, redo } = useStore(useAnnotationStore.temporal);
@@ -186,6 +187,22 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
             onChange={(e) => setBrushSize(Number(e.target.value))}
             className="w-full"
           />
+          {tool === 'eraser' && (
+            <div role="radiogroup" aria-label="Erase scope" className="flex flex-col gap-1 mt-1">
+              {([['class', 'Erase selected class'], ['all', 'Erase all classes']] as const).map(([v, label]) => (
+                <label key={v} className="flex items-center gap-2 text-[11px] text-gray-600 cursor-pointer select-none">
+                  <input
+                    type="radio"
+                    name="erase-scope"
+                    checked={eraseAllClasses === (v === 'all')}
+                    onChange={() => setEraseAllClasses(v === 'all')}
+                    className="accent-sky-600"
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -362,17 +379,6 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
           )}
         </div>
       )}
-
-      <div className="flex flex-col gap-1">
-        <DebouncedSlider
-          label="Annotation opacity"
-          format={(v) => `${v}%`}
-          min={0}
-          max={100}
-          value={Math.round(fillOpacity * 100)}
-          onChange={(v) => setFillOpacity(v / 100)}
-        />
-      </div>
 
       <label
         className="flex items-center gap-2 text-[11px] text-gray-600 cursor-pointer mt-1"

@@ -21,6 +21,7 @@ import SliceNavigator from '@/components/annotate/SliceNavigator';
 import MaskToolsPanel from '@/components/annotate/MaskToolsPanel';
 import MeasurementPanel from '@/components/annotate/MeasurementPanel';
 import AnnotationCanvas from '@/components/annotate/AnnotationCanvas';
+import DebouncedSlider from '@/components/common/DebouncedSlider';
 import DownloadModal from '@/components/annotate/DownloadModal';
 import InsightsModal from '@/components/annotate/InsightsModal';
 import VersionHistoryModal from '@/components/annotate/VersionHistoryModal';
@@ -33,7 +34,7 @@ export default function AnnotatePage() {
   const navigate = useNavigate();
   const { source, kind, serverUri, meta } = useDatasetStore();
   const { removeShapes } = useAnnotationStore();
-  const { selectedShapeIds, setSelectedShapeId } = useToolStore();
+  const { selectedShapeIds, setSelectedShapeId, fillOpacity, setFillOpacity } = useToolStore();
   const { classes } = useClassStore();
 
   const [activeClassId, setActiveClassId] = useState<number | null>(null);
@@ -199,6 +200,14 @@ export default function AnnotatePage() {
             activeClassId={activeClassId}
             onActivate={handleActivateClass}
             onClassDeleted={handleClassDeleted}
+          />
+          <DebouncedSlider
+            label="Annotation opacity"
+            format={(v) => `${v}%`}
+            min={0}
+            max={100}
+            value={Math.round(fillOpacity * 100)}
+            onChange={(v) => setFillOpacity(v / 100)}
           />
           <hr />
           <Toolbar disabled={classes.length === 0} />
