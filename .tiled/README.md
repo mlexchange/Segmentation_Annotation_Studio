@@ -9,9 +9,10 @@ SQLite catalog and sample array data (~1 MB).
 After clone, run `./start_all.sh` from the repo root. The script creates
 `backend/.env` from `.env.example` and **generates a strong `TILED_API_KEY`** into it
 when the key is missing (or still the old committed value, which it auto-rotates).
-`tiled/config.yml` holds no literal key — it pulls the value via `${TILED_API_KEY}`,
-which the script exports before starting Tiled. The key lives only in the gitignored
-`backend/.env`, never inside these catalog files and never sent to the frontend.
+`tiled/config.yml` holds no literal key — the script passes the generated key to
+Tiled at launch via `--api-key` (robust across Tiled versions). The key lives only
+in the gitignored `backend/.env`, never inside these catalog files and never sent
+to the frontend.
 
 To replace this with an empty catalog, delete `.tiled/` and run `tiled catalog init`
 (see `start_all.sh`). To add more datasets, use `backend/scripts/seed_generated_data_to_tiled.py`.

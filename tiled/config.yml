@@ -1,9 +1,8 @@
 authentication:
   allow_anonymous_access: true
-  # No hardcoded key: Tiled expands ${TILED_API_KEY} from the environment at load
-  # time. start_all.sh generates it into backend/.env (gitignored) and exports it.
-  # Serving this config requires TILED_API_KEY to be set (anonymous access is read-only).
-  single_user_api_key: "${TILED_API_KEY}"
+  # No hardcoded key here. start_all.sh generates a key into backend/.env and
+  # passes it to Tiled at launch via `--api-key` (version-robust; avoids depending
+  # on YAML ${VAR} expansion). Anonymous access is read-only; the key authorizes writes.
 
 allow_origins:
   - "http://127.0.0.1:5173"

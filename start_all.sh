@@ -3,14 +3,12 @@
 # Usage: ./start_all.sh
 # Stop everything: Ctrl+C
 #
-# NOTE: Tiled auth lives in tiled/config.yml:
-#   authentication:
-#     allow_anonymous_access: true      # anonymous access is READ-ONLY
-#     single_user_api_key: "${TILED_API_KEY}"   # required for WRITES (e.g. ingest)
+# NOTE: Tiled auth. tiled/config.yml sets `allow_anonymous_access: true`
+# (anonymous access is READ-ONLY); WRITES (e.g. ingest) require the API key.
 # No key is hardcoded: this script GENERATES a strong TILED_API_KEY into
-# backend/.env (gitignored) on first run and exports it; tiled/config.yml pulls it
-# via ${TILED_API_KEY}, and the backend resolves the same value server-side
-# (backend/tiled_config.py) — never exposing it to the frontend.
+# backend/.env (gitignored) on first run, passes it to Tiled at launch via
+# `--api-key` (robust across Tiled versions), and the backend resolves the same
+# value server-side (backend/tiled_config.py) — never exposing it to the frontend.
 # Server binds to 127.0.0.1 (local-only). Do NOT change --host to 0.0.0.0
 # without reconsidering the auth posture.
 
@@ -448,7 +446,11 @@ fi
 # tiled_cmd is a shell function (can't be exec'd); the subshell waits on the real
 # tiled child. The ready-check below curls the port before declaring failure, so a
 # dead wrapper alone won't trip a false "Tiled failed to start".
-(cd "$SCRIPT_DIR" && tiled_cmd serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT") &
+# Pass the key via --api-key so Tiled's single_user_api_key exactly matches what
+# the backend sends — robust across Tiled versions (no YAML ${VAR} dependency).
+TILED_KEY_ARGS=()
+[ -n "${TILED_API_KEY// }" ] && TILED_KEY_ARGS=(--api-key "$TILED_API_KEY")
+(cd "$SCRIPT_DIR" && tiled_cmd serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT" "${TILED_KEY_ARGS[@]}") &
 TILED_PID=$!
 echo "$TILED_PID" > "$TILED_PID_FILE"
 echo -e "${GREEN}    Tiled PID: $TILED_PID${NC}"
