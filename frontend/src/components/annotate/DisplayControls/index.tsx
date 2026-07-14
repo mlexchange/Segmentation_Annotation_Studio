@@ -26,9 +26,9 @@ export interface DisplayControlsProps {
   onColormapChange: (c: ColormapName) => void;
   onGammaChange: (g: number) => void;
   /** Nonlinear display preprocessors (display-only; do not affect export). */
-  clahe: boolean;
+  stretch: boolean;
   sharpen: boolean;
-  onClaheChange: (v: boolean) => void;
+  onStretchChange: (v: boolean) => void;
   onSharpenChange: (v: boolean) => void;
 }
 
@@ -48,9 +48,9 @@ export default function DisplayControls({
   gamma,
   onColormapChange,
   onGammaChange,
-  clahe,
+  stretch,
   sharpen,
-  onClaheChange,
+  onStretchChange,
   onSharpenChange,
 }: DisplayControlsProps) {
   return (
@@ -135,14 +135,14 @@ export default function DisplayControls({
         />
       </div>
 
-      {/* Nonlinear enhancers (display-only; can combine: CLAHE → Sharpen). */}
+      {/* Nonlinear enhancers (display-only; can combine: Stretch → Sharpen). */}
       <div className="flex items-center gap-3 pt-0.5">
         <label
           className="flex items-center gap-1.5 text-[11px] text-gray-600 cursor-pointer"
-          title="Contrast-Limited Adaptive Histogram Equalization — boosts local contrast on faint scans"
+          title="Auto-contrast — stretches the 2nd–98th intensity percentiles across the full range"
         >
-          <input type="checkbox" checked={clahe} onChange={(e) => onClaheChange(e.target.checked)} className="accent-sky-600" />
-          CLAHE
+          <input type="checkbox" checked={stretch} onChange={(e) => onStretchChange(e.target.checked)} className="accent-sky-600" />
+          Auto-contrast
         </label>
         <label
           className="flex items-center gap-1.5 text-[11px] text-gray-600 cursor-pointer"

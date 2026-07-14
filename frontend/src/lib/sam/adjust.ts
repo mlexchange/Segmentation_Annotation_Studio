@@ -1,9 +1,10 @@
-import { applyCLAHE } from '@/lib/clahe';
+import { applyStretch } from '@/lib/stretch';
 import { applySharpen } from '@/lib/sharpen';
 
 /** Nonlinear display preprocessors baked before the linear brightness/contrast/levels. */
 export interface PreprocessOpts {
-  clahe?: boolean;
+  /** Global percentile histogram stretch (auto-contrast). */
+  stretch?: boolean;
   sharpen?: boolean;
 }
 
@@ -13,7 +14,7 @@ export interface PreprocessOpts {
  * the user actually sees. Windowing a low-contrast tomography slice before
  * encoding is one of the biggest levers on mask quality.
  *
- * Order: nonlinear preprocessors first (CLAHE → Sharpen), then the linear chain
+ * Order: nonlinear preprocessors first (Stretch → Sharpen), then the linear chain
  * mirroring the canvas filter exactly (Brighten → Contrast → Levels): Brighten
  * adds `brightness*255`; Contrast scales around mid-grey by `((contrast+100)/100)^2`;
  * Levels remaps `[lo,hi] → [0,255]`. Returns a canvas at native resolution.
@@ -34,7 +35,7 @@ export function renderAdjusted(
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.drawImage(image, 0, 0, width, height);
 
-  const doPre = !!(preprocess && (preprocess.clahe || preprocess.sharpen));
+  const doPre = !!(preprocess && (preprocess.stretch || preprocess.sharpen));
   const bcNoop = brightness === 0 && contrast === 0;
   const levelsNoop = levelsLo <= 0 && levelsHi >= 255;
   if (!doPre && bcNoop && levelsNoop) return canvas;
@@ -44,7 +45,7 @@ export function renderAdjusted(
 
   // Nonlinear preprocessors first (baked once), in a fixed order.
   if (doPre) {
-    if (preprocess!.clahe) applyCLAHE(d, width, height);
+    if (preprocess!.stretch) applyStretch(d, width, height);
     if (preprocess!.sharpen) applySharpen(d, width, height);
   }
 
@@ -72,7 +73,7 @@ export function renderAdjusted(
 }
 
 /**
- * Bake ONLY the nonlinear preprocessors (CLAHE / Sharpen) into a canvas — used as
+ * Bake ONLY the nonlinear preprocessors (Stretch / Sharpen) into a canvas — used as
  * the Konva display base, since brightness/contrast/levels/gamma/colormap stay on
  * the GPU SVG filter applied over it. Returns the source untouched when no
  * preprocessor is active.

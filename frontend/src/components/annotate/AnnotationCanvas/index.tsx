@@ -56,7 +56,7 @@ interface AnnotationCanvasProps {
   gamma?: number;
   /** Display-only nonlinear preprocessors baked into the image base (affect the
    *  tools' baked view but NOT the exported pixels). */
-  clahe?: boolean;
+  stretch?: boolean;
   sharpen?: boolean;
   /** Emits the current slice's 256-bin luminance histogram when it loads. */
   onHistogram?: (bins: number[]) => void;
@@ -318,7 +318,7 @@ export default function AnnotationCanvas({
   levelsHi,
   colormap = 'gray',
   gamma = 1,
-  clahe = false,
+  stretch = false,
   sharpen = false,
   onHistogram,
   activeClassId,
@@ -446,14 +446,14 @@ export default function AnnotationCanvas({
   // becomes the Konva image base; brightness/contrast/levels/gamma/colormap still
   // apply on top via the GPU SVG filter. Cache-key fragment so encodes/fields
   // refresh when toggled.
-  const preprocess = useMemo(() => ({ clahe, sharpen }), [clahe, sharpen]);
-  const preprocessKey = `${clahe ? 1 : 0}${sharpen ? 1 : 0}`;
+  const preprocess = useMemo(() => ({ stretch, sharpen }), [stretch, sharpen]);
+  const preprocessKey = `${stretch ? 1 : 0}${sharpen ? 1 : 0}`;
   const displayBase = useMemo<CanvasImageSource | null>(() => {
     if (!imageEl || !meta) return imageEl;
-    return (clahe || sharpen)
+    return (stretch || sharpen)
       ? renderPreprocessOnly(imageEl, meta.width, meta.height, preprocess)
       : imageEl;
-  }, [imageEl, meta, clahe, sharpen, preprocess]);
+  }, [imageEl, meta, stretch, sharpen, preprocess]);
 
   // SAM sees the preprocessed + brightness/contrast/levels-adjusted image
   // (windowing a low-contrast slice greatly helps), so the encode is keyed on
@@ -1978,7 +1978,7 @@ export default function AnnotationCanvas({
           setTransform((t) => ({ ...t, x: e.target.x(), y: e.target.y() }));
         }}
       >
-        {/* Layer 0: image — preprocessed base (CLAHE/Sharpen baked); linear
+        {/* Layer 0: image — preprocessed base (Stretch/Sharpen baked); linear
             brightness/contrast/levels/gamma/colormap applied via the GPU SVG filter below. */}
         <Layer ref={imageLayerRef}>
           {imageEl && meta && (

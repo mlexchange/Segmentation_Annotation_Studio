@@ -208,12 +208,29 @@ can_run_npm() {
 }
 
 ensure_uv() {
-  if ! command -v uv >/dev/null 2>&1; then
-    echo -e "${RED}Error: uv is not installed.${NC}"
-    echo -e "${RED}Install with: curl -LsSf https://astral.sh/uv/install.sh | sh${NC}"
-    echo -e "${RED}Then open a new shell (or run: source \$HOME/.local/bin/env) and retry.${NC}"
+  if command -v uv >/dev/null 2>&1; then
+    return 0
+  fi
+  echo -e "${YELLOW}    uv not found — installing via astral.sh...${NC}"
+  if ! command -v curl >/dev/null 2>&1; then
+    echo -e "${RED}Error: curl is required to auto-install uv. Install uv manually:${NC}"
+    echo -e "${RED}  curl -LsSf https://astral.sh/uv/install.sh | sh${NC}"
     exit 1
   fi
+  if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    echo -e "${RED}Error: uv installation failed. Install manually and retry.${NC}"
+    exit 1
+  fi
+  # Put uv on PATH for this session (the installer drops it in ~/.local/bin).
+  # shellcheck source=/dev/null
+  [ -f "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"
+  export PATH="$HOME/.local/bin:$PATH"
+  if ! command -v uv >/dev/null 2>&1; then
+    echo -e "${RED}Error: uv installed but not on PATH. Open a new shell (or run:${NC}"
+    echo -e "${RED}  source \$HOME/.local/bin/env) and re-run start_all.sh.${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}    uv installed.${NC}"
 }
 
 ensure_backend_env() {
