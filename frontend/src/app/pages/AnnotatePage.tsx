@@ -194,7 +194,7 @@ export default function AnnotatePage() {
     <>
       <div className="flex h-full overflow-hidden">
         {/* Sidebar */}
-        <div className="w-56 flex-shrink-0 border-r border-gray-200 bg-white overflow-y-auto p-3 flex flex-col gap-4">
+        <div className="w-56 flex-shrink-0 border-r border-gray-200 bg-white overflow-y-auto overflow-x-hidden p-3 flex flex-col gap-4">
           <ClassManager
             activeClassId={activeClassId}
             onActivate={handleActivateClass}

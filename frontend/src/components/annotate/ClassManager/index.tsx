@@ -88,7 +88,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
     <div>
       <div
         className={cn(
-          'flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer select-none',
+          'flex items-center gap-1.5 px-2 py-1.5 rounded-md cursor-pointer select-none min-w-0',
           isActive ? 'bg-sky-100 dark:bg-sky-900' : 'hover:bg-gray-100 dark:hover:bg-gray-800'
         )}
         onClick={onActivate}
@@ -112,7 +112,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
         {editing ? (
           <input
             autoFocus
-            className="flex-1 text-sm border rounded px-1 py-0.5"
+            className="flex-1 min-w-0 text-sm border rounded px-1 py-0.5"
             value={labelInput}
             onChange={(e) => setLabelInput(e.target.value)}
             onBlur={commitLabel}
@@ -120,13 +120,13 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <span className="flex-1 text-sm truncate">{cls.label}</span>
+          <span className="flex-1 min-w-0 text-sm truncate">{cls.label}</span>
         )}
         {hasGuide && (
           <button
             aria-label="Show annotation guide for this class"
             aria-pressed={showGuide}
-            className={cn('p-0.5 hover:text-sky-600', showGuide && 'text-sky-600')}
+            className={cn('shrink-0 p-0.5 hover:text-sky-600', showGuide && 'text-sky-600')}
             onClick={(e) => { e.stopPropagation(); setShowGuide((v) => !v); }}
           >
             <Info size={14} />
@@ -135,7 +135,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
         <button
           aria-pressed={cls.isVisible}
           aria-label={cls.isVisible ? 'Hide class' : 'Show class'}
-          className="p-0.5 hover:text-sky-600"
+          className="shrink-0 p-0.5 hover:text-sky-600"
           onClick={(e) => { e.stopPropagation(); toggleVisibility(cls.classId); }}
         >
           {cls.isVisible ? <Eye size={14} /> : <EyeSlash size={14} className="text-gray-400" />}
@@ -144,7 +144,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
           aria-label={editing ? 'Finish editing class' : 'Edit class label and color'}
           aria-pressed={editing}
           title={editing ? 'Done' : 'Edit label and color'}
-          className={cn('p-0.5 hover:text-sky-600', editing && 'text-sky-600')}
+          className={cn('shrink-0 p-0.5 hover:text-sky-600', editing && 'text-sky-600')}
           onClick={(e) => {
             e.stopPropagation();
             if (editing) { finishEditing(); }
@@ -155,7 +155,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
         </button>
         <button
           aria-label="Delete class and its annotations"
-          className="p-0.5 hover:text-red-500"
+          className="shrink-0 p-0.5 hover:text-red-500"
           onClick={handleDelete}
         >
           <Trash size={14} />
@@ -164,7 +164,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
 
       {hasGuide && showGuide && guide && (
         <div className="mx-2 mt-1 mb-1 rounded-md border border-sky-100 bg-sky-50/60 p-2 text-xs text-gray-600">
-          {guide.description && <p className="whitespace-pre-wrap">{guide.description}</p>}
+          {guide.description && <p className="whitespace-pre-wrap break-words">{guide.description}</p>}
           {guide.exampleCrops.length > 0 && (
             <div className="mt-1.5 flex flex-wrap gap-1">
               {guide.exampleCrops.map((src, i) => (
@@ -330,11 +330,11 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
               key={label}
               type="button"
               onClick={() => handleQuickAdd(label)}
-              title={guideByLabel.get(label.toLowerCase())?.description || undefined}
-              className="flex items-center gap-0.5 text-xs px-1.5 py-0.5 rounded-full border border-gray-200 text-gray-600 hover:bg-sky-50 hover:border-sky-300 hover:text-sky-700 transition-colors"
+              title={guideByLabel.get(label.toLowerCase())?.description || label}
+              className="flex items-center gap-0.5 max-w-full min-w-0 text-xs px-1.5 py-0.5 rounded-full border border-gray-200 text-gray-600 hover:bg-sky-50 hover:border-sky-300 hover:text-sky-700 transition-colors"
             >
-              <Plus size={10} />
-              {label}
+              <Plus size={10} className="shrink-0" />
+              <span className="truncate">{label}</span>
             </button>
           ))}
         </div>
