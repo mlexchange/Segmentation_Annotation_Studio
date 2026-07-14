@@ -17,6 +17,10 @@ metadata-driven Browse UI (which needs fields with >=2 distinct values):
   same value is written to every node in the batch so a single drop is filterable
   (these keys are made facet-eligible with one distinct value, see
   ``browse_helpers._SINGLE_VALUE_FACET_RAW_KEYS``).
+* ``keywords``        — the ``description`` split on commas into a LIST of tags.
+  Each tag becomes an individually-searchable Browse value (see
+  ``browse_helpers``) and is pre-created as an annotation class for the dataset
+  in the Annotate tab.
 
 Job state is held in-memory (lost on restart) — acceptable for a localhost tool.
 """
@@ -136,6 +140,33 @@ def _image_number(stem: str, width: int, fallback_index: int) -> str:
     return str(fallback_index).zfill(width)
 
 
+def parse_keywords(description: str) -> list[str]:
+    """Split a comma-separated ``description`` into a de-duplicated tag list.
+
+    Each tag doubles as (a) an annotation class pre-created for the dataset in
+    the Annotate tab and (b) an individually-searchable value in Browse. Order
+    is preserved and case-insensitive duplicates are dropped.
+
+    Args:
+        description: Raw comma-separated string entered on the Connect page.
+
+    Returns:
+        Ordered list of non-empty, de-duplicated tag strings.
+    """
+    tags: list[str] = []
+    seen: set[str] = set()
+    for part in (description or "").split(","):
+        tag = part.strip()
+        if not tag:
+            continue
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tags.append(tag)
+    return tags
+
+
 def run_ingest_job(
     jid: str,
     server_uri: str | None,
@@ -154,6 +185,7 @@ def run_ingest_job(
             batch is identifiable/filterable in Browse (empty string → omitted).
     """
     description = (description or "").strip()
+    keywords = parse_keywords(description)
     _update(jid, state="running")
     try:
         api_key = api_key_for_uri(server_uri)
@@ -172,6 +204,10 @@ def run_ingest_job(
         }
         if description:
             container_meta["description"] = description
+        if keywords:
+            # A LIST so Browse can offer each tag as its own filter value and
+            # Annotate can pre-create one class per tag.
+            container_meta["keywords"] = keywords
         try:
             target.update_metadata(metadata=container_meta)
         except Exception as exc:  # noqa: BLE001 — best-effort; per-array meta still set
@@ -189,6 +225,8 @@ def run_ingest_job(
                 }
                 if description:
                     meta["description"] = description
+                if keywords:
+                    meta["keywords"] = keywords
                 if arr.ndim == 3 and arr.shape[2] in (3, 4):
                     dims = ["y", "x", "channel"]
                 elif arr.ndim == 2:

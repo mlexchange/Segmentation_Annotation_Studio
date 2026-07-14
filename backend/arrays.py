@@ -126,6 +126,45 @@ def _stack_keys(node: Any) -> list[str]:
     return sorted(node)
 
 
+def node_keywords(node: Any) -> list[str]:
+    """Return the ``keywords`` tag list stored on *node* (or its first child).
+
+    Ingest writes ``keywords`` on both the dataset container and each array
+    child. For a stack container we read the container metadata first, then fall
+    back to the first slice. Non-Tiled inputs have no metadata → empty list.
+
+    Args:
+        node: A resolved Tiled node (array or container-stack) or NumPy array.
+
+    Returns:
+        List of tag strings; empty when none are present.
+    """
+    def _from_meta(meta: Any) -> list[str] | None:
+        try:
+            value = (meta or {}).get("keywords")
+        except AttributeError:
+            return None
+        if isinstance(value, (list, tuple)):
+            return [str(v) for v in value if str(v).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return None
+
+    tags = _from_meta(getattr(node, "metadata", None))
+    if tags:
+        return tags
+    if _is_container_node(node):
+        try:
+            keys = _stack_keys(node)
+            if keys:
+                child_tags = _from_meta(getattr(node[keys[0]], "metadata", None))
+                if child_tags:
+                    return child_tags
+        except Exception:  # noqa: BLE001 — metadata is best-effort
+            pass
+    return []
+
+
 def array_shape_meta(node: Any) -> dict[str, Any]:
     """Return shape-dispatch metadata for *node*.
 

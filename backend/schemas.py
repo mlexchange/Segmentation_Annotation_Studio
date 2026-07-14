@@ -297,6 +297,8 @@ class ImageMeta(BaseModel):
         dtype: NumPy dtype string (e.g. ``"float32"``).
         is_rgb: ``True`` if the array has a colour channel dimension.
         value_range: ``[min, max]`` of the first slice.
+        keywords: Dataset tags stored at ingest; each is pre-created as an
+            annotation class in the Annotate tab.
     """
 
     n_slices: int
@@ -305,3 +307,4 @@ class ImageMeta(BaseModel):
     dtype: str
     is_rgb: bool
     value_range: list[float]
+    keywords: list[str] = Field(default_factory=list)

@@ -5,30 +5,54 @@ import { useCallback } from 'react';
 import { useNavigate } from 'react-router';
 import { API_BASE } from '@/config';
 import { useDatasetStore } from '@/stores/datasetStore';
-import { useClassStore } from '@/stores/classStore';
+import { useClassStore, DEFAULT_COLORS, type AnnotationClass } from '@/stores/classStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { loadDraft } from '@/hooks/useDraftSync';
 import { buildSourceKey } from '@/lib/sourceKey';
 import type { Shape } from '@/stores/annotationStore';
 
+/** Build annotation classes from a dataset's ingest keyword tags (one per tag). */
+function classesFromKeywords(keywords: string[]): AnnotationClass[] {
+  const seen = new Set<string>();
+  const classes: AnnotationClass[] = [];
+  for (const raw of keywords) {
+    const label = raw.trim();
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    classes.push({
+      classId: classes.length + 1,
+      label,
+      color: DEFAULT_COLORS[classes.length % DEFAULT_COLORS.length],
+      isVisible: true,
+    });
+  }
+  return classes;
+}
+
 /** Merge a loaded draft into the stores for the given sourceKey.
- *  Types are derived from each store's STATE (`getState`) rather than the
- *  hook's overloaded return type, which TS resolves to `unknown`. */
+ *  Returns true if the draft supplied a class list (so callers can skip seeding
+ *  pre-created classes). Types are derived from each store's STATE (`getState`)
+ *  rather than the hook's overloaded return type, which TS resolves to `unknown`. */
 async function applyDraft(
   sourceKey: string,
   setClasses: ReturnType<typeof useClassStore.getState>['setClasses'],
   mergeSourceDraft: ReturnType<typeof useAnnotationStore.getState>['mergeSourceDraft'],
-) {
+): Promise<boolean> {
   const draft = await loadDraft(sourceKey);
-  if (!draft?.payload) return;
+  if (!draft?.payload) return false;
   const payload = draft.payload as Record<string, unknown>;
-  if (Array.isArray(payload.classes)) {
+  let hadClasses = false;
+  if (Array.isArray(payload.classes) && payload.classes.length > 0) {
     setClasses(payload.classes as Parameters<typeof setClasses>[0]);
+    hadClasses = true;
   }
   const slices = (payload.slices ?? {}) as Record<string, Shape[]>;
   const splitMap = (payload.split_by_slice ?? {}) as Record<string, string>;
   const negSlices = (payload.negative_slices ?? []) as string[];
   mergeSourceDraft(sourceKey, slices, splitMap, negSlices);
+  return hadClasses;
 }
 
 /**
@@ -65,7 +89,11 @@ export function useOpenInAnnotate() {
       if (initialSlice > 0) setSlice(Math.min(initialSlice, Math.max(0, meta.n_slices - 1)));
 
       const sourceKey = buildSourceKey('tiled', tiledPath, serverUri);
-      await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      const hadClasses = await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      // No saved classes yet → pre-create one class per ingest keyword tag.
+      if (!hadClasses && Array.isArray(meta.keywords) && meta.keywords.length > 0) {
+        setClasses(classesFromKeywords(meta.keywords));
+      }
       navigate('/annotate');
     },
     [navigate, setDataset, setSlice, setClasses, mergeSourceDraft],
@@ -90,7 +118,10 @@ export function useOpenInAnnotate() {
       });
 
       const sourceKey = buildSourceKey('local', relPath);
-      await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      const hadClasses = await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      if (!hadClasses && Array.isArray(meta.keywords) && meta.keywords.length > 0) {
+        setClasses(classesFromKeywords(meta.keywords));
+      }
       navigate('/annotate');
     },
     [navigate, setDataset, setClasses, mergeSourceDraft],

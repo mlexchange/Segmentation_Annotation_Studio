@@ -539,6 +539,7 @@ async def image_meta(
             dtype=meta["dtype"],
             is_rgb=meta["is_rgb"],
             value_range=[float(flat.min()), float(flat.max())],
+            keywords=arrays_mod.node_keywords(node),
         )
 
     try:

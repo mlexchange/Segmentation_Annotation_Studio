@@ -41,6 +41,7 @@ _STUDIO_RAW_KEYS: tuple[str, ...] = (
 # user-supplied description). Without this they'd be hidden by the >=2 rule.
 _INGEST_FACET_RAW_KEYS: tuple[str, ...] = (
     "description",
+    "keywords",
     "sample_name",
     "original_filename",
 )
@@ -49,6 +50,11 @@ _INGEST_FACET_RAW_KEYS: tuple[str, ...] = (
 _SINGLE_VALUE_FACET_RAW_KEYS: frozenset[str] = frozenset(
     (*_STUDIO_RAW_KEYS, *_INGEST_FACET_RAW_KEYS),
 )
+
+# Metadata keys stored as a LIST of values (rather than a scalar). Each element
+# is treated as its own distinct Browse value, and filtering matches membership
+# (via Tiled's ``Contains`` query) rather than equality.
+_LIST_VALUED_RAW_KEYS: frozenset[str] = frozenset({"keywords"})
 
 # Raw keys that are stored at the array-node level rather than on the parent
 # sample container. When a filter references one of these, we switch to a
@@ -132,7 +138,7 @@ def build_field_mapping(container_node: Any) -> FieldMapping:
 
 # Ingest writes these at the dataset-container level, so they're always worth
 # offering as facets even when the scanned sample metadata didn't surface them.
-_INJECTED_INGEST_RAW_KEYS: tuple[str, ...] = ("description", "sample_name")
+_INJECTED_INGEST_RAW_KEYS: tuple[str, ...] = ("description", "keywords", "sample_name")
 
 
 def _inject_studio_keys(
@@ -198,13 +204,21 @@ def scoped_metadata_rows(node: Any, limit: int = 5000) -> list[dict]:
 
 
 def distinct_from_rows(rows: list[dict], raw_key: str) -> list[dict]:
-    """Tally distinct values of *raw_key* across pre-read metadata *rows*."""
+    """Tally distinct values of *raw_key* across pre-read metadata *rows*.
+
+    List-valued metadata (e.g. ``keywords``) is exploded so each element is
+    counted as its own distinct value, making every tag individually filterable.
+    """
     counts: dict[Any, int] = {}
     for meta in rows:
         val = meta.get(raw_key)
         if val is None:
             continue
-        counts[val] = counts.get(val, 0) + 1
+        values = val if isinstance(val, (list, tuple)) else [val]
+        for item in values:
+            if item is None:
+                continue
+            counts[item] = counts.get(item, 0) + 1
     return [{"value": v, "count": c} for v, c in counts.items()]
 
 
@@ -447,24 +461,44 @@ def _raw_filters(
 
 
 def _apply_filters(node: Any, raw_filters: Iterable[tuple[str, str]]) -> Any:
-    """Apply each ``Key(...) == value`` filter to *node*, skipping failures."""
+    """Apply each filter to *node*, skipping failures.
+
+    List-valued keys (e.g. ``keywords``) match membership via ``Contains``;
+    scalar keys match equality via ``Key(...) == value``.
+    """
     from tiled.queries import Key
+
+    try:
+        from tiled.queries import Contains
+    except ImportError:  # pragma: no cover — older Tiled without Contains
+        Contains = None
 
     for r_key, val in raw_filters:
         try:
-            node = node.search(Key(r_key) == _typed_query_value(val))
+            if r_key in _LIST_VALUED_RAW_KEYS and Contains is not None:
+                node = node.search(Contains(r_key, val))
+            else:
+                node = node.search(Key(r_key) == _typed_query_value(val))
         except Exception:  # noqa: BLE001
             pass
     return node
 
 
 def _matches_container_filters(meta: dict, container_filters: list[tuple[str, str]]) -> bool:
-    """Case-insensitive exact match over container-level metadata."""
+    """Case-insensitive match over container-level metadata.
+
+    Scalar values match by equality; list-valued metadata matches if the filter
+    value is one of the list's members.
+    """
     for r_key, val in container_filters:
         sample_val = meta.get(r_key)
         if sample_val is None:
             return False
-        if str(sample_val).strip().lower() != val.strip().lower():
+        target = val.strip().lower()
+        if isinstance(sample_val, (list, tuple)):
+            if target not in {str(item).strip().lower() for item in sample_val}:
+                return False
+        elif str(sample_val).strip().lower() != target:
             return False
     return True
 
