@@ -123,7 +123,9 @@ cleanup_managed_processes() {
 
 get_process_command() {
   local pid="$1"
-  ps -o command= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//'
+  # -ww: don't truncate the command line (macOS ps truncates to ~terminal width
+  # by default, which would drop the config path / args we match on).
+  ps -ww -o command= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//'
 }
 
 get_process_cwd() {
@@ -212,6 +214,9 @@ reclaim_orphaned_repo_ports() {
   fi
   stop_repo_listener_on_port "$FRONTEND_PORT" "frontend" "$FRONTEND_DIR" "vite" ""
   stop_repo_listener_on_port "$BACKEND_PORT" "backend" "$BACKEND_DIR" "annotation_server:app" "uvicorn"
+  # Repo-scoped: only reclaim OUR own stale Tiled (its command line contains this
+  # repo's config path). A foreign Tiled on the port is left alone — we coexist by
+  # falling back to a second port (pick_free_port) and the frontend adapts.
   stop_repo_listener_on_port "$TILED_PORT" "Tiled" "$SCRIPT_DIR" "$TILED_CONFIG" "tiled"
 }
 
@@ -316,9 +321,8 @@ TILED_PORT="$(pick_free_port "$TILED_PORT" "Tiled")"
 if [ "$TILED_PORT" != "$_orig_tiled_port" ]; then
   echo -e "${YELLOW}    Tiled port ${_orig_tiled_port} is in use — using ${TILED_PORT} instead.${NC}"
 fi
-# Export so the backend (tiled_config.py) and its server list resolve the same
-# local Tiled instance rather than the hardcoded default.
-export TILED_URI="http://127.0.0.1:${TILED_PORT}"
+# NOTE: TILED_URI is exported AFTER sourcing .env below, so the chosen port wins
+# over any TILED_URI baked into .env (otherwise .env would clobber it).
 
 # Backend: fall back to the next free port if busy. The Vite dev proxy targets
 # whatever port we choose (via API_PROXY_TARGET, read in vite.config.ts).
@@ -348,6 +352,12 @@ set -a
 # shellcheck source=/dev/null
 source "$BACKEND_DIR/.env"
 set +a
+
+# Point the backend (and its /api/config/servers list) at the Tiled instance we
+# actually launch — the chosen port, which may differ from any TILED_URI baked
+# into .env. Exported AFTER sourcing .env so it wins; the frontend then discovers
+# the real port from /api/config/servers on startup.
+export TILED_URI="http://127.0.0.1:${TILED_PORT}"
 
 # Generate a strong Tiled API key so nothing is hardcoded. Runs when the key is
 # blank (fresh install) OR still the old committed/leaked value (auto-rotate it).
