@@ -57,7 +57,7 @@ interface AnnotationCanvasProps {
   gamma?: number;
   /** Display-only nonlinear preprocessors baked into the image base (affect the
    *  tools' baked view but NOT the exported pixels). */
-  stretch?: boolean;
+  clahe?: boolean;
   sharpen?: boolean;
   /** Emits the current slice's 256-bin luminance histogram when it loads. */
   onHistogram?: (bins: number[]) => void;
@@ -397,7 +397,7 @@ export default function AnnotationCanvas({
   levelsHi,
   colormap = 'gray',
   gamma = 1,
-  stretch = false,
+  clahe = false,
   sharpen = false,
   onHistogram,
   activeClassId,
@@ -438,7 +438,10 @@ export default function AnnotationCanvas({
     : null;
   const { byImage, addShape, addShapes, appendBrushStroke, updateShape, removeShapes, setShapes, setClassForShapes } = useAnnotationStore();
   const clipboard = useClipboardStore();
-  const { tool, brushSize, fillOpacity, eraseAllClasses, selectedShapeIds, setSelectedShapeId, setSelectedShapeIds } = useToolStore();
+  const { tool, brushSize, fillOpacity, eraseAllClasses, selectScope, panReturnTool, selectedShapeIds, setSelectedShapeId, setSelectedShapeIds } = useToolStore();
+  // While hold-Space panning, `tool` is 'pan' but we still want brush/eraser UI
+  // (cursor circle) to reflect the tool we'll return to.
+  const underlyingTool = tool === 'pan' && panReturnTool ? panReturnTool : tool;
   // Single-selection id — drives move/resize/vertex editing (those need exactly one).
   const selectedId = selectedShapeIds.length === 1 ? selectedShapeIds[0] : null;
   const magicTolerance = useToolStore((s) => s.magicTolerance);
@@ -529,14 +532,14 @@ export default function AnnotationCanvas({
   // becomes the Konva image base; brightness/contrast/levels/gamma/colormap still
   // apply on top via the GPU SVG filter. Cache-key fragment so encodes/fields
   // refresh when toggled.
-  const preprocess = useMemo(() => ({ stretch, sharpen }), [stretch, sharpen]);
-  const preprocessKey = `${stretch ? 1 : 0}${sharpen ? 1 : 0}`;
+  const preprocess = useMemo(() => ({ clahe, sharpen }), [clahe, sharpen]);
+  const preprocessKey = `${clahe ? 1 : 0}${sharpen ? 1 : 0}`;
   const displayBase = useMemo<CanvasImageSource | null>(() => {
     if (!imageEl || !meta) return imageEl;
-    return (stretch || sharpen)
+    return (clahe || sharpen)
       ? renderPreprocessOnly(imageEl, meta.width, meta.height, preprocess)
       : imageEl;
-  }, [imageEl, meta, stretch, sharpen, preprocess]);
+  }, [imageEl, meta, clahe, sharpen, preprocess]);
 
   // SAM sees the preprocessed + brightness/contrast/levels-adjusted image
   // (windowing a low-contrast slice greatly helps), so the encode is keyed on
@@ -594,9 +597,12 @@ export default function AnnotationCanvas({
   }, [displayAffine.identity, displayFilterId, imageEl, stageSize]);
 
   // Compute a 256-bin luminance histogram of the current slice (downsampled) for
-  // the levels control. Runs once per loaded image.
+  // the levels control. Samples the PREPROCESSED base (CLAHE/Sharpen baked) so the
+  // histogram reflects what the levels window actually operates on — re-runs when a
+  // display preprocessor toggles.
   useEffect(() => {
     if (!imageEl || !onHistogram) return;
+    const src = displayBase ?? imageEl;
     const maxDim = 512;
     const scale = Math.max(1, Math.ceil(Math.max(imageEl.width, imageEl.height) / maxDim));
     const w = Math.max(1, Math.floor(imageEl.width / scale));
@@ -605,7 +611,7 @@ export default function AnnotationCanvas({
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
-    ctx.drawImage(imageEl, 0, 0, w, h);
+    ctx.drawImage(src, 0, 0, w, h);
     let data: Uint8ClampedArray;
     try { data = ctx.getImageData(0, 0, w, h).data; } catch { return; }
     const bins = new Array(256).fill(0);
@@ -614,7 +620,7 @@ export default function AnnotationCanvas({
       bins[lum < 0 ? 0 : lum > 255 ? 255 : lum]++;
     }
     onHistogram(bins);
-  }, [imageEl, onHistogram]);
+  }, [imageEl, displayBase, onHistogram]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -745,7 +751,7 @@ export default function AnnotationCanvas({
   const activeColor =
     activeClassId !== null ? colorForClass(activeClassId) : '#4090ff';
 
-  const showBrushCursor = (tool === 'brush' || tool === 'eraser') && !!meta && !isPreviewing;
+  const showBrushCursor = (underlyingTool === 'brush' || underlyingTool === 'eraser') && !!meta && !isPreviewing;
 
   /** Current pointer position mapped from stage/display coords to image pixels. */
   const getPointerImagePos = () => {
@@ -2156,7 +2162,16 @@ export default function AnnotationCanvas({
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       const mod = e.metaKey || e.ctrlKey;
       const k = e.key.toLowerCase();
-      if (mod && k === 'c' && selectedShapes.length) { e.preventDefault(); handleCopy(); }
+      if (mod && k === 'a') {
+        // Select all shapes on the slice, scoped to the active class or all classes.
+        e.preventDefault();
+        const visible = (s: Shape) => classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+        const ids = storeShapes
+          .filter((s) => (selectScope === 'all' || s.classId === activeClassId) && visible(s))
+          .map((s) => s.id);
+        setSelectedShapeIds(ids);
+      }
+      else if (mod && k === 'c' && selectedShapes.length) { e.preventDefault(); handleCopy(); }
       else if (mod && k === 'v' && clipboard.shapes.length) { e.preventDefault(); handlePaste(); }
       else if (!mod && k === 'i' && selectedShape) { e.preventDefault(); handleInvert(); }
       else if (e.key === 'Enter' && regionOp && regionPreview.length) { e.preventDefault(); handleApplyRegion(); }
@@ -2164,7 +2179,8 @@ export default function AnnotationCanvas({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [tool, selectedShapes, clipboard.shapes, selectedShape, regionOp, regionPreview,
-      handleCopy, handlePaste, handleInvert, handleApplyRegion]);
+      handleCopy, handlePaste, handleInvert, handleApplyRegion,
+      storeShapes, classes, activeClassId, selectScope, setSelectedShapeIds]);
 
   return (
     <div
@@ -2196,7 +2212,7 @@ export default function AnnotationCanvas({
           setTransform((t) => ({ ...t, x: e.target.x(), y: e.target.y() }));
         }}
       >
-        {/* Layer 0: image — preprocessed base (Stretch/Sharpen baked); linear
+        {/* Layer 0: image — preprocessed base (CLAHE/Sharpen baked); linear
             brightness/contrast/levels/gamma/colormap applied via the GPU SVG filter below. */}
         <Layer ref={imageLayerRef}>
           {imageEl && meta && (
@@ -2448,12 +2464,12 @@ export default function AnnotationCanvas({
             visible={showBrushCursor && pointerInside}
             // Translucent fill (via rgba alpha) with a mostly-opaque, same-color
             // border (node opacity ≈ 1) so the outline stays easy to see.
-            fill={tool === 'eraser' ? 'rgba(255,255,255,0.15)' : withAlpha(activeColor, 0.2)}
+            fill={underlyingTool === 'eraser' ? 'rgba(255,255,255,0.15)' : withAlpha(activeColor, 0.2)}
             opacity={0.95}
-            stroke={tool === 'eraser' ? '#f8fafc' : activeColor}
+            stroke={underlyingTool === 'eraser' ? '#f8fafc' : activeColor}
             strokeWidth={2.5 / transform.scaleX}
             dash={
-              tool === 'eraser'
+              underlyingTool === 'eraser'
                 ? [5 / transform.scaleX, 4 / transform.scaleX]
                 : undefined
             }

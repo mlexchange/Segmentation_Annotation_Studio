@@ -91,6 +91,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     clipToOtherClasses, setClipToOtherClasses,
     mergeOverlappingSameClass, setMergeOverlappingSameClass,
     eraseAllClasses, setEraseAllClasses,
+    selectScope, setSelectScope,
   } = useToolStore();
   const sam = useSam(tool === 'magic' && magicEngine === 'sam');
   const { undo, redo } = useStore(useAnnotationStore.temporal);
@@ -176,17 +177,30 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
 
       {(tool === 'brush' || tool === 'eraser') && (
         <div className="flex flex-col gap-1 mt-1">
-          <label className="text-xs text-gray-500">
-            Brush radius (px): {brushSize}
-          </label>
-          <input
-            type="range"
-            min={1}
-            max={500}
-            value={brushSize}
-            onChange={(e) => setBrushSize(Number(e.target.value))}
-            className="w-full"
-          />
+          <label className="text-xs text-gray-500">Brush radius (px)</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={1}
+              max={500}
+              value={brushSize}
+              onChange={(e) => setBrushSize(Math.max(1, Number(e.target.value)))}
+              className="flex-1 min-w-0"
+              aria-label="Brush radius"
+            />
+            <input
+              type="number"
+              min={1}
+              max={500}
+              value={brushSize}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (Number.isFinite(n)) setBrushSize(Math.min(500, Math.max(1, Math.round(n))));
+              }}
+              className="w-16 flex-shrink-0 border border-gray-200 rounded px-1 py-0.5 text-xs text-right tabular-nums"
+              aria-label="Brush radius (px)"
+            />
+          </div>
           {tool === 'eraser' && (
             <div role="radiogroup" aria-label="Erase scope" className="flex flex-col gap-1 mt-1">
               {([['class', 'Erase selected class'], ['all', 'Erase all classes']] as const).map(([v, label]) => (
@@ -203,6 +217,26 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {tool === 'select' && (
+        <div className="flex flex-col gap-1 mt-1">
+          <label className="text-xs text-gray-500">Select all (⌘/Ctrl+A)</label>
+          <div role="radiogroup" aria-label="Select scope" className="flex flex-col gap-1">
+            {([['class', 'Select this class'], ['all', 'Select all classes']] as const).map(([v, label]) => (
+              <label key={v} className="flex items-center gap-2 text-[11px] text-gray-600 cursor-pointer select-none">
+                <input
+                  type="radio"
+                  name="select-scope"
+                  checked={selectScope === v}
+                  onChange={() => setSelectScope(v)}
+                  className="accent-sky-600"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
         </div>
       )}
 

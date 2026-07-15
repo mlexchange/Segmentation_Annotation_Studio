@@ -10,6 +10,8 @@ export type MagicMode = 'contiguous' | 'global';
 export type MagicEngine = 'sam' | 'classic';
 /** SAM mask granularity — which of SAM's 3 multimask outputs to keep. */
 export type SamDetail = 'auto' | 'fine' | 'medium' | 'coarse';
+/** Select-tool scope: only the active class, or every class. */
+export type SelectScope = 'class' | 'all';
 
 export interface ToolState {
   tool: Tool;
@@ -43,6 +45,11 @@ export interface ToolState {
   /** Eraser scope: when true the eraser carves any visible class under the cursor;
    *  when false (default) it only carves shapes of the active class. */
   eraseAllClasses: boolean;
+  /** Select-tool scope for "Select all" (Cmd/Ctrl+A): active class only, or all. */
+  selectScope: SelectScope;
+  /** Tool to revert to after a hold-Space pan; also lets the canvas keep the
+   *  brush/eraser cursor visible while `tool==='pan'`. Null when not space-panning. */
+  panReturnTool: Tool | null;
   /** Bumped to request the canvas re-fit the image to the viewport (F shortcut). */
   fitRequestId: number;
   setTool: (tool: Tool) => void;
@@ -63,6 +70,8 @@ export interface ToolState {
   setClipToOtherClasses: (v: boolean) => void;
   setMergeOverlappingSameClass: (v: boolean) => void;
   setEraseAllClasses: (v: boolean) => void;
+  setSelectScope: (v: SelectScope) => void;
+  setPanReturnTool: (t: Tool | null) => void;
   requestFit: () => void;
 }
 
@@ -80,9 +89,11 @@ export const useToolStore = create<ToolState>((set) => ({
   samDetail: 'auto',
   samThreshold: 0,
   samAvoidLabeled: true,
-  clipToOtherClasses: false,
+  clipToOtherClasses: true,
   mergeOverlappingSameClass: false,
   eraseAllClasses: false,
+  selectScope: 'all',
+  panReturnTool: null,
   fitRequestId: 0,
   /** Switches the active tool and clears the current shape selection. */
   setTool: (tool) => set({ tool, selectedShapeIds: [] }),
@@ -118,6 +129,10 @@ export const useToolStore = create<ToolState>((set) => ({
   setMergeOverlappingSameClass: (mergeOverlappingSameClass) => set({ mergeOverlappingSameClass }),
   /** Toggles whether the eraser carves any visible class or just the active one. */
   setEraseAllClasses: (eraseAllClasses) => set({ eraseAllClasses }),
+  /** Sets the select-tool "Select all" scope (active class vs all classes). */
+  setSelectScope: (selectScope) => set({ selectScope }),
+  /** Records the tool to revert to after a hold-Space pan (null clears it). */
+  setPanReturnTool: (panReturnTool) => set({ panReturnTool }),
   /** Bumps fitRequestId to signal the canvas to re-fit the image to the viewport. */
   requestFit: () => set((s) => ({ fitRequestId: s.fitRequestId + 1 })),
 }));

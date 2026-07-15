@@ -70,6 +70,7 @@ export function useKeybinds(
         const st = useToolStore.getState();
         if (st.tool !== 'pan') {
           prevToolRef.current = st.tool;
+          st.setPanReturnTool(st.tool); // lets the canvas keep the brush/eraser cursor during pan
           st.setTool('pan');
         }
         return;
@@ -130,6 +131,7 @@ export function useKeybinds(
       if ((e.key === ' ' || e.key === 'Spacebar') && prevToolRef.current) {
         e.preventDefault();
         useToolStore.getState().setTool(prevToolRef.current);
+        useToolStore.getState().setPanReturnTool(null);
         prevToolRef.current = null;
       }
     };

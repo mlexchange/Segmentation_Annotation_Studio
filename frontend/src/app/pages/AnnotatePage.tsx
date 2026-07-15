@@ -65,8 +65,8 @@ export default function AnnotatePage() {
   // Display-only false-color map + gamma.
   const [colormap, setColormap] = useState<ColormapName>('gray');
   const [gamma, setGamma] = useState(1);
-  // Display-only nonlinear preprocessors (auto-contrast stretch / Sharpen).
-  const [stretch, setStretch] = useState(false);
+  // Display-only nonlinear preprocessors (adaptive CLAHE / Sharpen).
+  const [clahe, setClahe] = useState(false);
   const [sharpen, setSharpen] = useState(false);
   const [showDownload, setShowDownload] = useState(false);
   const [showInsights, setShowInsights] = useState(false);
@@ -217,7 +217,7 @@ export default function AnnotatePage() {
             contrast={contrast}
             onBrightnessChange={setBrightness}
             onContrastChange={setContrast}
-            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); setStretch(false); setSharpen(false); }}
+            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); setClahe(false); setSharpen(false); }}
             histogramBins={histogramBins}
             levelsLo={levelsLo}
             levelsHi={levelsHi}
@@ -227,9 +227,9 @@ export default function AnnotatePage() {
             gamma={gamma}
             onColormapChange={setColormap}
             onGammaChange={setGamma}
-            stretch={stretch}
+            clahe={clahe}
             sharpen={sharpen}
-            onStretchChange={setStretch}
+            onClaheChange={setClahe}
             onSharpenChange={setSharpen}
           />
           <hr />
@@ -309,7 +309,7 @@ export default function AnnotatePage() {
             levelsHi={levelsHi}
             colormap={colormap}
             gamma={gamma}
-            stretch={stretch}
+            clahe={clahe}
             sharpen={sharpen}
             onHistogram={setHistogramBins}
             activeClassId={activeClassId}
