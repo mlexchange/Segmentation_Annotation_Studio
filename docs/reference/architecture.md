@@ -1,6 +1,6 @@
 # Software architecture
 
-This page is a developer-oriented tour of how SAM3 Annotation Studio is put
+This page is a developer-oriented tour of how Segmentation Annotation Studio is put
 together: the major processes, the modules inside each one, and how a request
 flows from a click in the browser all the way to Tiled and back.
 

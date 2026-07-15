@@ -1,4 +1,4 @@
-"""Annotation-guide persistence for the SAM3 Annotation Studio.
+"""Annotation-guide persistence for the Segmentation Annotation Studio.
 
 A *guide* is a project lead's curated description of each class — label, color,
 a free-text description of what the class is and how it looks, and a few example

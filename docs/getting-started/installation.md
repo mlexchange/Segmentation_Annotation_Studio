@@ -1,6 +1,6 @@
 # Installation
 
-There are two ways to run SAM3 Annotation Studio:
+There are two ways to run Segmentation Annotation Studio:
 
 - **Local development** — one command starts everything (recommended for annotators and evaluation).
 - **Docker** — a single production container that serves the app against an external Tiled server.

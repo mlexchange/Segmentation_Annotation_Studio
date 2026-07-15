@@ -366,7 +366,7 @@ def write_coco_split(
 
     coco_doc = {
         "info": info or {
-            "description": "SAM3 fine-tune dataset -- SAM3 Annotation Studio",
+            "description": "SAM3 fine-tune dataset -- Segmentation Annotation Studio",
             "date_created": datetime.now(timezone.utc).isoformat(),
         },
         "licenses": [],
@@ -544,7 +544,7 @@ def build_export_plan(
         skipped_zero_area += r["skipped"]
 
     info = {
-        "description": "SAM3 fine-tune dataset -- SAM3 Annotation Studio",
+        "description": "SAM3 fine-tune dataset -- Segmentation Annotation Studio",
         "date_created": datetime.now(timezone.utc).isoformat(),
         "render": render_opts_mapped,
     }

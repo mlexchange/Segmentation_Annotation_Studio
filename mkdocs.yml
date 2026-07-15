@@ -1,6 +1,6 @@
-site_name: SAM3 Annotation Studio
+site_name: Segmentation Annotation Studio
 site_description: >-
-  User guide for the SAM3 Annotation Studio — install the tool, annotate
+  User guide for the Segmentation Annotation Studio — install the tool, annotate
   images, and export COCO datasets for SAM3 fine-tuning.
 site_author: ALS Computing
 docs_dir: docs

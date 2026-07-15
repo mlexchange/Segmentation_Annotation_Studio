@@ -1,4 +1,4 @@
-"""FastAPI entry point for the SAM3 Annotation Studio API.
+"""FastAPI entry point for the Segmentation Annotation Studio API.
 
 Endpoints
 ---------
@@ -62,7 +62,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("annotation-server")
 
 app = FastAPI(
-    title="SAM3 Annotation Studio API",
+    title="Segmentation Annotation Studio API",
     description="Annotation API for SAM3 fine-tuning dataset generation",
     version="0.1.0",
 )

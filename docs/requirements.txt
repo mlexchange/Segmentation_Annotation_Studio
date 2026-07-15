@@ -1,4 +1,4 @@
-# Documentation build dependencies for SAM3 Annotation Studio.
+# Documentation build dependencies for Segmentation Annotation Studio.
 # Install with:  pip install -r docs/requirements.txt
 mkdocs>=1.6
 mkdocs-material>=9.6

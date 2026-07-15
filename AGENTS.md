@@ -1,4 +1,4 @@
-# AGENTS.md — SAM3 Annotation Studio
+# AGENTS.md — Segmentation Annotation Studio
 
 ## Stack
 - Backend: FastAPI, Python ≥ 3.11, pyproject.toml, pytest

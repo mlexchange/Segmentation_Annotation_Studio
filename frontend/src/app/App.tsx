@@ -92,7 +92,7 @@ function App() {
     <>
       <HubAppLayout
         routes={filteredRoutes}
-        headerTitle="Segmentation Annotation Tool"
+        headerTitle="Segmentation Annotation Studio"
         docsUrl={DOCS_URL}
       />
       <CustomizePages

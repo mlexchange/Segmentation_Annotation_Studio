@@ -1,6 +1,6 @@
 # Using the tool
 
-This section is a complete walkthrough of the SAM3 Annotation Studio interface,
+This section is a complete walkthrough of the Segmentation Annotation Studio interface,
 tab by tab. If you just want the fastest path to a dataset, read the
 [Quick start](../getting-started/quick-start.md) instead.
 

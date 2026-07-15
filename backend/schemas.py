@@ -1,4 +1,4 @@
-"""Pydantic models for the SAM3 Annotation Studio API.
+"""Pydantic models for the Segmentation Annotation Studio API.
 
 Shapes
 ------

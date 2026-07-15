@@ -1,12 +1,12 @@
 ---
-title: SAM3 Annotation Studio
+title: Segmentation Annotation Studio
 hide:
   - navigation
 ---
 
 <div class="finch-hero" markdown>
 
-# SAM3 Annotation Studio
+# Segmentation Annotation Studio
 
 Draw segmentation masks on scientific images, manage classes and versions, and
 export clean **COCO datasets** ready for SAM3 fine-tuning — all from your browser.
@@ -50,7 +50,7 @@ Produce a COCO `.zip` with images, RLE masks, and per-class mask PNGs.
 
 ## What is this tool?
 
-SAM3 Annotation Studio is a manual image-segmentation workspace. It runs as a
+Segmentation Annotation Studio is a manual image-segmentation workspace. It runs as a
 web app with three parts working together:
 
 | Component | Role | Default address |

@@ -1,4 +1,4 @@
-"""Sandboxed local filesystem access for the SAM3 Annotation Studio.
+"""Sandboxed local filesystem access for the Segmentation Annotation Studio.
 
 All paths are resolved relative to ``LOCAL_DATA_ROOT`` (environment variable).
 Any attempt to escape the root via path traversal (e.g. ``../../etc/passwd``)

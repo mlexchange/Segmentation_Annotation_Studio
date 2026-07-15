@@ -592,7 +592,7 @@ echo -e "${GREEN}    Frontend PID: $FRONTEND_PID${NC}"
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "${GREEN}==========================================${NC}"
-  echo -e "${GREEN}  SAM3 Annotation Studio is running!${NC}"
+  echo -e "${GREEN}  Segmentation Annotation Studio is running!${NC}"
 echo -e "${GREEN}  Tiled    : http://127.0.0.1:${TILED_PORT} (public / anonymous)${NC}"
 echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
 echo -e "${GREEN}  Backend  : http://127.0.0.1:${BACKEND_PORT}${NC}"

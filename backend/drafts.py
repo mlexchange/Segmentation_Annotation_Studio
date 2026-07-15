@@ -1,4 +1,4 @@
-"""Session-draft persistence and version history for the SAM3 Annotation Studio.
+"""Session-draft persistence and version history for the Segmentation Annotation Studio.
 
 Drafts are stored as JSON files under ``$LOCAL_DATA_ROOT/.drafts/``.
 Each draft is keyed by an arbitrary *source_key* string (typically the Tiled

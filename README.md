@@ -1,4 +1,4 @@
-# SAM3 Annotation Studio
+# Segmentation Annotation Studio
 
 Manual image segmentation tool for producing COCO datasets for SAM3 fine-tuning.
 
