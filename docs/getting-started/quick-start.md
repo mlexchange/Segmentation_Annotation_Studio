@@ -84,13 +84,13 @@ and optional notes, then click **Save version**.
 
 ## 6. Export a COCO dataset
 
-1. Click **Export COCO** in the Annotate sidebar.
-2. In the **Download COCO Dataset** modal, choose an **Export scope** (e.g. *Current sample only*).
+1. Click **Export** in the Annotate sidebar.
+2. In the **Download Dataset** modal, choose a **Format** (COCO or DINOv3 / Lightly)
+   and an **Export scope** (e.g. *Current sample only*).
 3. Enter your **Annotator** name.
 4. Click **Export**, wait for the progress bar, then click **Download .zip**.
 
-You'll get a `.zip` containing rendered images, a COCO JSON file, and per-class
-mask PNGs.
+You'll get a `.zip` with rendered images plus masks in the chosen layout.
 
 → More detail: [Export & download](../guide/export.md)
 

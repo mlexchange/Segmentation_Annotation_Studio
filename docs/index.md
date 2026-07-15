@@ -9,7 +9,8 @@ hide:
 # Segmentation Annotation Studio
 
 Draw segmentation masks on scientific images, manage classes and versions, and
-export clean **COCO datasets** ready for SAM3 fine-tuning — all from your browser.
+export clean datasets — **COCO** for SAM3, or the **DINOv3 / Lightly** layout —
+all from your browser.
 
 </div>
 
@@ -41,7 +42,8 @@ Learn every tool — polygon, brush, smart AI (SAM), classes, slices, and versio
 
 <div class="finch-card" markdown>
 ### :material-export: Export
-Produce a COCO `.zip` with images, RLE masks, and per-class mask PNGs.
+Produce a COCO `.zip` (images, RLE masks, per-class PNGs) or a DINOv3 / Lightly
+`images/` + `masks/` layout.
 
 [Export & download →](guide/export.md){ .md-button }
 </div>
@@ -57,7 +59,7 @@ web app with three parts working together:
 | --- | --- | --- |
 | **Frontend** | The React app you interact with in the browser | <http://127.0.0.1:5173> |
 | **Backend** | FastAPI service that renders images, rasterizes masks, and builds exports | <http://127.0.0.1:8002> |
-| **Tiled** | Data catalog that stores your source images and annotation drafts | <http://127.0.0.1:8010> |
+| **Tiled** | Data catalog for your source images (plus optional mask / metadata write-back) | <http://127.0.0.1:8010> |
 
 You can point the tool at data stored in a **Tiled server** or at a **local
 folder** of images (TIFF, PNG, JPG, or NPY).
@@ -72,7 +74,7 @@ graph LR
   A[Connect] --> B[Browse];
   B --> C[Annotate];
   C -.optional.-> D[Reference guide];
-  C --> E[Export COCO];
+  C --> E[Export];
   E --> F[Download .zip];
 ```
 

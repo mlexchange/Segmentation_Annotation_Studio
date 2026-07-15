@@ -151,8 +151,8 @@ graph TB
 | **Annotate** | `/annotate` | `AnnotatePage` | `AnnotationCanvas`, `Toolbar`, `ClassManager` |
 
 !!! note "Export is a modal, not a tab"
-    COCO export lives in `DownloadModal`, opened from the Annotate sidebar —
-    there is no dedicated Export tab in the current navigation.
+    Dataset export (COCO or DINOv3/Lightly) lives in `DownloadModal`, opened from
+    the Annotate sidebar — there is no dedicated Export tab in the current navigation.
 
 ### State management
 
@@ -193,8 +193,14 @@ flowchart TD
 | `connectionStore` | tiled/local URIs, paths, sample count | memory | — |
 | `referenceGuideStore` | guide entries, notes, `loadedFor` | backend via `useGuideSync` | — |
 | `clipboardStore` | copied shapes | memory | — |
-| `settingsStore` | `annotatorName` | `localStorage` | — |
+| `settingsStore` | `annotatorName`, `colorblindMode`, anonymous `sessionId` | `localStorage` | — |
 | `ratingStore` | per-sample star ratings | `localStorage` | — |
+
+`toolStore` also carries the eraser/select scope (`eraseAllClasses`, `selectScope`),
+the `clipToOtherClasses` (default **on**) and `mergeOverlappingSameClass` toggles,
+and `panReturnTool` (so the brush/eraser cursor stays visible while hold-Space
+panning). `settingsStore.sessionId` is an anonymous per-install id stamped into
+the "Feedback" bug-report context.
 
 ### Canvas rendering
 
@@ -205,9 +211,10 @@ pointer move; it is committed to the store only on mouse-up.
 ```mermaid
 graph TB
   subgraph Stage["Konva Stage"]
-    L0["Layer 0 · KonvaImage<br/>backend PNG + client tone/levels"]
+    L0["Layer 0 · KonvaImage<br/>preprocessed base (CLAHE/Sharpen baked)<br/>+ client tone/levels via SVG filter"]
     L1["Layer 1 · committed shapes<br/>(cached, non-listening)"]
-    L2["Layer 2 · draft / drag previews"]
+    L2["Layer 2 · dimmed drag preview (fill opacity)"]
+    L2b["Layer 2b · polygon/lasso guide lines<br/>(full opacity, so they stay crisp)"]
     L3["Layer 3 · live brush stroke (ref)"]
     L4["Layer 4 · cursor ring (ref)"]
   end
@@ -223,6 +230,31 @@ Tools resolve to different interactions: `polygon`, `rectangle`, `ellipse`,
 `brush`/`eraser`, `fill`, `select`, `pan`, plus AI-assisted `magic` (Segment
 Anything or classic magic-wand) and `magnetic` (livewire). Pure geometry,
 rasterization, region ops, and the SAM worker live under `src/lib/`.
+
+The in-progress brush/erase stroke is drawn imperatively on Layer 3 (no store
+write per pointer move); polygon and magnetic **guide lines** get their own
+full-opacity layer (2b) so they read clearly even when the shape fill opacity is
+turned down. Layer 0 shows a **preprocessed base** — CLAHE/Sharpen are baked into
+an offscreen canvas so the tools (SAM encode, magic wand, magnetic edge map)
+operate on the same enhanced image the user sees, while brightness/contrast/
+levels/gamma/colormap stay on the GPU as an SVG filter over the top.
+
+### Client-side geometry & tools (`src/lib/`)
+
+The drawing tools are backed by small, pure, unit-tested modules — no backend
+round-trip for editing:
+
+| Module | Responsibility |
+| --- | --- |
+| `magicwand.ts` | Classic wand + mask→polygon vectorization (`maskToPolygons`, `maskToPolygonsWithHoles`) |
+| `livewire.ts` | Magnetic-lasso edge-cost map, Dijkstra, least-cost `tracePath` |
+| `rasterize.ts` | Shapes → binary mask (`rasterizeShapes`, `gridFor`, `fullResGridFor`) |
+| `polybool.ts` | True polygon boolean ops (union/difference) via `polygon-clipping` — powers clip, merge, and eraser while **preserving existing vertices** |
+| `clipToClasses.ts` / `mergeSameClass.ts` | Clip a new shape against other classes / union with overlapping same-class shapes |
+| `regionOps.ts` / `morphology.ts` | Select-tool region ops: merge, grow, shrink, remove islands |
+| `clahe.ts` / `sharpen.ts` / `stretch.ts` / `colormaps.ts` | Display-only preprocessors and LUTs |
+| `geometry.ts` / `measure.ts` / `datasetStats.ts` | Hit-testing/util, measurement, and the Insights QA metrics |
+| `sam/samClient.ts` · `sam/samWorker.ts` · `sam/adjust.ts` | SAM main-thread singleton, the Web Worker, and the display-bake used by tools |
 
 ## Backend architecture
 
@@ -401,10 +433,13 @@ sequenceDiagram
   API-->>User: version, saved_at
 ```
 
-### Export a COCO dataset
+### Export a dataset
 
 Export runs as a background job. The client polls for status and downloads the
-finished `.zip`.
+finished `.zip`. The `format` field selects the writer: **COCO (SAM3)**
+(`write_coco_split` — RLE + images + semantic/per-class masks) or **DINOv3 /
+Lightly** (`write_lightly_split` — `images/` + `masks/` label PNGs with matching
+stems + `classes.json`). Both share the same rasterization and zip plumbing.
 
 ```mermaid
 sequenceDiagram
@@ -415,7 +450,7 @@ sequenceDiagram
   participant CE as coco_export
   participant Disk as LOCAL_DATA_ROOT
 
-  User->>Modal: Choose scope → Export COCO
+  User->>Modal: Choose scope → Export
   Modal->>Job: start(request)
   Job->>API: POST /api/export/coco
   API->>CE: build_export_plan + shape_to_mask
@@ -428,6 +463,41 @@ sequenceDiagram
   Job->>API: GET /api/export/download/{job_id}
   API-->>User: dataset.zip
 ```
+
+## Key design decisions
+
+The choices below explain *why* the code looks the way it does — useful before
+extending it.
+
+- **Backend renders pixels; the browser never sees raw arrays.** `/api/image/slice`
+  returns an 8-bit PNG (normalize → scale → colormap). This keeps scientific dtypes
+  and Tiled credentials server-side, makes the frontend format-agnostic, and lets
+  the backend expose raw intensities only where needed (e.g. `/api/measure`).
+- **Shapes are stored in image-pixel coordinates.** The Konva stage transform is
+  display-only, so annotations are resolution-independent and line up exactly with
+  the array — no zoom-dependent rounding.
+- **Display enhancement is baked for the tools, filtered for the eye.** Nonlinear
+  preprocessors (CLAHE, Sharpen) are baked into an offscreen base so SAM/wand/livewire
+  act on what you see; the cheap linear chain (brightness/contrast/levels/gamma/
+  colormap) stays on the GPU as an SVG filter. None of it changes exported pixels.
+- **Editing uses true polygon boolean geometry at full resolution.** Clip, merge, and
+  erase go through `polygon-clipping` (`polybool.ts`), not a mask round-trip, so
+  **untouched vertices are preserved** and repeated edits don't erode a region; the
+  eraser rebuilds a polygon's vertices to match the carved outline and can split
+  shapes or open holes. Rasterization uses `fullResGridFor` to avoid downsampling
+  drift.
+- **Brush blobs are connected components.** Overlapping strokes grow one shape; a
+  disconnected stroke starts a new shape, so each blob is independently selectable.
+- **AI runs in the browser, offline-first.** SAM (SlimSAM via `@huggingface/transformers`)
+  runs in a Web Worker, WebGPU with a WASM fallback, loading vendored local weights
+  first and only falling back to the HF CDN. No server GPU or model calls.
+- **Two-tier persistence.** A debounced **draft** autosaves for crash recovery
+  (`/api/annotations/draft`, disk only); an explicit **save** writes an immutable
+  version + thumbnail and syncs summary metadata to Tiled. Everything is keyed by the
+  canonical **source key** so drafts, versions, guide, and exports line up per sample.
+- **Long work is a background job + poll.** Export, mask write-back, and ingest use an
+  in-memory job registry with a `/status/{id}` poller and (for export) a streamed
+  `.zip`, rather than blocking the request.
 
 ## Security boundaries
 

@@ -37,8 +37,9 @@ text input, text area, or dropdown.
 
 | Key | Action |
 | --- | --- |
-| ++cmd+z++ | Undo |
+| ++cmd+z++ | Undo. **While drafting a polygon/magnetic shape**, removes the last node instead; right after an accidental close, reopens the shape to edit mode. |
 | ++cmd+shift+z++ / ++ctrl+y++ | Redo |
+| ++cmd+a++ / ++ctrl+a++ | Select all shapes on the slice (Select tool; scoped by the this-class / all-classes radios) |
 | ++cmd+c++ | Copy selected shapes (Select tool) |
 | ++cmd+v++ | Paste shapes (Select tool) |
 | ++i++ | Invert a single selected shape |
@@ -54,3 +55,4 @@ text input, text area, or dropdown.
 | ++alt++ + click (++opt++ on Mac) | Exclude a region ("not" point) |
 | Double-click | Finish a Polygon or Magnetic shape |
 | Double-click an edge | Add a vertex (Select tool, on a polygon) |
+| Double-click a vertex | Delete that vertex (Select tool, on a polygon) |

@@ -63,18 +63,47 @@ The **TOOLS** panel is your drawing palette. Each tool has a keyboard shortcut.
 | Tool | Key | What it does |
 | --- | --- | --- |
 | **Pan** | hold ++space++ | Drag the canvas around. |
-| **Select** | ++s++ | Click or marquee-select shapes; edit vertices. |
+| **Select** | ++s++ | Click or marquee-select shapes; move, edit vertices, run region ops. |
 | **Polygon** | ++p++ | Click to place vertices; double-click to finish. |
-| **Magnetic** | ++m++ | Click along an edge to trace it; double-click to finish. |
-| **Magic** | ++g++ | AI or classic region selection (see below). |
+| **Magnetic** | ++m++ | Click along an edge and it snaps to it (livewire); double-click to finish. |
+| **Magic** | ++g++ | AI (SAM) or classic intensity region selection (see below). |
 | **Rect** | ++e++ | Drag a rectangle. |
 | **Ellipse** | ++l++ | Drag an ellipse. |
-| **Brush** | ++b++ | Paint freehand strokes. |
-| **Fill** | ++f++ | Flood-fill by intensity threshold. |
-| **Eraser** | ++r++ | Erase from brush shapes. |
+| **Brush** | ++b++ | Paint freehand; disconnected dabs become separate shapes. |
+| **Fill** | ++f++ | Flood-fill a region by intensity similarity. |
+| **Eraser** | ++r++ | Carve pixels out of any shape (see below). |
 
 **Undo** (++cmd+z++) and **Redo** (++cmd+shift+z++) buttons sit in the toolbar,
 with up to 200 steps of history.
+
+### How each tool works
+
+All shapes are stored in **image-pixel coordinates**, independent of zoom/pan, so
+they stay pixel-accurate at any magnification.
+
+- **Polygon** — each click drops a vertex; the dashed rubber-band line follows the
+  cursor. Double-click (or ++enter++ is not used here) closes the ring. While
+  drafting, ++cmd+z++/++ctrl+z++ removes the **last vertex** (not the whole shape);
+  if you close too early, one ++cmd+z++/++ctrl+z++ reopens the polygon in edit mode
+  with its last node removed so you can continue.
+- **Magnetic (livewire)** — computes an edge-cost map of the current view and traces
+  the **least-cost path** from your last click to the cursor, so the line hugs
+  contrast edges. Click to lock each segment; double-click to finish. ++cmd+z++
+  pops the last locked node, and (like Polygon) reopens the trace if you just closed
+  it.
+- **Rectangle / Ellipse** — press-drag to size; released as a shape.
+- **Brush** — freehand round-capped strokes. Strokes that touch build up **one**
+  shape; a stroke drawn in a **disconnected** area starts a **new** shape, so each
+  blob is independently selectable. Press ++n++ to force a new brush instance.
+- **Fill** — flood-fills the connected region around your click whose intensity is
+  within the **Fill threshold** of the clicked pixel (a paint-bucket by brightness
+  similarity).
+- **Eraser** — carves pixels out of **any** shape kind (polygon, rectangle, ellipse,
+  brush), not just brushes. It is **radius-aware**: the brush disk erases as soon as
+  it grazes a shape's edge — the cursor center need not be inside. Erasing a polygon
+  **rebuilds its vertices** to match the carved outline (no stray invisible nodes),
+  can **split** one shape into several, and can open **holes**. Undo restores the
+  shape in one step.
 
 ### The Magic tool (Smart AI + Classic)
 
@@ -108,10 +137,22 @@ The **Magic** tool has two engines, chosen with a toggle:
 
 ### Tool-specific and global options
 
-- **Brush / Eraser**: a **Brush radius (px)** slider (1–500).
+- **Brush / Eraser**: a **Brush radius (px)** slider (1–500) with a matching
+  number box for exact values.
+- **Eraser scope**: radios — **Erase selected class** (default) or **Erase all
+  classes** (carve whatever visible shape the stroke crosses).
+- **Select**: **Select this class** / **Select all classes** radios; ++cmd+a++/++ctrl+a++
+  selects every shape on the slice per that scope.
 - **Fill**: a **Fill threshold** slider (0–100%).
-- **Global**: **Annotation opacity**, **Clip to other classes**, and **Merge
-  overlapping same class**.
+- **Global** (below the class list / in Tools): **Annotation opacity**, **Clip to
+  other classes** (on by default), and **Merge overlapping same class**.
+
+!!! info "Clip and Merge use exact geometry"
+    **Clip to other classes** subtracts neighbouring classes from a new shape so
+    regions tile **flush with no gap**; **Merge overlapping same class** unions a
+    new shape with overlapping same-class shapes. Both use true polygon boolean
+    operations at full resolution, so **existing vertices are preserved** — only
+    the seam/cut changes, and repeated edits don't erode a region.
 
 ---
 
@@ -136,8 +177,11 @@ shapes are selected, a selection toolbar appears:
 | **Thickness** | Adjust a selected brush shape's stroke width. |
 | **Region:** ops | **Merge**, **Grow**, **Shrink**, **Remove islands** — then **Apply** (or **Cancel**). |
 
-To add a vertex to a polygon, double-click its edge with the Select tool. Press
-++n++ to start a new brush instance.
+To add a vertex to a polygon, double-click its edge with the Select tool;
+double-click a vertex to delete it. Drag the white outer vertices or the amber
+hole vertices to reshape. ++cmd+a++/++ctrl+a++ selects every shape on the slice
+(scoped by the **Select this class / all classes** radios). Press ++n++ to start
+a new brush instance.
 
 ---
 
@@ -147,7 +191,16 @@ The **DISPLAY** panel changes how the image *looks* while you work — it does
 **not** change exported pixels (except that it defines the render used for
 export images). Controls include **Brightness**, **Contrast**, a histogram
 levels window, **Colormap** (gray, viridis, magma, inferno), **Gamma**,
-**Auto-contrast**, and **Sharpen**. Use the reset button to restore defaults.
+**CLAHE**, and **Sharpen**. Use the reset button to restore defaults.
+
+- **CLAHE** is *adaptive* (local) contrast: it equalizes each image tile's
+  histogram with a clip limit and blends the tiles, so faint local features pop
+  without blowing out the whole frame. When on, it is applied **before** the
+  brightness/contrast/levels chain, and the levels histogram updates to reflect
+  it. (It replaced the older global "Auto-contrast" stretch.)
+- The display preprocessors also change what the **tools see** — SAM, the magic
+  wand, and the magnetic edge map all operate on the enhanced view — but never
+  affect the exported pixels.
 
 ---
 
@@ -217,7 +270,7 @@ Click any flag to jump straight to the offending slice or region on the canvas.
 
 ## Export
 
-When your annotations are ready, click **Export COCO** to open the download
+When your annotations are ready, click **Export** to open the download
 dialog. That's covered in full on the next page.
 
 Next: [Annotation guide →](reference-guide.md) or jump to [Export & download →](export.md)

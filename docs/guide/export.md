@@ -1,7 +1,8 @@
 # 5. Export & download
 
-This is the payoff: turning your annotations into a **COCO dataset** you can
-download and use for SAM3 fine-tuning. The primary path produces a `.zip` file
+This is the payoff: turning your annotations into a downloadable dataset. You can
+export as a **COCO dataset** (for SAM3 fine-tuning) or in the **DINOv3 / Lightly**
+semantic-segmentation layout. Either way the primary path produces a `.zip` file
 with images and masks.
 
 There are two related actions in the same dialog:
@@ -24,8 +25,8 @@ Before exporting, you can shape *what* gets included:
 
 ### Step 2 — Open the export dialog
 
-In the Annotate sidebar, click **Export COCO**. This opens the **Download COCO
-Dataset** modal.
+In the Annotate sidebar, click **Export**. This opens the **Download
+Dataset** modal (where you also choose the export format).
 
 ### Step 3 — Choose a scope
 
@@ -45,12 +46,18 @@ exported."* (or *"No samples match."*).
 
 ### Step 4 — Set options
 
+- **Format** — choose the dataset layout:
+    - **COCO (SAM3)** *(default)* — RLE masks + images, for SAM3 fine-tuning.
+    - **DINOv3 / Lightly** — `images/` + `masks/` label PNGs with matching
+      filenames + a `classes.json`, for [LightlyTrain semantic
+      segmentation](https://docs.lightly.ai/train/stable/semantic_segmentation.html).
+      See [the layout below](#dinov3-lightly-format).
 - **Annotator** — your name (placeholder *"Your name (recorded in the export)"*).
   It's stamped into the export folder name, the COCO `info` block, and
   `manifest.json`.
-- **Include polygon copy in COCO** — optional checkbox. RLE masks are always
-  exact; enable this only if an external viewer needs polygon geometry (it's
-  slower).
+- **Include polygon copy in COCO** — optional checkbox (COCO format only). RLE
+  masks are always exact; enable this only if an external viewer needs polygon
+  geometry (it's slower).
 
 ### Step 5 — Export and download
 
@@ -102,6 +109,32 @@ The `info` block also records the **render** settings used to produce the PNG
 images, so exports are reproducible. `categories[].name` is the SAM3 concept
 phrase (the class label).
 
+## DINOv3 / Lightly format
+
+Choosing **DINOv3 / Lightly** in Step 4 writes the layout expected by
+LightlyTrain's semantic-segmentation trainer instead of COCO:
+
+```text
+classes.json                    # { "0": "background", "1": "<class>", ... }
+manifest.json
+train/
+  images/<source>_0001.png      # rendered slice (uses your Display settings)
+  masks/<source>_0001.png       # single-channel label map, pixel = class index (0 = bg)
+val/                            # our "valid" split → Lightly's "val"
+  images/... masks/...
+test/                           # kept as a held-out split (optional to use)
+  images/... masks/...
+```
+
+- **Matching filenames**: each `masks/<name>.png` shares the exact stem of its
+  `images/<name>.png`, which is how Lightly pairs them.
+- **Masks are index label maps** (grayscale PNG, `0` = background, `1..N` = class
+  index — the same indices as `classes.json`), not colorized.
+- Point Lightly's config at the folders, e.g.
+  `data = { "train": {"images": ".../train/images", "masks": ".../train/masks"},
+  "val": {...}, "classes": ".../classes.json" }` (add `"ignore_classes": [0]` to
+  skip background).
+
 !!! note "Where the files are written on the server"
     Before you download, the backend writes the dataset under `EXPORT_ROOT`
     (or `~/data/exports`). The **Download .zip** button streams that folder to
@@ -114,7 +147,7 @@ phrase (the class label).
 If your source is a **Tiled** dataset, you can write masks back into Tiled
 instead of (or in addition to) downloading.
 
-1. In the same **Download COCO Dataset** modal, click **Push masks to Tiled**.
+1. In the same **Download Dataset** modal, click **Push masks to Tiled**.
 2. The backend rasterizes the selected scope and writes stacked mask volumes
    into a sibling Tiled container named `<source>__masks`:
     - `semantic` — a `uint8 (n, H, W)` class-index volume.
