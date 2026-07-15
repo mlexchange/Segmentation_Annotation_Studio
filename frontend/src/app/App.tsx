@@ -4,7 +4,8 @@ import './App.css';
 import { RouteItem } from '@/types/navigationRouterTypes';
 import HubAppLayout from '@/components/HubAppLayout';
 import { useHubSelectedTabs } from '@/hooks/useHubSelectedTabs';
-import { DOCS_URL } from '@/config';
+import { DOCS_URL, FEEDBACK_FORM_URL, FEEDBACK_ENTRY_ID } from '@/config';
+import { buildFeedbackContext, buildFeedbackUrl } from '@/lib/feedbackContext';
 import { PlugsConnected, PencilSimple, MagnifyingGlass, BookOpen } from '@phosphor-icons/react';
 import ConnectPage from './pages/ConnectPage';
 import AnnotatePage from './pages/AnnotatePage';
@@ -94,6 +95,14 @@ function App() {
         routes={filteredRoutes}
         headerTitle="Segmentation Annotation Studio"
         docsUrl={DOCS_URL}
+        onFeedback={
+          FEEDBACK_FORM_URL
+            ? () => {
+                const url = buildFeedbackUrl(FEEDBACK_FORM_URL, FEEDBACK_ENTRY_ID, buildFeedbackContext());
+                window.open(url, '_blank', 'noopener,noreferrer');
+              }
+            : undefined
+        }
       />
       <CustomizePages
         routes={allRoutes}
