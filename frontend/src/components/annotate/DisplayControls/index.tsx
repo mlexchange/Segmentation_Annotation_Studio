@@ -1,11 +1,11 @@
 /**
- * DisplayControls — brightness/contrast sliders + a min/max levels histogram, all
- * display-only via Konva filters. Does NOT affect exported pixel values — that is
- * governed by RenderOpts.
+ * DisplayControls — brightness/contrast, CLAHE / Sharpen toggles, levels histogram.
+ * Display-only. Does NOT affect exported pixel values (RenderOpts).
  */
-import { ArrowCounterClockwise } from '@phosphor-icons/react';
+import { ArrowCounterClockwise, CircleHalf, Sparkle } from '@phosphor-icons/react';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import HistogramControl from '@/components/annotate/HistogramControl';
+import { cn } from '@/lib/utils';
 
 export interface DisplayControlsProps {
   brightness: number;
@@ -13,15 +13,18 @@ export interface DisplayControlsProps {
   onBrightnessChange: (v: number) => void;
   onContrastChange: (v: number) => void;
   onReset: () => void;
-  /** Levels histogram + window (0–255). */
   histogramBins: number[] | null;
   levelsLo: number;
   levelsHi: number;
   onLevelsChange: (lo: number, hi: number) => void;
   onLevelsReset: () => void;
+  clahe: boolean;
+  onClaheChange: (on: boolean) => void;
+  sharpen: boolean;
+  onSharpenChange: (on: boolean) => void;
 }
 
-/** Renders the brightness/contrast sliders + levels histogram with reset buttons. */
+/** Renders display preprocessor toggles + brightness/contrast + levels. */
 export default function DisplayControls({
   brightness,
   contrast,
@@ -33,18 +36,54 @@ export default function DisplayControls({
   levelsHi,
   onLevelsChange,
   onLevelsReset,
+  clahe,
+  onClaheChange,
+  sharpen,
+  onSharpenChange,
 }: DisplayControlsProps) {
+  const toggleCls = (on: boolean) =>
+    cn(
+      'flex items-center justify-center gap-1.5 flex-1 py-1.5 rounded-md text-xs border transition-colors',
+      on
+        ? 'bg-sky-600 text-white border-sky-700'
+        : 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50 hover:border-sky-300',
+    );
+
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">Display</span>
         <button
-          aria-label="Reset brightness and contrast"
+          type="button"
+          aria-label="Reset display"
           title="Reset display"
           onClick={onReset}
           className="p-0.5 rounded hover:bg-gray-100 hover:text-sky-600"
         >
           <ArrowCounterClockwise size={14} />
+        </button>
+      </div>
+
+      <div className="flex gap-1">
+        <button
+          type="button"
+          aria-pressed={clahe}
+          title="CLAHE — adaptive histogram equalization (local contrast)"
+          onClick={() => onClaheChange(!clahe)}
+          className={toggleCls(clahe)}
+        >
+          <CircleHalf size={14} weight={clahe ? 'fill' : 'regular'} />
+          CLAHE
+        </button>
+        <button
+          type="button"
+          aria-pressed={sharpen}
+          title="Sharpen — classic 3×3 Laplacian high-boost (fast)"
+          onClick={() => onSharpenChange(!sharpen)}
+          className={toggleCls(sharpen)}
+        >
+          <Sparkle size={14} weight={sharpen ? 'fill' : 'regular'} />
+          Sharpen
         </button>
       </div>
 

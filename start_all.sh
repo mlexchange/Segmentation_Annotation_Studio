@@ -1,27 +1,39 @@
 #!/usr/bin/env bash
-# start_all.sh — Start Tiled, Browse backend, and frontend together.
+# start_all.sh — Start Tiled, ipred, Annotate backend, and frontend.
 # Usage: ./start_all.sh
 # Stop everything: Ctrl+C
 #
-# NOTE: Tiled runs as a PUBLIC server (anonymous read+write). No API key is
-# used. Auth posture is declared in tiled/config.yml via:
+# Processes (all bind 127.0.0.1):
+#   Tiled       : TILED_PORT       (default 8010)
+#   ipred  : IPRED_PORT  (default 8003)  — preprocess / train / conformal
+#   Backend     : BACKEND_PORT     (default 8002)  — Annotate API (proxies to ipred)
+#   Frontend    : FRONTEND_PORT    (default 5173)
+#
+# NOTE: Local Tiled allows anonymous *read*. Writes require the
+# authentication.single_user_api_key in tiled/config.yml — the backend picks
+# that up via tiled_config (and this script exports it as TILED_API_KEY).
+# Auth posture is declared in tiled/config.yml via:
 #   authentication:
-#     allow_anonymous_access: true
+#     allow_anonymous_access: true   # read-only for anon
+#     single_user_api_key: "..."     # write scopes for backend/ingest
 # Server binds to 127.0.0.1 (local-only). Do NOT change --host to 0.0.0.0
-# without reconsidering anonymous write access.
+# without reconsidering anonymous access.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
+IPRED_DIR="$SCRIPT_DIR/ipred"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 TILED_CONFIG="$SCRIPT_DIR/tiled/config.yml"
 TILED_PORT="${TILED_PORT:-8010}"
 BACKEND_PORT="${BACKEND_PORT:-8002}"
+IPRED_PORT="${IPRED_PORT:-8003}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 RUN_DIR="$SCRIPT_DIR/.run"
 TILED_PID_FILE="$RUN_DIR/tiled.pid"
 BACKEND_PID_FILE="$RUN_DIR/backend.pid"
+IPRED_PID_FILE="$RUN_DIR/ipred.pid"
 FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
 ENV_DIR=""
 ENV_KIND=""
@@ -195,6 +207,7 @@ reclaim_orphaned_repo_ports() {
   fi
   stop_repo_listener_on_port "$FRONTEND_PORT" "frontend" "$FRONTEND_DIR" "vite" ""
   stop_repo_listener_on_port "$BACKEND_PORT" "backend" "$BACKEND_DIR" "annotation_server:app" "uvicorn"
+  stop_repo_listener_on_port "$IPRED_PORT" "ipred" "$IPRED_DIR" "ipred.api:app" "uvicorn"
   stop_repo_listener_on_port "$TILED_PORT" "Tiled" "$SCRIPT_DIR" "$TILED_CONFIG" "tiled"
 }
 
@@ -226,12 +239,21 @@ ensure_backend_env() {
   PYTHON="$ENV_DIR/bin/python"
   export PATH="$ENV_DIR/bin:$PATH"
 
-  if ! "$PYTHON" -c "import tiled, uvicorn" >/dev/null 2>&1; then
+  # Include clf/manifold deps — import check keeps a fresh/partial venv filled in.
+  if ! "$PYTHON" -c "import tiled, uvicorn, sklearn, catboost, onnxruntime" >/dev/null 2>&1; then
     echo -e "${YELLOW}    Installing backend dependencies via uv...${NC}"
     uv pip install --python "$PYTHON" \
       "fastapi>=0.115" "uvicorn[standard]>=0.30" "tiled[all]>=0.1" \
       "numpy>=1.26" "pillow>=10.3" "python-dotenv>=1.0" "matplotlib>=3.8" \
-      "pycocotools>=2.0.7" "scikit-image>=0.22" "tifffile>=2024.0" "imagecodecs"
+      "pycocotools>=2.0.7" "scikit-image>=0.22" "scikit-learn>=1.4" \
+      "catboost>=1.2" "onnxruntime>=1.17" \
+      "tifffile>=2024.0" "imagecodecs" "httpx>=0.27"
+  fi
+
+  # Disjoint iterative prediction backend (features / train plugins / conformal).
+  if ! "$PYTHON" -c "import ipred" >/dev/null 2>&1; then
+    echo -e "${YELLOW}    Installing ipred editable...${NC}"
+    uv pip install --python "$PYTHON" -e "$IPRED_DIR"
   fi
 }
 
@@ -261,9 +283,10 @@ tiled_cmd() {
 cleanup() {
   echo ""
   echo -e "${YELLOW}Shutting down...${NC}"
-  kill "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
-  wait "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+  kill "$TILED_PID" "$IPRED_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+  wait "$TILED_PID" "$IPRED_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
   cleanup_pid_file "$TILED_PID_FILE"
+  cleanup_pid_file "$IPRED_PID_FILE"
   cleanup_pid_file "$BACKEND_PID_FILE"
   cleanup_pid_file "$FRONTEND_PID_FILE"
   echo -e "${GREEN}Done.${NC}"
@@ -277,7 +300,9 @@ cleanup_managed_processes
 reclaim_orphaned_repo_ports
 require_free_port "$TILED_PORT" "Tiled"
 require_free_port "$BACKEND_PORT" "Backend"
+require_free_port "$IPRED_PORT" "ipred"
 require_free_port "$FRONTEND_PORT" "Frontend"
+IPRED_PID=""
 
 # ---------------------------------------------------------------------------
 # Load .env — create it from .env.example if missing
@@ -292,12 +317,38 @@ set -a
 source "$BACKEND_DIR/.env"
 set +a
 
+# Empty TILED_API_KEY breaks the tiled Python client: it builds the illegal
+# header "Apikey " (trailing space, no key). Prefer the single-user key from
+# tiled/config.yml so ingest/writes get create:node / write:* scopes.
+if [ -z "${TILED_API_KEY:-}" ]; then
+  unset TILED_API_KEY
+  TILED_API_KEY="$("$PYTHON" - "$TILED_CONFIG" <<'PY'
+from pathlib import Path
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)
+path = Path(sys.argv[1])
+raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+key = (raw.get("authentication") or {}).get("single_user_api_key") or ""
+print(key.strip(), end="")
+PY
+)"
+  if [ -n "${TILED_API_KEY:-}" ]; then
+    export TILED_API_KEY
+    echo -e "${GREEN}    Using single_user_api_key from tiled/config.yml for write access${NC}"
+  fi
+fi
+if [ -z "${TILED_LOCAL_API_KEY:-}" ]; then
+  unset TILED_LOCAL_API_KEY
+fi
+
 # ---------------------------------------------------------------------------
-# Tiled — PUBLIC server, anonymous read+write (no API key).
-# Auth posture lives in tiled/config.yml (allow_anonymous_access: true).
+# Tiled — anonymous read; write via single_user_api_key (see tiled/config.yml).
 # (must match backend/tiled_config.py default: port 8010)
 # ---------------------------------------------------------------------------
-echo -e "${CYAN}==> Starting Tiled (port ${TILED_PORT}, public / anonymous)...${NC}"
+echo -e "${CYAN}==> Starting Tiled (port ${TILED_PORT}, anon read / key for write)...${NC}"
 
 # Repair catalog asset paths in case the repo was moved or cloned to a new location.
 "$PYTHON" "$SCRIPT_DIR/backend/scripts/repair_catalog_paths.py"
@@ -317,7 +368,15 @@ if [ ! -f "$SCRIPT_DIR/.tiled/catalog.db" ]; then
   }
 fi
 
-(cd "$SCRIPT_DIR" && tiled_cmd serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT") &
+# ``exec`` so $! is the tiled/uvicorn process itself, not a short-lived wrapper
+# subshell — otherwise the ready-check can see a dead PID while the server is up.
+(
+  cd "$SCRIPT_DIR" || exit 1
+  if [ -x "$ENV_DIR/bin/tiled" ]; then
+    exec "$ENV_DIR/bin/tiled" serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT"
+  fi
+  exec tiled serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT"
+) &
 TILED_PID=$!
 echo "$TILED_PID" > "$TILED_PID_FILE"
 echo -e "${GREEN}    Tiled PID: $TILED_PID${NC}"
@@ -331,7 +390,8 @@ for i in $(seq 1 40); do
     TILED_READY=1
     break
   fi
-  if ! kill -0 "$TILED_PID" 2>/dev/null; then
+  # Prefer port/HTTP over PID: uvicorn may replace/fork the launcher process.
+  if ! port_is_listening "$TILED_PORT" && ! kill -0 "$TILED_PID" 2>/dev/null; then
     echo -e "${RED}    Tiled failed to start. Install: pip install 'tiled[server]' (see backend/requirements.txt).${NC}"
     exit 1
   fi
@@ -343,9 +403,9 @@ if [ "$TILED_READY" != 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Backend
+# ipred (disjoint preprocess / train / conformal)
 # ---------------------------------------------------------------------------
-echo -e "${CYAN}==> Starting backend (port ${BACKEND_PORT})...${NC}"
+echo -e "${CYAN}==> Starting ipred (port ${IPRED_PORT})...${NC}"
 
 UVICORN_CMD=("$ENV_DIR/bin/uvicorn")
 if [ ! -x "${UVICORN_CMD[0]}" ]; then
@@ -353,6 +413,35 @@ if [ ! -x "${UVICORN_CMD[0]}" ]; then
   echo -e "${RED}Run: $PYTHON -m pip install -r backend/requirements.txt${NC}"
   exit 1
 fi
+
+export IPRED_URL="http://127.0.0.1:${IPRED_PORT}"
+(
+  cd "$IPRED_DIR" || exit 1
+  # Ensure ipred is importable from src even if editable install drifted.
+  export PYTHONPATH="$IPRED_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+  exec "${UVICORN_CMD[@]}" ipred.api:app --host 127.0.0.1 --port "$IPRED_PORT"
+) &
+IPRED_PID=$!
+echo "$IPRED_PID" > "$IPRED_PID_FILE"
+echo -e "${GREEN}    ipred PID: $IPRED_PID${NC}"
+
+echo -e "${CYAN}    Waiting for ipred...${NC}"
+for i in $(seq 1 20); do
+  if curl -sf "http://127.0.0.1:${IPRED_PORT}/health" >/dev/null 2>&1; then
+    echo -e "${GREEN}    ipred ready at http://127.0.0.1:${IPRED_PORT}${NC}"
+    break
+  fi
+  if ! kill -0 "$IPRED_PID" 2>/dev/null; then
+    echo -e "${RED}    ipred failed to start. Check logs above.${NC}"
+    exit 1
+  fi
+  sleep 0.5
+done
+
+# ---------------------------------------------------------------------------
+# Backend (Annotate GUI API — proxies to ipred)
+# ---------------------------------------------------------------------------
+echo -e "${CYAN}==> Starting backend (port ${BACKEND_PORT})...${NC}"
 
 cd "$BACKEND_DIR"
 "${UVICORN_CMD[@]}" annotation_server:app --host 127.0.0.1 --port "$BACKEND_PORT" &
@@ -396,9 +485,10 @@ echo -e "${GREEN}    Frontend PID: $FRONTEND_PID${NC}"
 echo ""
 echo -e "${GREEN}==========================================${NC}"
   echo -e "${GREEN}  SAM3 Annotation Studio is running!${NC}"
-echo -e "${GREEN}  Tiled    : http://127.0.0.1:${TILED_PORT} (public / anonymous)${NC}"
-echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
-echo -e "${GREEN}  Backend  : http://127.0.0.1:${BACKEND_PORT}${NC}"
+  echo -e "${GREEN}  Tiled     : http://127.0.0.1:${TILED_PORT} (anon read; API key for write)${NC}"
+echo -e "${GREEN}  Frontend  : http://127.0.0.1:${FRONTEND_PORT}${NC}"
+echo -e "${GREEN}  Backend   : http://127.0.0.1:${BACKEND_PORT}${NC}"
+echo -e "${GREEN}  ipred: http://127.0.0.1:${IPRED_PORT}${NC}"
 echo -e "${GREEN}  Press Ctrl+C to stop all servers.${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo ""

@@ -46,27 +46,43 @@ def get_tiled_client(server_uri: str | None = None, server_api_key: str | None =
     return client
 
 
-# Paths checked in order when looking for the Browse root container. The first
-# non-empty path wins. Falling back to the root container is valid but usually
-# means the user hasn't seeded any data yet.
+# Well-known demo paths. Used as candidates alongside every top-level child of
+# the catalog root; the auto-discoverer then picks the *largest* non-empty one
+# so a leftover single ingest under ``browse/`` does not hide a fuller tree
+# such as ``petioles/``.
 _BROWSE_CANDIDATES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("browse", "generated_data"), "browse/generated_data"),
     (("beamlines", "bl733", "projects", "10k"), "beamlines/bl733/projects/10k"),
     (("beamlines", "bl733"), "beamlines/bl733"),
     (("beamlines", "bl901"), "beamlines/bl901"),
-    # Plain drag-and-drop ingest writes samples directly under `browse/`; catch
-    # this before falling back to the root (which would list `browse` itself as
-    # a single sample instead of its contents).
+    (("petioles",), "petioles"),
+    # Plain drag-and-drop ingest writes samples under `browse/`.
     (("browse",), "browse"),
 )
+
+
+def _try_navigate(client: Any, keys: tuple[str, ...]) -> Any | None:
+    """Return ``client[keys...]`` or ``None`` if missing / not a container."""
+    try:
+        node: Any = client
+        for k in keys:
+            node = node[k]
+        if len(node) > 0:
+            return node
+    except (KeyError, TypeError, AttributeError):
+        return None
+    return None
 
 
 def get_browse_container(client: Any) -> tuple[Any, str]:
     """Return ``(container_node, path_prefix)`` for the Metadata Browser root.
 
-    Checks ``TILED_BROWSE_PATH`` env var first (slash-separated path into the
-    Tiled tree, e.g. ``20260221_135217_petiole22_``). Then walks known
-    beamline-ish paths in priority order. Falls back to the client's root.
+    Resolution order:
+
+    1. ``TILED_BROWSE_PATH`` env var (explicit override).
+    2. Among known candidate paths **and** every non-empty top-level child of
+       the root, pick the container with the most children (most samples).
+    3. Fall back to the client's root.
     """
     browse_path = (os.getenv("TILED_BROWSE_PATH") or "").strip().strip("/")
     if browse_path:
@@ -76,18 +92,38 @@ def get_browse_container(client: Any) -> tuple[Any, str]:
                 node = node[k]
             if len(node) > 0:
                 return node, browse_path
-        except (KeyError, TypeError):
+        except (KeyError, TypeError, AttributeError):
             pass
 
+    scored: list[tuple[int, str, Any]] = []
+    seen_prefixes: set[str] = set()
+
     for keys, prefix in _BROWSE_CANDIDATES:
-        try:
-            node: Any = client
-            for k in keys:
-                node = node[k]
-            if len(node) > 0:
-                return node, prefix
-        except (KeyError, TypeError):
+        node = _try_navigate(client, keys)
+        if node is None:
             continue
+        scored.append((len(node), prefix, node))
+        seen_prefixes.add(prefix.split("/")[0])
+
+    # Top-level containers (e.g. ``petioles``) not already covered by a candidate.
+    try:
+        for key in list(client):
+            name = str(key)
+            if name in seen_prefixes:
+                continue
+            node = _try_navigate(client, (name,))
+            if node is None:
+                continue
+            scored.append((len(node), name, node))
+    except (TypeError, AttributeError):
+        pass
+
+    if scored:
+        # Most samples first; stable tie-break by path for determinism.
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        count, prefix, node = scored[0]
+        return node, prefix
+
     return client, ""
 
 

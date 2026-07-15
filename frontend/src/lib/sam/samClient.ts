@@ -44,10 +44,12 @@ class SamClient {
   /** Spawn the worker and load the model (idempotent). */
   init(): Promise<void> {
     if (this.initPromise) return this.initPromise;
+    this.setStatus('loading-model');
     this.initPromise = new Promise<void>((resolve, reject) => {
       try {
         this.worker = new Worker(new URL('./samWorker.ts', import.meta.url), { type: 'module' });
       } catch (err) {
+        this.initPromise = null;
         this.setStatus('unsupported');
         reject(err instanceof Error ? err : new Error(String(err)));
         return;
@@ -58,7 +60,10 @@ class SamClient {
           this.backend = msg.backend ?? this.backend;
           this.setStatus(msg.status);
           if (msg.status === 'ready') resolve();
-          if (msg.status === 'unsupported') reject(new Error(msg.message ?? 'unsupported'));
+          if (msg.status === 'unsupported') {
+            this.initPromise = null;
+            reject(new Error(msg.message ?? 'unsupported'));
+          }
         } else if (msg.type === 'encoded' || msg.type === 'decoded') {
           this.pending.get(msg.id)?.resolve(msg);
           this.pending.delete(msg.id);
@@ -68,11 +73,15 @@ class SamClient {
         }
       };
       this.worker.onerror = (e) => {
+        this.initPromise = null;
         this.setStatus('unsupported');
         reject(new Error(e.message || 'SAM worker error'));
       };
       this.worker.postMessage({ type: 'init' });
     });
+    // Keep a dangling rejection from breaking the next caller; failures clear
+    // initPromise above so a later init() can retry (e.g. after vendoring models).
+    this.initPromise.catch(() => { /* status already updated */ });
     return this.initPromise;
   }
 

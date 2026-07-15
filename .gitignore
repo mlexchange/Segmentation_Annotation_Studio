@@ -49,3 +49,14 @@ Thumbs.db
 htmlcov/
 .coverage
 coverage.xml
+
+# Vendored SlimSAM weights (~75 MB) — fetch with:
+#   node frontend/scripts/fetch-sam-model.mjs
+frontend/public/models/
+
+# Mark25 / TomoJEPA weights (~365 MB) — keep local; path via TOMOJEPA_WEIGHTS
+ipred/models/*.pth
+ipred/models/*.onnx
+
+# Local runtime caches (feature banks, ipred catalog, etc.)
+.local_data/

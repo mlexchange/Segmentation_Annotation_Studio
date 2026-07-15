@@ -13,6 +13,7 @@ import { useOpenInAnnotate } from '@/hooks/useOpenInAnnotate';
 import { API_BASE } from '@/config';
 import type { ServerInfo } from '@/types/server';
 import type { AnnotationFilter } from '@/types/annotationFilter';
+import SessionSetupPanel from '@/components/SessionSetupPanel';
 
 export default function BrowsePage() {
   const navigate = useNavigate();
@@ -77,6 +78,10 @@ export default function BrowsePage() {
         >
           Change
         </button>
+      </div>
+
+      <div className="shrink-0 px-3 py-2 bg-slate-900/80 border-b border-slate-700">
+        <SessionSetupPanel compact />
       </div>
 
       {/* Main browser — flex-1 so it fills the space under the banner and its

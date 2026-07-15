@@ -5,6 +5,7 @@ import { useEffect, useRef } from 'react';
 import { API_BASE } from '@/config';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
+import { serializeMaskSet, useMaskSetStore } from '@/stores/maskSetStore';
 
 const DEBOUNCE_MS = 1500;
 
@@ -19,6 +20,7 @@ export function useDraftSync(sourceKey: string | null) {
   const splitBySlice = useAnnotationStore((s) => s.splitBySlice);
   const negativeSlices = useAnnotationStore((s) => s.negativeSlices);
   const classes = useClassStore((s) => s.classes);
+  const maskSets = useMaskSetStore((s) => s.sets);
 
   useEffect(() => {
     if (!sourceKey) return;
@@ -30,6 +32,9 @@ export function useDraftSync(sourceKey: string | null) {
         slices: byImage[sourceKey] ?? {},
         split_by_slice: splitBySlice[sourceKey] ?? {},
         negative_slices: negativeSlices[sourceKey] ?? [],
+        mask_sets: maskSets
+          .filter((m) => m.sourceKey === sourceKey)
+          .map(serializeMaskSet),
       };
       fetch(`${API_BASE}/api/annotations/draft?source_key=${encodeURIComponent(sourceKey)}`, {
         method: 'PUT',
@@ -41,7 +46,7 @@ export function useDraftSync(sourceKey: string | null) {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [sourceKey, byImage, splitBySlice, negativeSlices, classes]);
+  }, [sourceKey, byImage, splitBySlice, negativeSlices, classes, maskSets]);
 
   // Flush on page unload
   useEffect(() => {
@@ -52,6 +57,9 @@ export function useDraftSync(sourceKey: string | null) {
         slices: byImage[sourceKey] ?? {},
         split_by_slice: splitBySlice[sourceKey] ?? {},
         negative_slices: negativeSlices[sourceKey] ?? [],
+        mask_sets: maskSets
+          .filter((m) => m.sourceKey === sourceKey)
+          .map(serializeMaskSet),
       };
       navigator.sendBeacon(
         `${API_BASE}/api/annotations/draft?source_key=${encodeURIComponent(sourceKey)}`,
@@ -60,7 +68,7 @@ export function useDraftSync(sourceKey: string | null) {
     };
     window.addEventListener('beforeunload', flush);
     return () => window.removeEventListener('beforeunload', flush);
-  }, [sourceKey, byImage, splitBySlice, negativeSlices, classes]);
+  }, [sourceKey, byImage, splitBySlice, negativeSlices, classes, maskSets]);
 }
 
 /** Load a draft from the server for sourceKey. Returns null if none exists. */

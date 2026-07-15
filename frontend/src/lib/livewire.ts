@@ -18,7 +18,7 @@ export interface CostMap {
 
 /** Build an edge-cost map from an image, downsampled so the long side <= maxDim. */
 export function buildCostMap(
-  image: HTMLImageElement,
+  image: CanvasImageSource,
   imgW: number,
   imgH: number,
   maxDim = 512,

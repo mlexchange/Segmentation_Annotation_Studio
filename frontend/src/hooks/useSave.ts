@@ -9,6 +9,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { API_BASE } from '@/config';
 import { useAnnotationStore, type Shape } from '@/stores/annotationStore';
 import { useClassStore, type AnnotationClass } from '@/stores/classStore';
+import {
+  deserializeMaskSet,
+  serializeMaskSet,
+  useMaskSetStore,
+  type MaskSet,
+  type MaskSetSerialized,
+} from '@/stores/maskSetStore';
 
 export interface VersionMeta {
   version: number;
@@ -26,6 +33,7 @@ export interface SaveDraftPayload {
   slices: Record<string, Shape[]>;
   split_by_slice: Record<string, string>;
   negative_slices: string[];
+  mask_sets?: Array<MaskSet | MaskSetSerialized>;
 }
 
 /** Full annotation payload for one saved version (used for preview + restore). */
@@ -75,6 +83,8 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
   const mergeSourceDraft = useAnnotationStore((s) => s.mergeSourceDraft);
   const classes = useClassStore((s) => s.classes);
   const setClasses = useClassStore((s) => s.setClasses);
+  const maskSets = useMaskSetStore((s) => s.sets);
+  const replaceAllMaskSets = useMaskSetStore((s) => s.replaceAll);
 
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -91,7 +101,7 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
     }
     setIsDirty(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [byImage, splitBySlice, negativeSlices, classes]);
+  }, [byImage, splitBySlice, negativeSlices, classes, maskSets]);
 
   useEffect(() => {
     cleanRef.current = true;
@@ -109,8 +119,11 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
       slices: byImage[sourceKey] ?? {},
       split_by_slice: splitBySlice[sourceKey] ?? {},
       negative_slices: negativeSlices[sourceKey] ?? [],
+      mask_sets: maskSets
+        .filter((m) => m.sourceKey === sourceKey)
+        .map(serializeMaskSet),
     };
-  }, [sourceKey, byImage, splitBySlice, negativeSlices, classes]);
+  }, [sourceKey, byImage, splitBySlice, negativeSlices, classes, maskSets]);
 
   const saveSummary = useMemo(() => {
     const payload = buildSavePayload();
@@ -192,6 +205,9 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
           slices: (raw.slices ?? {}) as Record<string, Shape[]>,
           split_by_slice: (raw.split_by_slice ?? {}) as Record<string, string>,
           negative_slices: (raw.negative_slices ?? []) as string[],
+          mask_sets: Array.isArray(raw.mask_sets)
+            ? (raw.mask_sets as MaskSetSerialized[]).map(deserializeMaskSet)
+            : [],
         };
         payloadCacheRef.current.set(version, payload);
         return payload;
@@ -211,10 +227,17 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
       if (!payload) return;
       setClasses(payload.classes);
       mergeSourceDraft(sourceKey, payload.slices, payload.split_by_slice, payload.negative_slices);
+      const others = useMaskSetStore.getState().sets.filter((m) => m.sourceKey !== sourceKey);
+      const restored = (payload.mask_sets ?? []).map((m) =>
+        m instanceof Object && 'labelMap' in m && (m as MaskSet).labelMap instanceof Uint8Array
+          ? (m as MaskSet)
+          : deserializeMaskSet(m as MaskSetSerialized),
+      );
+      replaceAllMaskSets([...others, ...restored]);
       cleanRef.current = false;
       setIsDirty(true);
     },
-    [sourceKey, setClasses, mergeSourceDraft, fetchVersionPayload]
+    [sourceKey, setClasses, mergeSourceDraft, fetchVersionPayload, replaceAllMaskSets]
   );
 
   /** Mark current state as clean (e.g. after restoring a draft on open). */

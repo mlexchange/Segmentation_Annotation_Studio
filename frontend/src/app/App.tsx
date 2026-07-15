@@ -1,13 +1,26 @@
-import { useState, useEffect } from 'react';
+/**
+ * App — Hub routes: Connect → Browse → Ipred → Preprocess → Draw → Train.
+ */
+import { useEffect } from 'react';
 import { useNavigate, useLocation, Navigate } from 'react-router';
 import './App.css';
 import { RouteItem } from '@/types/navigationRouterTypes';
 import HubAppLayout from '@/components/HubAppLayout';
 import { useHubSelectedTabs } from '@/hooks/useHubSelectedTabs';
-import { PlugsConnected, PencilSimple, MagnifyingGlass } from '@phosphor-icons/react';
+import {
+  PlugsConnected,
+  MagnifyingGlass,
+  Cpu,
+  Faders,
+  PencilSimple,
+  TreeStructure,
+} from '@phosphor-icons/react';
 import ConnectPage from './pages/ConnectPage';
-import AnnotatePage from './pages/AnnotatePage';
 import BrowsePage from './pages/BrowsePage';
+import IpredPage from './pages/IpredPage';
+import PreprocessPage from './pages/PreprocessPage';
+import DrawPage from './pages/DrawPage';
+import TrainPage from './pages/TrainPage';
 import CustomizePages from '@/components/CustomizePages';
 
 const allRoutes: RouteItem[] = [
@@ -25,10 +38,30 @@ const allRoutes: RouteItem[] = [
     isBackgroundTransparent: true,
   },
   {
-    path: '/annotate',
-    label: 'Annotate',
+    path: '/ipred',
+    label: 'Ipred',
+    icon: <Cpu size={32} />,
+    element: <IpredPage />,
+  },
+  {
+    path: '/preprocess',
+    label: 'Preprocess',
+    icon: <Faders size={32} />,
+    element: <PreprocessPage />,
+    isBackgroundTransparent: true,
+  },
+  {
+    path: '/draw',
+    label: 'Draw',
     icon: <PencilSimple size={32} />,
-    element: <AnnotatePage />,
+    element: <DrawPage />,
+    isBackgroundTransparent: true,
+  },
+  {
+    path: '/train',
+    label: 'Train & Predict',
+    icon: <TreeStructure size={32} />,
+    element: <TrainPage />,
     isBackgroundTransparent: true,
   },
 ];
@@ -43,9 +76,7 @@ function App() {
   const { selectedPaths, setSelectedPaths } = useHubSelectedTabs();
   const navigate = useNavigate();
   const location = useLocation();
-  const [showTabSelector, setShowTabSelector] = useState(false);
 
-  // Validate stored paths — discard unknown paths and merge in any newly added tabs.
   const storedValid = selectedPaths?.filter((p) => DEFAULT_PATHS.includes(p)) ?? null;
   const validPaths =
     storedValid === null
@@ -53,7 +84,6 @@ function App() {
       : [...storedValid, ...DEFAULT_PATHS.filter((p) => !storedValid.includes(p))];
   const needsInit = validPaths === null || validPaths.length === 0;
 
-  // Navigate on first mount if no valid paths stored; persist merged tab list.
   useEffect(() => {
     if (needsInit) {
       setSelectedPaths(DEFAULT_PATHS);
@@ -71,6 +101,14 @@ function App() {
   const filteredRoutes = needsInit
     ? allRoutes
     : allRoutes.filter((r) => validPaths!.includes(r.path));
+
+  if (location.pathname === '/annotate') {
+    return <Navigate to="/preprocess" replace />;
+  }
+
+  if (location.pathname === '/cleanup') {
+    return <Navigate to="/train" replace />;
+  }
 
   if (needsInit) {
     return null;

@@ -14,6 +14,7 @@ import { API_BASE } from '@/config';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { useOpenInAnnotate } from '@/hooks/useOpenInAnnotate';
 import IngestDropzone from '@/components/Ingest/IngestDropzone';
+import SessionSetupPanel from '@/components/SessionSetupPanel';
 
 interface ServerInfo {
   name: string;
@@ -113,7 +114,7 @@ export default function ConnectPage() {
   // Jump straight from ingest to the Annotate tab for the first uploaded sample.
   const annotateIngested = (containerPath: string, firstKey: string) => {
     connectTiled(containerPath, false); // set connection context, don't navigate to Browse
-    void openTiledArray(`${containerPath}/${firstKey}`, selectedServerUri); // navigates to /annotate
+    void openTiledArray(`${containerPath}/${firstKey}`, selectedServerUri); // → Preprocess
   };
 
   /** Fetch a connection summary for the chosen Tiled server or local folder, store it, then go to Browse. */
@@ -136,7 +137,10 @@ export default function ConnectPage() {
       setConnection({
         kind: summary.kind,
         serverUri: summary.server_uri ?? null,
-        browseContainerPath: mode === 'tiled' ? selectedContainer || null : null,
+        browseContainerPath:
+          mode === 'tiled'
+            ? (selectedContainer || summary.container_path || null)
+            : null,
         localRoot: mode === 'local' ? grantedRoot : null,
         localRel: mode === 'local' ? selectedFolder : null,
         label: summary.label,
@@ -390,6 +394,8 @@ export default function ConnectPage() {
             {status}
           </p>
         )}
+
+        <SessionSetupPanel />
 
         <button
           onClick={handleConnect}

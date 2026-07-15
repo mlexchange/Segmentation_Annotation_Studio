@@ -29,11 +29,17 @@ import { useImageSlice } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type GrayField } from '@/lib/magicwand';
 import { useSam } from '@/hooks/useSam';
-import { renderAdjusted } from '@/lib/sam/adjust';
+import { renderAdjusted, renderPreprocessOnly } from '@/lib/sam/adjust';
 import { gridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
 import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
 import { useClipboardStore } from '@/stores/clipboardStore';
+import { colorizeConformalOverlay, colorizeLabelMap, loadLabelPng } from '@/lib/pixelClf';
+import { loadManifoldHeatmapCanvas, manifoldMarkerRect } from '@/lib/featureManifold';
+import {
+  isPredictionClassVisible,
+  useLayerVisibilityStore,
+} from '@/stores/layerVisibilityStore';
 
 // macOS labels the Alt key "Option" (⌥). e.altKey is true for it either way,
 // so only the on-screen label needs to differ.
@@ -46,6 +52,50 @@ const EMPTY_SHAPES: Shape[] = [];
 interface AnnotationCanvasProps {
   brightness: number;
   contrast: number;
+  /** When true, apply CLAHE before brightness/contrast/levels (display + tools). */
+  clahe?: boolean;
+  /** When true, apply classic 3×3 Laplacian sharpen (display + tools). */
+  sharpen?: boolean;
+  /**
+   * When set, this object URL is the display base (feature channel PNG).
+   * Client CLAHE is skipped; sharpen still applies. Tools (SAM/magic) follow it.
+   */
+  featureChannelUrl?: string | null;
+  /** Job/channel identity for SAM + magic field cache keys. */
+  featureCacheKey?: string | null;
+  /**
+   * Softmax probability heatmap PNG — rendered as a translucent overlay (does not
+   * replace the base image). Controlled by the Layers panel.
+   */
+  probaOverlayUrl?: string | null;
+  /** CatBoost commit map PNG (singleton classId; 0 elsewhere). */
+  clfCommitUrl?: string | null;
+  /** CatBoost status PNG (0=abstain, 1=singleton, 2=multi). */
+  clfStatusUrl?: string | null;
+  /** Ghost overlay for visible mask sets (Cleanup mode) — shape fallback. */
+  maskSetOverlayShapes?: Shape[] | null;
+  /** Dense label-map overlay for mask sets (preferred, pixel-accurate). */
+  maskSetLabelOverlay?: { data: Uint8Array; width: number; height: number } | null;
+  /** Manifold coverage heatmap grayscale URL (Suggest Labels). */
+  manifoldHeatmapUrl?: string | null;
+  /** Manifold heatmap opacity 0–1. */
+  manifoldHeatmapOpacity?: number;
+  /** Whether to show the manifold heatmap layer. */
+  manifoldShowHeatmap?: boolean;
+  /** Inducing-point markers / boxes (image coords). */
+  manifoldMarkers?: Array<{
+    x: number;
+    y: number;
+    radius?: number;
+    box_size?: number;
+    box?: { x0: number; y0: number; x1: number; y1: number };
+  }> | null;
+  /** Live Box size (px) from the slider — used for marker side length. */
+  manifoldBoxSize?: number;
+  /** Whether to show inducing-point rings / boxes. */
+  manifoldShowMarkers?: boolean;
+  /** Placement-mask shapes for Suggest Labels (outline only). */
+  placementMaskShapes?: Shape[] | null;
   /** Client-side levels window (0–255) applied to the displayed image. */
   levelsLo: number;
   levelsHi: number;
@@ -265,6 +315,22 @@ function shapeIntersectsRect(shape: Shape, r: BBox): boolean {
 export default function AnnotationCanvas({
   brightness,
   contrast,
+  clahe = false,
+  sharpen = false,
+  featureChannelUrl = null,
+  featureCacheKey = null,
+  probaOverlayUrl = null,
+  clfCommitUrl = null,
+  clfStatusUrl = null,
+  maskSetOverlayShapes = null,
+  maskSetLabelOverlay = null,
+  manifoldHeatmapUrl = null,
+  manifoldHeatmapOpacity = 0.45,
+  manifoldShowHeatmap = true,
+  manifoldMarkers = null,
+  manifoldBoxSize,
+  manifoldShowMarkers = true,
+  placementMaskShapes = null,
   levelsLo,
   levelsHi,
   onHistogram,
@@ -357,7 +423,7 @@ export default function AnnotationCanvas({
   const [magneticCommitted, setMagneticCommitted] = useState<number[]>([]);
   const [magneticPreview, setMagneticPreview] = useState<number[]>([]);
   const magneticCostRef = useRef<CostMap | null>(null);
-  const magneticBuiltForRef = useRef<HTMLImageElement | null>(null);
+  const magneticBuiltForRef = useRef<CanvasImageSource | null>(null);
   const magneticPrevRef = useRef<Int32Array | null>(null);
   const magneticSeedRef = useRef<{ x: number; y: number } | null>(null);
   // True while a brush/eraser stroke is actively being drawn — suppresses the
@@ -366,6 +432,15 @@ export default function AnnotationCanvas({
 
   const { data: sliceUrl } = useImageSlice(source, kind, currentSlice, renderOpts, serverUri);
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
+  const [featureEl, setFeatureEl] = useState<HTMLImageElement | null>(null);
+  const [probaEl, setProbaEl] = useState<HTMLImageElement | null>(null);
+
+  const layerGroups = useLayerVisibilityStore((s) => s.groups);
+  const probaOpacity = useLayerVisibilityStore((s) => s.probaOpacity);
+  const predictionsOpacity = useLayerVisibilityStore((s) => s.predictionsOpacity);
+  const predictionClassVisible = useLayerVisibilityStore((s) => s.predictionClassVisible);
+  const showPredictionMulti = useLayerVisibilityStore((s) => s.showPredictionMulti);
+  const showPredictionAbstain = useLayerVisibilityStore((s) => s.showPredictionAbstain);
 
   useEffect(() => {
     if (!sliceUrl) return;
@@ -373,6 +448,127 @@ export default function AnnotationCanvas({
     img.onload = () => setImageEl(img);
     img.src = sliceUrl;
   }, [sliceUrl]);
+
+  useEffect(() => {
+    if (!featureChannelUrl || !layerGroups.features) {
+      setFeatureEl(null);
+      return;
+    }
+    const img = new window.Image();
+    img.onload = () => setFeatureEl(img);
+    img.onerror = () => setFeatureEl(null);
+    img.src = featureChannelUrl;
+  }, [featureChannelUrl, layerGroups.features]);
+
+  useEffect(() => {
+    if (!probaOverlayUrl || !layerGroups.proba) {
+      setProbaEl(null);
+      return;
+    }
+    const img = new window.Image();
+    img.onload = () => setProbaEl(img);
+    img.onerror = () => setProbaEl(null);
+    img.src = probaOverlayUrl;
+  }, [probaOverlayUrl, layerGroups.proba]);
+
+  // CatBoost conformal overlay (singleton color / multi hatch / abstain dark).
+  const [clfOverlay, setClfOverlay] = useState<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    if (!clfCommitUrl || !clfStatusUrl || !layerGroups.predictions) {
+      setClfOverlay(null);
+      return;
+    }
+    let cancelled = false;
+    const colorByClass = new Map(classes.map((c) => [c.classId, c.color]));
+    Promise.all([loadLabelPng(clfCommitUrl), loadLabelPng(clfStatusUrl)])
+      .then(([commit, status]) => {
+        if (cancelled) return;
+        if (commit.width !== status.width || commit.height !== status.height) {
+          setClfOverlay(null);
+          return;
+        }
+        setClfOverlay(
+          colorizeConformalOverlay(
+            commit.data,
+            status.data,
+            commit.width,
+            commit.height,
+            colorByClass,
+            {
+              classVisible: (cid) => isPredictionClassVisible(predictionClassVisible, cid),
+              showMulti: showPredictionMulti,
+              showAbstain: showPredictionAbstain,
+            },
+          ),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setClfOverlay(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    clfCommitUrl,
+    clfStatusUrl,
+    classes,
+    layerGroups.predictions,
+    predictionClassVisible,
+    showPredictionMulti,
+    showPredictionAbstain,
+  ]);
+
+  // Manifold coverage heatmap (Suggest Labels).
+  const [manifoldOverlay, setManifoldOverlay] = useState<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    if (!manifoldHeatmapUrl || !manifoldShowHeatmap) {
+      setManifoldOverlay(null);
+      return;
+    }
+    let cancelled = false;
+    loadManifoldHeatmapCanvas(manifoldHeatmapUrl, manifoldHeatmapOpacity)
+      .then((canvas) => {
+        if (!cancelled) setManifoldOverlay(canvas);
+      })
+      .catch(() => {
+        if (!cancelled) setManifoldOverlay(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [manifoldHeatmapUrl, manifoldShowHeatmap, manifoldHeatmapOpacity]);
+
+  // Dense mask-set label map overlay (Cleanup Studio).
+  const [maskSetLabelCanvas, setMaskSetLabelCanvas] = useState<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    if (!maskSetLabelOverlay) {
+      setMaskSetLabelCanvas(null);
+      return;
+    }
+    const colorByClass = new Map(classes.map((c) => [c.classId, c.color]));
+    setMaskSetLabelCanvas(
+      colorizeLabelMap(
+        maskSetLabelOverlay.data,
+        maskSetLabelOverlay.width,
+        maskSetLabelOverlay.height,
+        colorByClass,
+        120,
+      ),
+    );
+  }, [maskSetLabelOverlay, classes]);
+
+  // Base for display + tools: feature channel when selected, else slice PNG.
+  // Skip client CLAHE when features are active (bank already CLAHE'd server-side).
+  const displaySource = useMemo(() => {
+    const base = featureEl ?? imageEl;
+    if (!base || !meta) return null;
+    const applyClahe = clahe && !featureEl;
+    if (!applyClahe && !sharpen) return base;
+    return renderPreprocessOnly(base, meta.width, meta.height, {
+      clahe: applyClahe,
+      sharpen,
+    });
+  }, [featureEl, imageEl, meta, clahe, sharpen]);
 
   // SAM (in-browser Segment Anything) — the smart magic engine. Only spun up
   // while the magic tool is active and the SAM engine is selected.
@@ -390,13 +586,13 @@ export default function AnnotationCanvas({
   // SAM sees the brightness/contrast-adjusted image (windowing a low-contrast
   // slice greatly helps), so the encode is keyed on those — adjusting them
   // re-encodes. Building the source is deferred so it only runs on a real encode.
-  const samEncodeKey = imageEl && meta
-    ? `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}`
+  const samEncodeKey = displaySource && meta
+    ? `${sourceKey}|${currentSlice}|feat${featureCacheKey ?? 'none'}|clahe${clahe && !featureEl ? 1 : 0}|sh${sharpen ? 1 : 0}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}`
     : null;
   /** Lazily render the display-adjusted slice (brightness/contrast/levels) that SAM encodes. */
   const makeSamSource = useCallback(
-    () => renderAdjusted(imageEl!, meta!.width, meta!.height, brightness, contrast, levelsLo, levelsHi),
-    [imageEl, meta, brightness, contrast, levelsLo, levelsHi],
+    () => renderAdjusted(displaySource!, meta!.width, meta!.height, brightness, contrast, levelsLo, levelsHi, false),
+    [displaySource, meta, brightness, contrast, levelsLo, levelsHi],
   );
 
   // Proactively encode the slice when SAM is active so the first click is fast.
@@ -433,21 +629,21 @@ export default function AnnotationCanvas({
       (layer as unknown as { getNativeCanvasElement?: () => HTMLCanvasElement }).getNativeCanvasElement?.() ??
       (layer.getCanvas() as unknown as { _canvas: HTMLCanvasElement })._canvas;
     if (canvas) canvas.style.filter = displayAffine.identity ? 'none' : `url(#${displayFilterId})`;
-  }, [displayAffine.identity, displayFilterId, imageEl, stageSize]);
+  }, [displayAffine.identity, displayFilterId, displaySource, stageSize]);
 
   // Compute a 256-bin luminance histogram of the current slice (downsampled) for
-  // the levels control. Runs once per loaded image.
+  // the levels control. Runs once per loaded image / CLAHE toggle.
   useEffect(() => {
-    if (!imageEl || !onHistogram) return;
+    if (!displaySource || !onHistogram || !meta) return;
     const maxDim = 512;
-    const scale = Math.max(1, Math.ceil(Math.max(imageEl.width, imageEl.height) / maxDim));
-    const w = Math.max(1, Math.floor(imageEl.width / scale));
-    const h = Math.max(1, Math.floor(imageEl.height / scale));
+    const scale = Math.max(1, Math.ceil(Math.max(meta.width, meta.height) / maxDim));
+    const w = Math.max(1, Math.floor(meta.width / scale));
+    const h = Math.max(1, Math.floor(meta.height / scale));
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
-    ctx.drawImage(imageEl, 0, 0, w, h);
+    ctx.drawImage(displaySource, 0, 0, w, h);
     let data: Uint8ClampedArray;
     try { data = ctx.getImageData(0, 0, w, h).data; } catch { return; }
     const bins = new Array(256).fill(0);
@@ -456,7 +652,7 @@ export default function AnnotationCanvas({
       bins[lum < 0 ? 0 : lum > 255 ? 255 : lum]++;
     }
     onHistogram(bins);
-  }, [imageEl, onHistogram]);
+  }, [displaySource, meta, onHistogram]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -525,7 +721,7 @@ export default function AnnotationCanvas({
       layer.cache({ pixelRatio: pr });
     }
     layer.batchDraw();
-  }, [displayShapes, renderClasses, fillOpacity, meta, transform.scaleX, isDrawing]);
+  }, [displayShapes, renderClasses, fillOpacity, meta, transform.scaleX, isDrawing, layerGroups.annotations]);
 
   const colorForClass = (classId: number) =>
     renderClasses.find((c) => c.classId === classId)?.color ?? '#ff0000';
@@ -559,13 +755,13 @@ export default function AnnotationCanvas({
 
   // Build (and cache, per rendered image) the live-wire edge cost map.
   const ensureCostMap = (): CostMap | null => {
-    if (!imageEl || !meta) return null;
-    if (magneticCostRef.current && magneticBuiltForRef.current === imageEl) {
+    if (!displaySource || !meta) return null;
+    if (magneticCostRef.current && magneticBuiltForRef.current === displaySource) {
       return magneticCostRef.current;
     }
-    const cm = buildCostMap(imageEl, meta.width, meta.height);
+    const cm = buildCostMap(displaySource, meta.width, meta.height);
     magneticCostRef.current = cm;
-    magneticBuiltForRef.current = imageEl;
+    magneticBuiltForRef.current = displaySource;
     return cm;
   };
 
@@ -593,15 +789,15 @@ export default function AnnotationCanvas({
   const magicFieldRef = useRef<GrayField | null>(null);
   const magicFieldForRef = useRef<string | null>(null);
   const ensureMagicField = useCallback((): GrayField | null => {
-    if (!imageEl || !meta) return null;
-    const key = `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}`;
+    if (!displaySource || !meta) return null;
+    const key = `${sourceKey}|${currentSlice}|feat${featureCacheKey ?? 'none'}|clahe${clahe && !featureEl ? 1 : 0}|sh${sharpen ? 1 : 0}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}`;
     if (magicFieldRef.current && magicFieldForRef.current === key) return magicFieldRef.current;
-    const src = renderAdjusted(imageEl, meta.width, meta.height, brightness, contrast, levelsLo, levelsHi);
+    const src = renderAdjusted(displaySource, meta.width, meta.height, brightness, contrast, levelsLo, levelsHi, false);
     const f = buildField(src, meta.width, meta.height);
     magicFieldRef.current = f;
     magicFieldForRef.current = key;
     return f;
-  }, [imageEl, meta, sourceKey, currentSlice, brightness, contrast, levelsLo, levelsHi]);
+  }, [displaySource, meta, sourceKey, currentSlice, featureCacheKey, featureEl, clahe, sharpen, brightness, contrast, levelsLo, levelsHi]);
 
   // Auto negative ("not") prompts for SAM: interior points of nearby other-class
   // regions, so a new selection won't bleed into already-labeled areas. Anchored
@@ -642,7 +838,7 @@ export default function AnnotationCanvas({
   // Magic sliders already debounce their store commits (DebouncedSlider).
   useEffect(() => {
     if (tool === 'magic' && magicEngine === 'sam') {
-      if ((magicSeeds.length === 0 && !magicBox) || !imageEl || !meta) { setMagicPreview([]); return; }
+      if ((magicSeeds.length === 0 && !magicBox) || !displaySource || !meta) { setMagicPreview([]); return; }
       let cancelled = false;
       setMagicLoading(true);
       (async () => {
@@ -1758,10 +1954,10 @@ export default function AnnotationCanvas({
       >
         {/* Layer 0: image (display adjustments applied via the GPU SVG filter below) */}
         <Layer ref={imageLayerRef}>
-          {imageEl && meta && (
+          {displaySource && meta && (featureEl ? layerGroups.features : layerGroups.image) && (
             <KonvaImage
               ref={imageRef}
-              image={imageEl}
+              image={displaySource}
               width={meta.width}
               height={meta.height}
               listening={false}
@@ -1769,17 +1965,189 @@ export default function AnnotationCanvas({
           )}
         </Layer>
 
+        {/* Softmax probability overlay — does not replace the base image. */}
+        {probaEl && meta && layerGroups.proba && (
+          <Layer listening={false}>
+            <KonvaImage
+              image={probaEl}
+              width={meta.width}
+              height={meta.height}
+              opacity={probaOpacity}
+              listening={false}
+            />
+          </Layer>
+        )}
+
+        {/* CatBoost prediction overlay — outside the display filter so class colors stay true. */}
+        {clfOverlay && meta && layerGroups.predictions && (
+          <Layer listening={false}>
+            <KonvaImage
+              image={clfOverlay}
+              width={meta.width}
+              height={meta.height}
+              opacity={predictionsOpacity}
+              listening={false}
+            />
+          </Layer>
+        )}
+
+        {/* Manifold coverage heatmap + inducing-point rings (guidance only). */}
+        {manifoldOverlay && meta && manifoldShowHeatmap && layerGroups.manifold && (
+          <Layer listening={false}>
+            <KonvaImage
+              image={manifoldOverlay}
+              width={meta.width}
+              height={meta.height}
+              listening={false}
+            />
+          </Layer>
+        )}
+        {manifoldShowMarkers && manifoldMarkers && manifoldMarkers.length > 0 && meta && layerGroups.manifold && (
+          <Layer listening={false}>
+            {manifoldMarkers.map((p, i) => {
+              // Use Box size (slider / point.box_size) — never exclusion radius.
+              const rect = manifoldMarkerRect(p, {
+                side: manifoldBoxSize ?? p.box_size,
+                width: meta.width,
+                height: meta.height,
+              });
+              return (
+                <Group key={`mf-${i}-${p.x}-${p.y}`} listening={false}>
+                  <Rect
+                    x={rect.x}
+                    y={rect.y}
+                    width={rect.width}
+                    height={rect.height}
+                    stroke="#f472b6"
+                    strokeWidth={2 / transform.scaleX}
+                    dash={[6 / transform.scaleX, 4 / transform.scaleX]}
+                    fill="rgba(244,114,182,0.08)"
+                    listening={false}
+                  />
+                  <Circle
+                    x={p.x}
+                    y={p.y}
+                    radius={3 / transform.scaleX}
+                    fill="#f472b6"
+                    listening={false}
+                  />
+                </Group>
+              );
+            })}
+          </Layer>
+        )}
+
+        {/* Suggest Labels placement mask outline (Preprocess). */}
+        {placementMaskShapes && placementMaskShapes.length > 0 && (
+          <Layer listening={false}>
+            {placementMaskShapes.map((s) => {
+              const sw = 2 / transform.scaleX;
+              const stroke = '#0ea5e9';
+              const dash = [8 / transform.scaleX, 5 / transform.scaleX];
+              if (s.kind === 'polygon') {
+                return (
+                  <Line
+                    key={`pm-${s.id}`}
+                    points={s.points}
+                    closed
+                    stroke={stroke}
+                    strokeWidth={sw}
+                    dash={dash}
+                    fill="rgba(14,165,233,0.08)"
+                    listening={false}
+                  />
+                );
+              }
+              if (s.kind === 'rectangle') {
+                return (
+                  <Rect
+                    key={`pm-${s.id}`}
+                    x={s.x}
+                    y={s.y}
+                    width={s.w}
+                    height={s.h}
+                    stroke={stroke}
+                    strokeWidth={sw}
+                    dash={dash}
+                    fill="rgba(14,165,233,0.08)"
+                    listening={false}
+                  />
+                );
+              }
+              if (s.kind === 'ellipse') {
+                return (
+                  <Ellipse
+                    key={`pm-${s.id}`}
+                    x={s.cx}
+                    y={s.cy}
+                    radiusX={s.rx}
+                    radiusY={s.ry}
+                    stroke={stroke}
+                    strokeWidth={sw}
+                    dash={dash}
+                    fill="rgba(14,165,233,0.08)"
+                    listening={false}
+                  />
+                );
+              }
+              // Brush: outline painted strokes as polylines
+              if (s.kind === 'brush') {
+                return (
+                  <Group key={`pm-${s.id}`} listening={false}>
+                    {s.strokes
+                      .filter((st) => st.mode !== 'erase')
+                      .map((st, i) => (
+                        <Line
+                          key={`pm-${s.id}-${i}`}
+                          points={st.points}
+                          stroke={stroke}
+                          strokeWidth={Math.max(sw, (st.radius ?? 8))}
+                          lineCap="round"
+                          lineJoin="round"
+                          opacity={0.55}
+                          listening={false}
+                        />
+                      ))}
+                  </Group>
+                );
+              }
+              return null;
+            })}
+          </Layer>
+        )}
+
         {/* Layer 1: committed shapes — cached + opacity applied once at the
             layer so overlapping same-class shapes render a uniform class color.
             Clipped to the image frame so strokes never render past the edges. */}
+        {layerGroups.annotations && (
         <Layer ref={shapesLayerRef} listening={false} opacity={fillOpacity} {...imageClip}>
           {displayShapes
             .filter((s) => renderClasses.find((c) => c.classId === s.classId)?.isVisible !== false)
             .map(renderShape)}
         </Layer>
+        )}
+
+        {/* Mask-set dense label overlay (preferred) or shape ghost fallback. */}
+        {maskSetLabelCanvas && meta && (
+          <Layer listening={false} {...imageClip}>
+            <KonvaImage
+              image={maskSetLabelCanvas}
+              width={meta.width}
+              height={meta.height}
+              listening={false}
+            />
+          </Layer>
+        )}
+        {!maskSetLabelCanvas && maskSetOverlayShapes && maskSetOverlayShapes.length > 0 && (
+          <Layer listening={false} opacity={Math.min(0.45, fillOpacity)} {...imageClip}>
+            {maskSetOverlayShapes
+              .filter((s) => renderClasses.find((c) => c.classId === s.classId)?.isVisible !== false)
+              .map((s) => renderShape({ ...s, id: `ms-${s.id}` }))}
+          </Layer>
+        )}
 
         {/* Interactive layer: hit targets for select/move/edit (select tool only). */}
-        {showInteractive && (
+        {showInteractive && layerGroups.annotations && (
           <Layer>
             {storeShapes
               .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)

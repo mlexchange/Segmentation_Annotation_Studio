@@ -219,12 +219,14 @@ class DraftPayload(BaseModel):
         slices: Mapping of slice key → list of serialised shape dicts.
         split_by_slice: Mapping of slice key → dataset split name.
         negative_slices: Slice keys marked as negative examples.
+        mask_sets: Optional Cleanup Studio named mask sets.
     """
 
     classes: list[AnnotationClass] = Field(default_factory=list)
     slices: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     split_by_slice: dict[str, str] = Field(default_factory=dict)
     negative_slices: list[str] = Field(default_factory=list)
+    mask_sets: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SaveVersionRequest(BaseModel):

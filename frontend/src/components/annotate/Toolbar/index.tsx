@@ -78,10 +78,12 @@ function ToolButton({ tool, label, icon, keybind, activeTool, disabled, onSelect
 interface ToolbarProps {
   /** When true, drawing tools are greyed out (e.g. no class defined yet). */
   disabled?: boolean;
+  /** If set, only these tools appear (e.g. Preprocess mask strip). */
+  allowedTools?: Tool[];
 }
 
 /** Renders the tool radiogroup, undo/redo, and the active tool's parameter controls. */
-export default function Toolbar({ disabled = false }: ToolbarProps) {
+export default function Toolbar({ disabled = false, allowedTools }: ToolbarProps) {
   const {
     tool, setTool, brushSize, setBrushSize, fillOpacity, setFillOpacity, fillThreshold, setFillThreshold,
     magicTolerance, setMagicTolerance, magicMode, setMagicMode, magicSigma, setMagicSigma,
@@ -95,7 +97,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
   const canUndo = useStore(useAnnotationStore.temporal, (s) => s.pastStates.length > 0);
   const canRedo = useStore(useAnnotationStore.temporal, (s) => s.futureStates.length > 0);
 
-  const tools: Array<{ tool: Tool; label: string; icon: React.ReactNode; keybind: string }> = [
+  const allTools: Array<{ tool: Tool; label: string; icon: React.ReactNode; keybind: string }> = [
     { tool: 'pan',       label: 'Pan',     icon: <Hand size={18} />,        keybind: 'space' },
     { tool: 'select',    label: 'Select',  icon: <Cursor size={18} />,      keybind: 's' },
     { tool: 'polygon',   label: 'Polygon', icon: <Polygon size={18} />,     keybind: 'p' },
@@ -107,6 +109,9 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     { tool: 'fill',      label: 'Fill',    icon: <PaintBucket size={18} />, keybind: 'f' },
     { tool: 'eraser',    label: 'Eraser',  icon: <Eraser size={18} />,      keybind: 'r' },
   ];
+  const tools = allowedTools
+    ? allTools.filter((t) => allowedTools.includes(t.tool))
+    : allTools;
 
   return (
     <div className="flex flex-col gap-2">

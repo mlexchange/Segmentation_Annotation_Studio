@@ -25,8 +25,9 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -38,6 +39,11 @@ import export_jobs
 import images as images_mod
 import ingest as ingest_mod
 import local_fs
+import clf_shelf as clf_shelf_mod
+import label_sets as label_sets_mod
+import feature_manifold as manifold_mod
+import multiscale_features as features_mod
+import pixel_clf as pixel_clf_mod
 from browse_helpers import (
     FieldMapping,
     build_field_mapping,
@@ -421,23 +427,24 @@ async def connect_summary(
         }
 
     if kind == "tiled":
-        def _count() -> int:
+        def _count() -> tuple[int, str]:
             client = get_tiled_client(server_uri)
-            container, _ = get_browse_container_for(client, container_path)
+            container, prefix = get_browse_container_for(client, container_path)
             # An unfiltered count is just the container size — a single request.
             # Avoid iterating every child and building per-item metadata dicts,
             # which is O(N) HTTP round trips and stalls the connect UI.
             try:
-                return int(len(container))
+                n = int(len(container))
             except Exception:
                 result = tiled_search_items(container, filters={}, limit=10_000)
-                return int(result.get("total", 0))
+                n = int(result.get("total", 0))
+            return n, prefix
 
         try:
-            count = await asyncio.to_thread(_count)
+            count, discovered_prefix = await asyncio.to_thread(_count)
         except Exception as exc:
             logger.warning("connect_summary tiled count failed: %s", exc)
-            count = 0
+            count, discovered_prefix = 0, ""
 
         servers = get_tiled_servers()
         label = next(
@@ -445,14 +452,15 @@ async def connect_summary(
              if (cfg.get("uri") or "").rstrip("/") == (server_uri or "").rstrip("/")),
             server_uri or "Tiled Server",
         )
-        if container_path:
-            label = f"{label} · {container_path}"
+        resolved_path = (container_path or discovered_prefix or "").strip("/") or None
+        if resolved_path:
+            label = f"{label} · {resolved_path}"
         return {
             "kind": "tiled",
             "label": label,
             "sample_count": count,
             "server_uri": server_uri,
-            "container_path": container_path,
+            "container_path": resolved_path,
         }
 
     raise HTTPException(400, f"Unknown kind: {kind!r}; must be 'tiled' or 'local'")
@@ -594,6 +602,526 @@ async def image_slice(
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=300"},
     )
+
+
+class FeatureComputeRequest(BaseModel):
+    """Parameters for multiscale feature computation on one slice."""
+
+    source: str
+    kind: str
+    slice_index: int = 0
+    server_uri: Optional[str] = None
+    root: Optional[str] = None
+    sigma_min: float = 1.0
+    sigma_max: float = 8.0
+    intensity: bool = True
+    edges: bool = True
+    texture: bool = True
+    clahe: bool = True
+    include_sam: bool = False
+
+
+@app.get("/api/image/features/sam-status")
+async def features_sam_status() -> dict:
+    """Whether SlimSAM vision encoder ONNX is available for feature concat."""
+    import sam_embed as sam_mod
+
+    return {"available": sam_mod.sam_available()}
+
+
+@app.post("/api/image/features")
+async def compute_image_features(body: FeatureComputeRequest) -> dict:
+    """Compute multiscale features for one slice; cache stack; return channel list."""
+
+    def _run() -> dict:
+        node = arrays_mod.resolve_array(body.source, body.kind, body.server_uri, body.root)
+        meta = arrays_mod.array_shape_meta(node)
+        sl = arrays_mod.read_slice(node, meta, body.slice_index)
+        job = features_mod.compute_and_store(
+            sl,
+            sigma_min=body.sigma_min,
+            sigma_max=body.sigma_max,
+            intensity=body.intensity,
+            edges=body.edges,
+            texture=body.texture,
+            clahe=body.clahe,
+            include_sam=body.include_sam,
+        )
+        h, w, _ = job.stack.shape
+        return {
+            "job_id": job.job_id,
+            "width": w,
+            "height": h,
+            "channels": [{"index": i, "label": lab} for i, lab in enumerate(job.labels)],
+            "has_sam": job.sam_emb is not None,
+            "sam_shape": list(job.sam_emb.shape) if job.sam_emb is not None else None,
+        }
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.error("compute_image_features failed: %s", exc)
+        raise HTTPException(500, f"Failed to compute features: {exc}") from exc
+
+
+@app.get("/api/image/features/{job_id}/{index}")
+async def get_feature_channel(job_id: str, index: int) -> Response:
+    """Return one cached feature channel as a grayscale PNG."""
+
+    def _run() -> bytes:
+        job = features_mod.get_job(job_id)
+        if job is None:
+            raise HTTPException(404, "Feature job not found or expired")
+        try:
+            return features_mod.encode_channel_png(job.stack, index)
+        except IndexError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    try:
+        png = await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("get_feature_channel failed: %s", exc)
+        raise HTTPException(500, f"Failed to encode feature channel: {exc}") from exc
+
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=600"},
+    )
+
+
+class ManifoldSampleRequest(BaseModel):
+    """Greedy feature-variance inducing boxes on a feature job."""
+
+    job_id: str
+    k: int = 24
+    """Full square box side length in image pixels."""
+    box_size: int | None = None
+    stride: int | None = None
+    pca_dims: int = 16
+    """Optional placement-region shapes (union mask); omit for full image."""
+    shapes: list[dict] | None = None
+
+
+@app.post("/api/image/features/manifold/sample")
+async def manifold_sample(body: ManifoldSampleRequest) -> dict:
+    """Sample diverse annotation boxes via variance + exclusion."""
+
+    def _run() -> dict:
+        job = features_mod.get_job(body.job_id)
+        if job is None:
+            raise HTTPException(404, "Feature job not found or expired")
+        place_mask = None
+        if body.shapes:
+            from coco_export import shape_to_mask
+
+            h, w = job.float_stack.shape[:2]
+            place_mask = np.zeros((h, w), dtype=bool)
+            for shape in body.shapes:
+                try:
+                    place_mask |= shape_to_mask(shape, h, w)
+                except (KeyError, ValueError, TypeError) as exc:
+                    raise HTTPException(400, f"invalid placement shape: {exc}") from exc
+            if not bool(place_mask.any()):
+                raise HTTPException(400, "placement mask is empty")
+        try:
+            result = manifold_mod.sample_inducing_points(
+                job,
+                k=body.k,
+                box_size=body.box_size,
+                stride=body.stride,
+                pca_dims=body.pca_dims,
+                mask=place_mask,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        cached = manifold_mod.store_sample(result)
+        return {
+            "sample_id": cached.sample_id,
+            "points": cached.points,
+            "k": result.meta["k"],
+            "n_picked": result.meta["n_picked"],
+            "n_subsample": result.meta["n_subsample"],
+            "pca_dims": result.meta["pca_dims"],
+            "explained_variance": result.meta["explained_variance"],
+            "stride": result.meta["stride"],
+            "radius": result.meta["radius"],
+            "box_size": result.meta["box_size"],
+            "mask_pixels": result.meta.get("mask_pixels", 0),
+            "n_windows_in_mask": result.meta.get("n_windows_in_mask"),
+            "has_mask": result.meta.get("has_mask", False),
+        }
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("manifold_sample failed: %s", exc)
+        raise HTTPException(500, f"Failed to sample manifold: {exc}") from exc
+
+
+@app.get("/api/image/features/manifold/{sample_id}/heatmap.png")
+async def manifold_heatmap_png(sample_id: str) -> Response:
+    """Coverage heatmap PNG (grayscale 0–255)."""
+
+    def _run() -> bytes:
+        cached = manifold_mod.get_sample(sample_id)
+        if cached is None:
+            raise HTTPException(404, "Manifold sample not found or expired")
+        return cached.heatmap_png
+
+    try:
+        png = await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+class ClfTrainRequest(BaseModel):
+    """Train CatBoost on sparse annotations + a feature job's float stack."""
+
+    job_id: str
+    shapes: list[dict]
+    iterations: int = 200
+    depth: int = 6
+    learning_rate: float = 0.1
+    max_samples: int = 200_000
+
+
+class ClfPredictRequest(BaseModel):
+    """Mondrian conformal predict at misfire level *alpha*."""
+
+    model_id: str
+    job_id: str
+    alpha: float = 0.05
+    # When set, annotated pixels are zeroed (keep originals on commit).
+    shapes: list[dict] | None = None
+
+
+@app.post("/api/image/features/clf/train")
+async def clf_train(body: ClfTrainRequest) -> dict:
+    """Fit CatBoost on labeled pixels from *shapes* and the feature job float stack."""
+
+    def _run() -> dict:
+        job = features_mod.get_job(body.job_id)
+        if job is None:
+            raise HTTPException(404, "Feature job not found or expired")
+        try:
+            model = pixel_clf_mod.train_classifier(
+                job,
+                body.shapes,
+                iterations=body.iterations,
+                depth=body.depth,
+                learning_rate=body.learning_rate,
+                max_samples=body.max_samples,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return pixel_clf_mod.train_result_dict(model)
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("clf_train failed: %s", exc)
+        raise HTTPException(500, f"Failed to train classifier: {exc}") from exc
+
+
+@app.get("/api/image/features/clf/{model_id}/tree/{tree_index}")
+async def clf_tree(model_id: str, tree_index: int = 0) -> dict:
+    """Return one CatBoost oblivious tree (splits + leaf values) for the UI."""
+
+    def _run() -> dict:
+        model = pixel_clf_mod.get_model(model_id)
+        if model is None:
+            raise HTTPException(404, "Classifier model not found or expired")
+        try:
+            return pixel_clf_mod.tree_view(model, tree_index)
+        except IndexError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("clf_tree failed: %s", exc)
+        raise HTTPException(500, f"Failed to read tree: {exc}") from exc
+
+
+@app.post("/api/image/features/clf/predict")
+async def clf_predict(body: ClfPredictRequest) -> dict:
+    """Conformal predict; returns meta + pred_id for commit/status PNG GETs."""
+
+    def _run() -> dict:
+        model = pixel_clf_mod.get_model(body.model_id)
+        if model is None:
+            raise HTTPException(404, "Classifier model not found or expired")
+        job = features_mod.get_job(body.job_id)
+        if job is None:
+            raise HTTPException(404, "Feature job not found or expired")
+        try:
+            result = pixel_clf_mod.predict_conformal(
+                model,
+                job,
+                alpha=body.alpha,
+                preserve_shapes=body.shapes,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        cached = pixel_clf_mod.store_prediction(result)
+        return cached.meta
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("clf_predict failed: %s", exc)
+        raise HTTPException(500, f"Failed to predict: {exc}") from exc
+
+
+@app.get("/api/image/features/clf/predict/{pred_id}/commit.png")
+async def clf_predict_commit_png(pred_id: str) -> Response:
+    """Singleton commit map (classId or 0)."""
+
+    def _run() -> bytes:
+        cached = pixel_clf_mod.get_prediction(pred_id)
+        if cached is None:
+            raise HTTPException(404, "Prediction not found or expired")
+        return cached.commit_png
+
+    try:
+        png = await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
+
+
+@app.get("/api/image/features/clf/predict/{pred_id}/status.png")
+async def clf_predict_status_png(pred_id: str) -> Response:
+    """Status map: 0 abstain, 1 singleton, 2 multi."""
+
+    def _run() -> bytes:
+        cached = pixel_clf_mod.get_prediction(pred_id)
+        if cached is None:
+            raise HTTPException(404, "Prediction not found or expired")
+        return cached.status_png
+
+    try:
+        png = await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, str(exc)) from exc
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
+
+
+class ClfShelfSaveRequest(BaseModel):
+    """Persist a trained in-memory model + feature recipe to the shelf."""
+
+    model_id: str
+    name: str
+    feature_recipe: dict
+
+
+class ClfShelfPredictRequest(BaseModel):
+    """Recompute features with the shelf recipe and run conformal predict."""
+
+    source: str
+    kind: str
+    slice_index: int = 0
+    server_uri: Optional[str] = None
+    root: Optional[str] = None
+    alpha: float = 0.05
+    shapes: list[dict] | None = None
+
+
+# ##############################################################################
+# # REMOVE THIS AND USE YOUR OWN STUFF
+# Scaffold CatBoost model-shelf + reusable label-set APIs. Replace with your
+# own model registry / label taxonomy endpoints, then delete these routes and
+# ``clf_shelf.py`` / ``label_sets.py``.
+# ##############################################################################
+
+
+@app.post("/api/clf/models/save")
+async def clf_shelf_save(body: ClfShelfSaveRequest) -> dict:
+    """# REMOVE THIS AND USE YOUR OWN STUFF — save shelf model."""
+
+    def _run() -> dict:
+        model = pixel_clf_mod.get_model(body.model_id)
+        if model is None:
+            raise HTTPException(404, "Classifier model not found or expired — train again")
+        try:
+            meta = clf_shelf_mod.save_model(
+                model, name=body.name.strip() or "unnamed", feature_recipe=body.feature_recipe
+            )
+        except Exception as exc:
+            raise HTTPException(500, f"Failed to save model: {exc}") from exc
+        return {
+            "id": meta.id,
+            "name": meta.name,
+            "class_ids": meta.class_ids,
+            "n_train": meta.n_train,
+            "n_cal": meta.n_cal,
+            "train_accuracy": meta.train_accuracy,
+            "uses_sam": meta.uses_sam,
+            "feature_recipe": meta.feature_recipe,
+            "created_at": meta.created_at,
+            "n_features": meta.n_features,
+        }
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+
+
+@app.get("/api/clf/models")
+async def clf_shelf_list() -> list[dict]:
+    """List persisted classifier shelf models."""
+    return await asyncio.to_thread(clf_shelf_mod.list_models)
+
+
+class LabelSetSaveRequest(BaseModel):
+    """Create a reusable annotation label set (classes)."""
+
+    name: str
+    classes: list[dict]
+
+
+@app.get("/api/label-sets")
+async def label_sets_list() -> dict:
+    """# REMOVE THIS AND USE YOUR OWN STUFF — list scaffold label sets."""
+    sets = await asyncio.to_thread(label_sets_mod.list_label_sets)
+    return {"sets": sets}
+
+
+@app.post("/api/label-sets")
+async def label_sets_save(body: LabelSetSaveRequest) -> dict:
+    """# REMOVE THIS AND USE YOUR OWN STUFF — save scaffold label set."""
+
+    def _run() -> dict:
+        try:
+            return label_sets_mod.save_label_set(name=body.name, classes=body.classes)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+
+
+@app.get("/api/label-sets/{set_id}")
+async def label_sets_get(set_id: str) -> dict:
+    """Load one label set."""
+    data = await asyncio.to_thread(label_sets_mod.get_label_set, set_id)
+    if data is None:
+        raise HTTPException(404, "Label set not found")
+    return data
+
+
+@app.delete("/api/label-sets/{set_id}")
+async def label_sets_delete(set_id: str) -> dict:
+    """Delete a label set."""
+
+    def _run() -> dict:
+        ok = label_sets_mod.delete_label_set(set_id)
+        if not ok:
+            raise HTTPException(404, "Label set not found")
+        return {"ok": True}
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+
+
+@app.delete("/api/clf/models/{shelf_id}")
+async def clf_shelf_delete(shelf_id: str) -> dict:
+    """Delete a shelf model."""
+
+    def _run() -> dict:
+        ok = clf_shelf_mod.delete_model(shelf_id)
+        if not ok:
+            raise HTTPException(404, "Shelf model not found")
+        return {"ok": True}
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+
+
+@app.post("/api/clf/models/{shelf_id}/predict")
+async def clf_shelf_predict(shelf_id: str, body: ClfShelfPredictRequest) -> dict:
+    """Apply a shelf model to an image: recompute features + conformal predict."""
+
+    def _run() -> dict:
+        try:
+            meta = clf_shelf_mod.get_meta(shelf_id)
+            model = clf_shelf_mod.load_into_cache(shelf_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        recipe = meta.get("feature_recipe") or {}
+        node = arrays_mod.resolve_array(body.source, body.kind, body.server_uri, body.root)
+        arr_meta = arrays_mod.array_shape_meta(node)
+        sl = arrays_mod.read_slice(node, arr_meta, body.slice_index)
+        job = features_mod.compute_and_store(
+            sl,
+            sigma_min=float(recipe.get("sigma_min", 1.0)),
+            sigma_max=float(recipe.get("sigma_max", 8.0)),
+            intensity=bool(recipe.get("intensity", True)),
+            edges=bool(recipe.get("edges", True)),
+            texture=bool(recipe.get("texture", True)),
+            clahe=bool(recipe.get("clahe", True)),
+            include_sam=bool(recipe.get("include_sam", False)),
+        )
+        try:
+            result = pixel_clf_mod.predict_conformal(
+                model,
+                job,
+                alpha=body.alpha,
+                preserve_shapes=body.shapes,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        cached = pixel_clf_mod.store_prediction(result)
+        return {
+            **cached.meta,
+            "job_id": job.job_id,
+            "shelf_id": shelf_id,
+            "width": int(job.float_stack.shape[1]),
+            "height": int(job.float_stack.shape[0]),
+        }
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("clf_shelf_predict failed: %s", exc)
+        raise HTTPException(500, f"Shelf predict failed: {exc}") from exc
 
 
 @app.get("/api/annotations/draft")
@@ -1056,6 +1584,428 @@ async def ingest_status(job_id: str) -> dict:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# ipred proxy (GUI never calls port 8003 directly)
+# ---------------------------------------------------------------------------
+
+
+class IpredSessionRequest(BaseModel):
+    """Open an ipred session for one image/stack project."""
+
+    kind: str
+    source: str
+    server_uri: Optional[str] = None
+    root: Optional[str] = None
+
+
+class IpredPreprocessRequest(BaseModel):
+    """Proxy featurize request."""
+
+    session_id: str
+    feature_setup_id: Optional[str] = None
+    composition_id: Optional[str] = None
+    slice_index: int = 0
+    array_ref: Optional[str] = None
+
+
+class IpredCompositionUpsertRequest(BaseModel):
+    """Create/update composition on ipred."""
+
+    name: str
+    nodes: list[dict[str, Any]]
+    outputs: list[str]
+    composition_id: Optional[str] = None
+    builtin: bool = False
+
+
+class IpredArrayUploadRequest(BaseModel):
+    """Upload float array for remote ipred preprocess."""
+
+    session_id: str
+    shape: list[int]
+    dtype: str = "float32"
+    data_b64: str
+    array_ref: Optional[str] = None
+
+
+class IpredTrainRequest(BaseModel):
+    """Proxy train request."""
+
+    session_id: str
+    shapes: list[dict[str, Any]]
+    feature_id: Optional[str] = None
+    trainer_id: str = "catboost"
+    config: Optional[dict[str, Any]] = None
+
+
+class IpredInferRequest(BaseModel):
+    """Proxy infer request."""
+
+    session_id: str
+    model_id: Optional[str] = None
+    feature_id: Optional[str] = None
+    alpha: float = 0.05
+
+
+class IpredRethresholdRequest(BaseModel):
+    """Proxy rethreshold request."""
+
+    session_id: str
+    alpha: float
+    run_id: Optional[str] = None
+
+
+class IpredSetupUpsertRequest(BaseModel):
+    """Create or update a Feature Setup on ipred."""
+
+    name: str
+    kind: str
+    procedure_id: Optional[str] = None
+    params: Optional[dict[str, Any]] = None
+    encoder_setup_id: Optional[str] = None
+    weights_path: Optional[str] = None
+    weights_format: Optional[str] = None
+    inference: Optional[dict[str, Any]] = None
+    setup_id: Optional[str] = None
+
+
+class IpredManifoldSampleRequest(BaseModel):
+    """Suggest Labels via ipred feature bank."""
+
+    feature_id: str
+    k: int = 24
+    box_size: Optional[int] = None
+    stride: Optional[int] = None
+    pca_dims: int = 16
+    shapes: Optional[list[dict[str, Any]]] = None
+
+
+def _ipred_http_error(exc: Exception) -> HTTPException:
+    import httpx
+
+    import ipred_client as ipred_client_mod
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        detail = exc.response.text
+        try:
+            detail = exc.response.json()
+        except Exception:
+            pass
+        return HTTPException(exc.response.status_code, detail)
+    if isinstance(exc, httpx.ConnectError):
+        return HTTPException(
+            503,
+            f"ipred unreachable at {ipred_client_mod.ipred_url()}",
+        )
+    return HTTPException(500, str(exc))
+
+
+@app.get("/api/ipred/health")
+async def ipred_health() -> dict:
+    """Liveness of the disjoint ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.health()
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/sessions")
+async def ipred_open_session(body: IpredSessionRequest) -> dict:
+    """Open/create an engine session for a project."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.open_session(
+            kind=body.kind,
+            source=body.source,
+            server_uri=body.server_uri,
+            root=body.root,
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/setups")
+async def ipred_list_setups() -> dict:
+    """List Feature Setups from the ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return {"setups": ipred_client_mod.list_setups()}
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/setups/{setup_id}")
+async def ipred_get_setup(setup_id: str) -> dict:
+    """Get one Feature Setup from ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.get_setup(setup_id)
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/setups")
+async def ipred_upsert_setup(body: IpredSetupUpsertRequest) -> dict:
+    """Create or update a Feature Setup on ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.upsert_setup(body.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/trainers")
+async def ipred_list_trainers() -> dict:
+    """List trainer plugin ids from ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return {"trainers": ipred_client_mod.list_trainers()}
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/modules")
+async def ipred_list_modules() -> dict:
+    """List composable feature modules."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return {"modules": ipred_client_mod.list_modules()}
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/compositions")
+async def ipred_list_compositions() -> dict:
+    """List feature compositions."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return {"compositions": ipred_client_mod.list_compositions()}
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/compositions/{composition_id}")
+async def ipred_get_composition(composition_id: str) -> dict:
+    """Get one composition."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.get_composition(composition_id)
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/compositions")
+async def ipred_upsert_composition(body: IpredCompositionUpsertRequest) -> dict:
+    """Create or update a composition."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.upsert_composition(body.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/compositions/preview")
+async def ipred_preview_composition(body: IpredCompositionUpsertRequest) -> dict:
+    """Preview concat labels for a composition draft."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.preview_composition(body.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/sessions/{session_id}/arrays")
+async def ipred_upload_array(session_id: str, body: IpredArrayUploadRequest) -> dict:
+    """Upload an array blob to ipred for remote preprocess."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        payload = body.model_dump(exclude_none=True)
+        payload["session_id"] = session_id
+        return ipred_client_mod.upload_session_array(session_id, payload)
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/manifold/sample")
+async def ipred_manifold_sample(body: IpredManifoldSampleRequest) -> dict:
+    """Suggest Labels on an ipred feature bank."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.manifold_sample(body.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/manifold/{sample_id}/heatmap.png")
+async def ipred_manifold_heatmap(sample_id: str) -> Response:
+    """Proxy manifold residual heatmap PNG."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return Response(
+            content=ipred_client_mod.manifold_heatmap_png(sample_id),
+            media_type="image/png",
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/preprocess")
+async def ipred_preprocess(body: IpredPreprocessRequest) -> dict:
+    """Cache-aware featurize via ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.preprocess(
+            session_id=body.session_id,
+            feature_setup_id=body.feature_setup_id,
+            composition_id=body.composition_id,
+            slice_index=body.slice_index,
+            array_ref=body.array_ref,
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/features/{feature_id}/channels/{index}")
+async def ipred_feature_channel(feature_id: str, index: int) -> Response:
+    """Proxy a feature-channel PNG from the ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        data = ipred_client_mod.feature_channel_bytes(feature_id, index)
+        return Response(content=data, media_type="image/png")
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/train")
+async def ipred_train(body: IpredTrainRequest) -> dict:
+    """Train via ipred trainer plugin."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.train(
+            session_id=body.session_id,
+            shapes=body.shapes,
+            feature_id=body.feature_id,
+            trainer_id=body.trainer_id,
+            config=body.config,
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/infer")
+async def ipred_infer(body: IpredInferRequest) -> dict:
+    """Infer + conformal products via ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.infer(
+            session_id=body.session_id,
+            model_id=body.model_id,
+            feature_id=body.feature_id,
+            alpha=body.alpha,
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.post("/api/ipred/rethreshold")
+async def ipred_rethreshold(body: IpredRethresholdRequest) -> dict:
+    """Rethreshold from cached proba via ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.rethreshold(
+            session_id=body.session_id,
+            alpha=body.alpha,
+            run_id=body.run_id,
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/runs/{run_id}/commit.png")
+async def ipred_run_commit(run_id: str) -> Response:
+    """Proxy commit map PNG."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return Response(
+            content=ipred_client_mod.run_commit_png(run_id),
+            media_type="image/png",
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/runs/{run_id}/status.png")
+async def ipred_run_status(run_id: str) -> Response:
+    """Proxy status map PNG."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return Response(
+            content=ipred_client_mod.run_status_png(run_id),
+            media_type="image/png",
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+@app.get("/api/ipred/runs/{run_id}/proba/{class_index}.png")
+async def ipred_run_proba(run_id: str, class_index: int) -> Response:
+    """Proxy softmax class heatmap PNG from ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return Response(
+            content=ipred_client_mod.run_proba_png(run_id, class_index),
+            media_type="image/png",
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
+
+
+class IpredThresholdClassRequest(BaseModel):
+    class_id: int
+    threshold: float = 0.5
+
+
+@app.post("/api/ipred/runs/{run_id}/threshold-class")
+async def ipred_threshold_class(
+    run_id: str, body: IpredThresholdClassRequest
+) -> dict:
+    """Threshold one softmax class into a dense label map via ipred."""
+    import ipred_client as ipred_client_mod
+
+    try:
+        return ipred_client_mod.threshold_class_map(
+            run_id,
+            class_id=body.class_id,
+            threshold=body.threshold,
+        )
+    except Exception as exc:
+        raise _ipred_http_error(exc) from exc
 
 
 # ---------------------------------------------------------------------------

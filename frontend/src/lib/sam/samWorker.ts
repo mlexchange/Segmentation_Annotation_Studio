@@ -32,15 +32,14 @@ import {
   type Processor,
 } from '@huggingface/transformers';
 
-// SlimSAM-77 (uniform) — smallest turnkey SAM. Served from the HF CDN by
-// default (browser-cached after first load). To run fully offline, vendor the
-// files under frontend/public/models/ and flip USE_LOCAL_MODEL (see
-// frontend/scripts/fetch-sam-model.mjs).
-const USE_LOCAL_MODEL = false;
+// SlimSAM-77 (uniform) — vendored under public/models/ (HF CDN 403s browser
+// downloads). Offline fetch: node scripts/fetch-sam-model.mjs
+const USE_LOCAL_MODEL = true;
 const MODEL_ID = USE_LOCAL_MODEL ? 'slimsam-77-uniform' : 'Xenova/slimsam-77-uniform';
 
 if (USE_LOCAL_MODEL) {
   env.allowRemoteModels = false;
+  env.allowLocalModels = true;
   env.localModelPath = '/models/';
 }
 if (env.backends?.onnx?.wasm) env.backends.onnx.wasm.numThreads = 1;
