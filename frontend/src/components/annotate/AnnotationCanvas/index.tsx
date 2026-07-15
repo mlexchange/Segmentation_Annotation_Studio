@@ -782,6 +782,7 @@ export default function AnnotationCanvas({
     magneticSeedRef.current = null;
     setMagneticCommitted([]);
     setMagneticPreview([]);
+    magneticHistoryRef.current = [];
   }, []);
 
   /** Clear all magic-wand/SAM seeds, box, and preview state. */
@@ -934,6 +935,8 @@ export default function AnnotationCanvas({
     resetMagnetic();
     resetMagic();
     setDraftPoly([]);
+    magneticHistoryRef.current = [];
+    lastClosedRef.current = null;
   }, [tool, resetMagnetic, resetMagic]);
 
   // A new image/slice always invalidates any in-progress draft.
@@ -941,6 +944,8 @@ export default function AnnotationCanvas({
     resetMagnetic();
     resetMagic();
     setDraftPoly([]);
+    magneticHistoryRef.current = [];
+    lastClosedRef.current = null;
   }, [currentSlice, sourceKey, resetMagnetic, resetMagic]);
 
   // Keep the latest tool / preview / commit fn in refs so the single, stable Enter
@@ -953,6 +958,22 @@ export default function AnnotationCanvas({
   commitMagicRef.current = commitMagic;
   const toolRef = useRef(tool);
   toolRef.current = tool;
+  // Live mirrors + history for draft-aware Cmd/Ctrl+Z (see the capture-phase effect).
+  const draftPolyRef = useRef(draftPoly);
+  draftPolyRef.current = draftPoly;
+  const magneticCommittedRef = useRef(magneticCommitted);
+  magneticCommittedRef.current = magneticCommitted;
+  const currentSliceRef = useRef(currentSlice);
+  currentSliceRef.current = currentSlice;
+  // Magnetic per-click snapshots (committed path + seed) so Cmd+Z can pop a node.
+  const magneticHistoryRef = useRef<Array<{ committed: number[]; seed: { x: number; y: number } | null }>>([]);
+  // The polygon/lasso we JUST closed — lets one Cmd+Z reopen it to edit mode.
+  type MagneticSnap = { committed: number[]; seed: { x: number; y: number } | null };
+  const lastClosedRef = useRef<
+    | { tool: 'polygon'; sliceKey: string; points: number[] }
+    | { tool: 'magnetic'; sliceKey: string; committed: number[]; seed: { x: number; y: number } | null; history: MagneticSnap[] }
+    | null
+  >(null);
 
   // Escape cancels the entire in-progress shape (polygon vertices, magnetic
   // trace, magic selection, or rect/ellipse drag) without committing anything.
@@ -969,6 +990,8 @@ export default function AnnotationCanvas({
         setMarqueeRect(null);
         resetMagnetic();
         resetMagic();
+        magneticHistoryRef.current = [];
+        lastClosedRef.current = null;
       } else if (
         e.key === 'Enter' &&
         (toolRef.current === 'magic' || toolRef.current === 'fill') &&
@@ -981,6 +1004,67 @@ export default function AnnotationCanvas({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [resetMagnetic, resetMagic]);
+
+  // Draft-aware Cmd/Ctrl+Z: while drafting a polygon/lasso — or right after
+  // accidentally closing one — undo the last NODE rather than the whole shape.
+  // Capture-phase + stopImmediatePropagation so it preempts the global undo in
+  // useKeybinds. Falls through (no preventDefault) to the normal undo otherwise.
+  useEffect(() => {
+    const onKeyCapture = (e: KeyboardEvent) => {
+      if (!((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey)) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      // (a) Polygon in progress → pop the last vertex.
+      if (toolRef.current === 'polygon' && draftPolyRef.current.length >= 2) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        setDraftPoly((p) => p.slice(0, -2));
+        lastClosedRef.current = null;
+        return;
+      }
+      // (b) Magnetic in progress → pop the last committed node (restore seed/dijkstra).
+      if (toolRef.current === 'magnetic' &&
+          (magneticCommittedRef.current.length >= 2 || magneticHistoryRef.current.length)) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        const snap = magneticHistoryRef.current.pop();
+        if (snap) {
+          setMagneticCommitted(snap.committed);
+          magneticSeedRef.current = snap.seed;
+          const cm = magneticCostRef.current;
+          magneticPrevRef.current = cm && snap.seed ? dijkstra(cm, imageToGrid(cm, snap.seed.x, snap.seed.y)) : null;
+          setMagneticPreview([]);
+        } else {
+          resetMagnetic();
+        }
+        lastClosedRef.current = null;
+        return;
+      }
+      // (c) Just-closed shape → reopen it to edit mode: undo the commit and restore
+      //     the in-progress draft. (Further Cmd+Z then pops more nodes.)
+      const lc = lastClosedRef.current;
+      if (lc && lc.tool === toolRef.current && lc.sliceKey === String(currentSliceRef.current)) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        useAnnotationStore.temporal.getState().undo();
+        if (lc.tool === 'polygon') {
+          setDraftPoly(lc.points.slice(0, -2));
+        } else {
+          // Magnetic: restore the committed path + seed + least-cost map so the
+          // trace continues; the pre-close history lets further Cmd+Z pop nodes.
+          setMagneticCommitted(lc.committed);
+          magneticSeedRef.current = lc.seed;
+          magneticHistoryRef.current = lc.history;
+          const cm = magneticCostRef.current;
+          magneticPrevRef.current = cm && lc.seed ? dijkstra(cm, imageToGrid(cm, lc.seed.x, lc.seed.y)) : null;
+          setMagneticPreview([]);
+        }
+        lastClosedRef.current = null;
+        return;
+      }
+      // else: not a draft context — let the global undo run.
+    };
+    window.addEventListener('keydown', onKeyCapture, true); // capture phase
+    return () => window.removeEventListener('keydown', onKeyCapture, true);
+  }, [resetMagnetic]);
 
   /** Flush the buffered draft stroke to the Zustand store (one write per stroke). */
   const commitDraftStroke = () => {
@@ -1201,6 +1285,7 @@ export default function AnnotationCanvas({
 
     if (tool === 'polygon') {
       setDraftPoly((prev) => [...prev, pos.x, pos.y]);
+      lastClosedRef.current = null; // a new vertex invalidates any reopen-on-close
     } else if (tool === 'magic') {
       // Seed the magic selection (the effect computes the preview).
       // SAM engine:
@@ -1236,6 +1321,9 @@ export default function AnnotationCanvas({
       }
     } else if (tool === 'magnetic') {
       const cm = ensureCostMap();
+      // Snapshot the pre-click state so Cmd+Z can pop this node (restore path+seed).
+      magneticHistoryRef.current.push({ committed: magneticCommitted, seed: magneticSeedRef.current });
+      lastClosedRef.current = null;
       if (cm && magneticSeedRef.current && magneticPrevRef.current) {
         // Lock in the least-cost path from the previous seed to this click.
         const path = tracePath(cm, magneticPrevRef.current, imageToGrid(cm, pos.x, pos.y));
@@ -1481,6 +1569,8 @@ export default function AnnotationCanvas({
     if (tool === 'polygon' && draftPoly.length >= 6 && sourceKey && activeClassId !== null) {
       const id = uuidv4();
       commitShapes([{ id, classId: activeClassId, kind: 'polygon', points: draftPoly }]);
+      // Remember the just-closed draft so one Cmd/Ctrl+Z can reopen it to edit mode.
+      lastClosedRef.current = { points: draftPoly, tool: 'polygon', sliceKey: String(currentSlice) };
       setDraftPoly([]);
     } else if (tool === 'magnetic' && sourceKey && activeClassId !== null) {
       // Commit the final hovered segment, then close the traced polygon.
@@ -1491,10 +1581,19 @@ export default function AnnotationCanvas({
         pts = [...pts, ...tracePath(cm, magneticPrevRef.current, imageToGrid(cm, pos.x, pos.y)).slice(2)];
       }
       const simplified = simplifyPath(pts, 3);
+      let committed = false;
       if (simplified.length >= 6) {
         commitShapes([{ id: uuidv4(), classId: activeClassId, kind: 'polygon', points: simplified }]);
+        committed = true;
       }
+      // Snapshot the pre-close trace so one Cmd/Ctrl+Z can reopen it to edit mode.
+      const snapCommitted = magneticCommitted;
+      const snapSeed = magneticSeedRef.current;
+      const snapHistory = [...magneticHistoryRef.current];
       resetMagnetic();
+      lastClosedRef.current = committed
+        ? { tool: 'magnetic', sliceKey: String(currentSlice), committed: snapCommitted, seed: snapSeed, history: snapHistory }
+        : null;
     }
   };
 
