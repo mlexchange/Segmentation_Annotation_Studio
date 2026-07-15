@@ -296,7 +296,7 @@ export default function AnnotatePage() {
             className="flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 transition-colors"
           >
             <DownloadSimple size={16} />
-            Export COCO
+            Export
           </button>
         </div>
 

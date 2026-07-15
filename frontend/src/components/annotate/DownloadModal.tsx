@@ -307,7 +307,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
         {status === 'done' && maskResult && (
           <div className="flex items-start gap-2 text-sm text-green-300">
             <CheckCircle size={16} className="mt-0.5 shrink-0" />
-            <span>
+            <span className="min-w-0 break-words">
               {maskResult.length === 0
                 ? 'No masks written (no Tiled sources or no annotated slices).'
                 : <>Masks merged into Tiled: {maskResult.map((w) => `${w.container} (${w.n_slices} slices total, ${w.updated ?? 0} updated)`).join(', ')}.</>}
@@ -317,8 +317,8 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
         {status === 'done' && !maskResult && (
           <div className="flex items-start gap-2 text-sm text-green-300">
             <CheckCircle size={16} className="mt-0.5 shrink-0" />
-            <span>
-              Saved to <span className="font-mono">{String(job.result?.dataset_path ?? 'server')}</span> (Tiled).
+            <span className="min-w-0 break-words">
+              Saved to <span className="font-mono break-all">{String(job.result?.dataset_path ?? 'server')}</span> (Tiled).
               {' '}Use <b>Download .zip</b> to save images + masks to your computer.
             </span>
           </div>
@@ -326,7 +326,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
         {status === 'error' && (
           <div className="flex items-start gap-2 text-sm text-red-400">
             <WarningCircle size={16} className="mt-0.5 shrink-0" />
-            <span>{job.error ?? 'Export failed.'}</span>
+            <span className="min-w-0 break-words">{job.error ?? 'Export failed.'}</span>
           </div>
         )}
 
