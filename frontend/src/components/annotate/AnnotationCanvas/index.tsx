@@ -30,7 +30,8 @@ import { buildSourceKey } from '@/lib/sourceKey';
 import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type GrayField } from '@/lib/magicwand';
 import { useSam } from '@/hooks/useSam';
 import { renderAdjusted, renderPreprocessOnly } from '@/lib/sam/adjust';
-import { gridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
+import { gridFor, fullResGridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
+import { unionShapesToPolygons, unionShapesToMultiPolygon, eraseStampToMultiPolygon, subtractFromShape } from '@/lib/polybool';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
 import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
 import { mergeNewWithSameClass, expandSameClassOverlap } from '@/lib/mergeSameClass';
@@ -156,6 +157,47 @@ function shapeContainsPoint(shape: Shape, x: number, y: number): boolean {
         if (distToSegment(x, y, p[i], p[i + 1], p[i + 2], p[i + 3]) <= st.radius) return true;
       }
       if (p.length >= 2 && distToSegment(x, y, p[0], p[1], p[0], p[1]) <= st.radius) return true;
+    }
+  }
+  return false;
+}
+
+/** True if (x,y) is within `r` of the shape (inside it, or within `r` of its
+ *  boundary). Used for eraser targeting so a brush that grazes a shape's edge —
+ *  its disk overlaps the shape even though the center is outside — still erases. */
+function shapeNearPoint(shape: Shape, x: number, y: number, r: number): boolean {
+  if (r <= 0) return shapeContainsPoint(shape, x, y);
+  if (shapeContainsPoint(shape, x, y)) return true;
+  if (shape.kind === 'polygon') {
+    const rings = [shape.points, ...(shape.holes ?? [])];
+    for (const ring of rings) {
+      const n = ring.length;
+      for (let i = 0; i + 1 < n; i += 2) {
+        const bx = ring[(i + 2) % n], by = ring[(i + 3) % n];
+        if (distToSegment(x, y, ring[i], ring[i + 1], bx, by) <= r) return true;
+      }
+    }
+    return false;
+  }
+  if (shape.kind === 'rectangle') {
+    const cx = Math.max(shape.x, Math.min(x, shape.x + shape.w));
+    const cy = Math.max(shape.y, Math.min(y, shape.y + shape.h));
+    return Math.hypot(x - cx, y - cy) <= r;
+  }
+  if (shape.kind === 'ellipse') {
+    // Approximate: test against the ellipse grown by `r` on each axis.
+    const nx = (x - shape.cx) / ((shape.rx || 1) + r);
+    const ny = (y - shape.cy) / ((shape.ry || 1) + r);
+    return nx * nx + ny * ny <= 1;
+  }
+  if (shape.kind === 'brush') {
+    for (const st of shape.strokes) {
+      if (st.mode === 'erase') continue;
+      const p = st.points;
+      for (let i = 0; i + 3 < p.length; i += 2) {
+        if (distToSegment(x, y, p[i], p[i + 1], p[i + 2], p[i + 3]) <= st.radius + r) return true;
+      }
+      if (p.length >= 2 && distToSegment(x, y, p[0], p[1], p[0], p[1]) <= st.radius + r) return true;
     }
   }
   return false;
@@ -876,6 +918,17 @@ export default function AnnotationCanvas({
     setDraftPoly([]);
   }, [currentSlice, sourceKey, resetMagnetic, resetMagic]);
 
+  // Keep the latest tool / preview / commit fn in refs so the single, stable Enter
+  // handler always sees current values — no stale closure, no listener re-subscribe
+  // race — and can approve the SHOWN selection even if a background re-segmentation
+  // just flipped `magicLoading` true (which previously made Enter silently no-op).
+  const magicPreviewRef = useRef(magicPreview);
+  magicPreviewRef.current = magicPreview;
+  const commitMagicRef = useRef(commitMagic);
+  commitMagicRef.current = commitMagic;
+  const toolRef = useRef(tool);
+  toolRef.current = tool;
+
   // Escape cancels the entire in-progress shape (polygon vertices, magnetic
   // trace, magic selection, or rect/ellipse drag) without committing anything.
   // Enter accepts the current magic-tool selection (same as the "Add" button).
@@ -891,14 +944,18 @@ export default function AnnotationCanvas({
         setMarqueeRect(null);
         resetMagnetic();
         resetMagic();
-      } else if (e.key === 'Enter' && (tool === 'magic' || tool === 'fill') && !magicLoading && magicPreview.length > 0) {
+      } else if (
+        e.key === 'Enter' &&
+        (toolRef.current === 'magic' || toolRef.current === 'fill') &&
+        magicPreviewRef.current.length > 0
+      ) {
         e.preventDefault();
-        commitMagic();
+        commitMagicRef.current();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [resetMagnetic, resetMagic, tool, magicLoading, magicPreview, commitMagic]);
+  }, [resetMagnetic, resetMagic]);
 
   /** Flush the buffered draft stroke to the Zustand store (one write per stroke). */
   const commitDraftStroke = () => {
@@ -923,8 +980,10 @@ export default function AnnotationCanvas({
         classes.find((c) => c.classId === s.classId)?.isVisible !== false;
       const inScope = (s: Shape) => eraseAllClasses || s.classId === activeClassId;
       const strokeHits = (s: Shape) => {
+        // Radius-aware so grazing a shape's edge (disk overlaps, center outside)
+        // still erases — matches the pixels the erase stamp actually removes.
         for (let i = 0; i + 1 < finalPoints.length; i += 2) {
-          if (shapeContainsPoint(s, finalPoints[i], finalPoints[i + 1])) return true;
+          if (shapeNearPoint(s, finalPoints[i], finalPoints[i + 1], radius)) return true;
         }
         return false;
       };
@@ -939,32 +998,36 @@ export default function AnnotationCanvas({
       );
       if (targetIds.size === 0) return;
 
-      // Bake the erase directly into polygon geometry for every target (any kind),
-      // rather than storing an erase stroke: the vertices always match the visible
-      // shape, splits produce independent polygons, and undo is a single clean
-      // shape-replacement step (no lingering "invisible" carve-outs to track).
-      // Re-vectorize at full resolution (scale 1) for reasonably sized images so the
-      // rebuilt outline barely shifts; only downsample very large images.
-      const emax = Math.max(meta.width, meta.height);
-      const { gw, gh, scale } = gridFor(meta.width, meta.height, emax <= 4096 ? emax : 1600);
+      // Bake the erase directly into polygon geometry for every target — the
+      // vertices always match the visible shape, splits produce independent
+      // polygons, and undo is one clean shape-replacement step.
+      const { gw, gh, scale } = fullResGridFor(meta.width, meta.height);
+      // The erase stamp as polygon geometry, subtracted from each shape via a true
+      // boolean difference so untouched vertices are PRESERVED (only the cut edge
+      // gets new points). Falls back per-shape to a rasterize→re-vectorize round-trip
+      // (which also bakes any legacy `erased` carve-outs) if the boolean op can't run.
+      const stampMP = eraseStampToMultiPolygon(finalPoints, radius, meta.width, meta.height);
       const next: Shape[] = [];
       const replacedSelection: string[] = [];
       let clearedActiveBrush = false;
       for (const s of sliceShapes) {
         if (!targetIds.has(s.id)) { next.push(s); continue; }
-        // Rasterize the shape WITH the erase applied, then re-vectorize. For a brush
-        // the erase is an erase-mode stroke; for other kinds it's an `erased` entry —
-        // rasterizeShapes honors both, so the resulting mask is the post-erase pixels.
-        const prospective: Shape = s.kind === 'brush'
-          ? { ...s, strokes: [...s.strokes, { points: finalPoints, radius, mode: 'erase' as const }] }
-          : { ...s, erased: [...(s.erased ?? []), { points: finalPoints, radius }] };
-        const mask = rasterizeShapes([prospective], gw, gh, scale);
-        const polys = maskToPolygonsWithHoles(mask, gw, gh, { minRegion: 4, scale })
-          .filter((p) => p.points.length >= 6)
-          .map((p) => ({
-            id: uuidv4(), classId: s.classId, kind: 'polygon' as const,
-            points: p.points, ...(p.holes.length ? { holes: p.holes } : {}),
-          }));
+        // Legacy vector shapes carrying `erased` carve-outs must go through the mask
+        // path (it honors `erased`); everything else prefers node-preserving boolean.
+        const hasLegacyErased = s.kind !== 'brush' && !!s.erased?.length;
+        let polys: Shape[] | null = hasLegacyErased ? null : subtractFromShape(s, stampMP, meta.width, meta.height);
+        if (polys === null) {
+          const prospective: Shape = s.kind === 'brush'
+            ? { ...s, strokes: [...s.strokes, { points: finalPoints, radius, mode: 'erase' as const }] }
+            : { ...s, erased: [...(s.erased ?? []), { points: finalPoints, radius }] };
+          const mask = rasterizeShapes([prospective], gw, gh, scale);
+          polys = maskToPolygonsWithHoles(mask, gw, gh, { minRegion: 4, scale })
+            .filter((p) => p.points.length >= 6)
+            .map((p) => ({
+              id: uuidv4(), classId: s.classId, kind: 'polygon' as const,
+              points: p.points, ...(p.holes.length ? { holes: p.holes } : {}),
+            }));
+        }
         next.push(...polys);
         if (selectedShapeIds.includes(s.id)) replacedSelection.push(...polys.map((p) => p.id));
         if (s.id === activeBrushShapeId) clearedActiveBrush = true;
@@ -988,49 +1051,75 @@ export default function AnnotationCanvas({
       const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
       const brush = sliceShapes.find((s) => s.id === shapeId);
       if (brush && brush.kind === 'brush') {
-        const { gw, gh, scale } = gridFor(meta.width, meta.height);
+        // Re-vectorize at full resolution so the round-trip is ~idempotent: existing
+        // merged/clipped regions keep their shape instead of eroding or shifting a
+        // little each time a stroke is added.
+        const { gw, gh, scale } = fullResGridFor(meta.width, meta.height);
         const prospective = { ...brush, strokes: [...brush.strokes, { points: finalPoints, radius, mode: 'paint' as const }] };
         const mine = rasterizeShapes([prospective], gw, gh, scale);
-        let converted = false;
-        const removeIds: string[] = [];
+        let clipChanged = false;
 
-        // Clip: carve out pixels already labeled by other classes.
+        // Clip detection (fast mask test): does the brush overlap other classes?
+        // The actual clip is applied below via boolean difference so the brush tiles
+        // flush against the neighbor (a mask carve left a ~1px unlabeled seam).
         if (clipToOtherClasses) {
           const others = sliceShapes.filter((s) => s.classId !== brush.classId);
           if (others.length > 0) {
             const otherMask = rasterizeUnion(others, gw, gh, scale);
-            let overlap = false;
-            for (let i = 0; i < mine.length; i++) { if (mine[i] && otherMask[i]) { overlap = true; break; } }
-            if (overlap) {
-              for (let i = 0; i < mine.length; i++) if (otherMask[i]) mine[i] = 0;
-              converted = true;
-            }
+            for (let i = 0; i < mine.length; i++) { if (mine[i] && otherMask[i]) { clipChanged = true; break; } }
           }
         }
 
-        // Merge: union with overlapping same-class shapes (they get consumed).
-        if (mergeOverlappingSameClass) {
-          const sameClass = sliceShapes.filter((s) => s.id !== shapeId && s.classId === brush.classId);
-          for (const s of sameClass) {
-            const sm = rasterizeShapes([s], gw, gh, scale);
-            let hit = false;
-            for (let i = 0; i < mine.length; i++) { if (mine[i] && sm[i]) { hit = true; break; } }
-            if (!hit) continue;
-            for (let i = 0; i < mine.length; i++) if (sm[i]) mine[i] = 1;
-            removeIds.push(s.id);
-            converted = true;
-          }
-        }
+        // Merge: which existing same-class shapes does the (clipped) brush overlap?
+        const mergeTargets = mergeOverlappingSameClass
+          ? sliceShapes.filter((s) => {
+              if (s.id === shapeId || s.classId !== brush.classId) return false;
+              const sm = rasterizeShapes([s], gw, gh, scale);
+              for (let i = 0; i < mine.length; i++) if (mine[i] && sm[i]) return true;
+              return false;
+            })
+          : [];
 
-        if (converted) {
-          const polys = maskToPolygonsWithHoles(mine, gw, gh, { minRegion: 4, scale })
+        if (clipChanged || mergeTargets.length) {
+          // The new brush region as polygon(s) (not yet clipped).
+          let brushPolys: Shape[] = maskToPolygonsWithHoles(mine, gw, gh, { minRegion: 4, scale })
             .filter((p) => p.points.length >= 6)
             .map((p) => ({
               id: uuidv4(), classId: brush.classId, kind: 'polygon' as const,
               points: p.points, ...(p.holes.length ? { holes: p.holes } : {}),
             }));
+
+          // Clip via boolean difference so the brush tiles flush against other
+          // classes (no ~1px unlabeled seam); existing shapes are untouched.
+          if (clipChanged) {
+            const otherMP = unionShapesToMultiPolygon(
+              sliceShapes.filter((s) => s.classId !== brush.classId), meta.width, meta.height,
+            );
+            if (otherMP.length) {
+              brushPolys = brushPolys.flatMap((bp) => subtractFromShape(bp, otherMP, meta.width, meta.height) ?? [bp]);
+            }
+          }
+
+          let resultPolys: Shape[] = brushPolys;
+          if (mergeTargets.length) {
+            // True boolean union so the existing same-class shapes keep their exact
+            // vertices (only the seam changes); fall back to a mask union on failure.
+            const merged = unionShapesToPolygons([...brushPolys, ...mergeTargets], brush.classId, meta.width, meta.height);
+            if (merged) {
+              resultPolys = merged;
+            } else {
+              const mask = rasterizeShapes([...brushPolys, ...mergeTargets], gw, gh, scale);
+              resultPolys = maskToPolygonsWithHoles(mask, gw, gh, { minRegion: 4, scale })
+                .filter((p) => p.points.length >= 6)
+                .map((p) => ({
+                  id: uuidv4(), classId: brush.classId, kind: 'polygon' as const,
+                  points: p.points, ...(p.holes.length ? { holes: p.holes } : {}),
+                }));
+            }
+          }
+          const removeIds = mergeTargets.map((s) => s.id);
           const kept = sliceShapes.filter((s) => s.id !== shapeId && !removeIds.includes(s.id));
-          setShapes(sourceKey, currentSlice, [...kept, ...polys]);
+          setShapes(sourceKey, currentSlice, [...kept, ...resultPolys]);
           onNewBrushInstance(''); // this brush instance is now polygon(s)
           return;
         }
@@ -1187,7 +1276,8 @@ export default function AnnotationCanvas({
       let target: Shape | undefined;
       for (let i = sliceShapes.length - 1; i >= 0; i--) {
         const s = sliceShapes[i];
-        if (inScope(s) && visible(s) && shapeContainsPoint(s, pos.x, pos.y)) { target = s; break; }
+        // Radius-aware: the brush disk grazing the shape counts, not just its center.
+        if (inScope(s) && visible(s) && shapeNearPoint(s, pos.x, pos.y, brushSize)) { target = s; break; }
       }
       if (!target && activeBrushShapeId) {
         target = sliceShapes.find((s) => s.id === activeBrushShapeId && s.kind === 'brush');

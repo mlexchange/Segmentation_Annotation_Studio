@@ -8,8 +8,9 @@
  * polygons. Non-overlapping new shapes are kept as-is (native kind preserved).
  */
 import type { Shape } from '@/stores/annotationStore';
-import { gridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
+import { gridFor, fullResGridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
 import { maskToPolygonsWithHoles } from '@/lib/magicwand';
+import { unionShapesToPolygons } from '@/lib/polybool';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface MergeResult {
@@ -87,7 +88,8 @@ export function mergeNewWithSameClass(
   width: number,
   height: number,
 ): MergeResult {
-  const { gw, gh, scale } = gridFor(width, height);
+  // Full resolution so the merged region preserves existing geometry (no erosion).
+  const { gw, gh, scale } = fullResGridFor(width, height);
   const add: Shape[] = [];
   const removeIds: string[] = [];
 
@@ -102,22 +104,27 @@ export function mergeNewWithSameClass(
     const existing = sliceShapes.filter((s) => s.classId === classId);
     if (existing.length === 0) { add.push(...group); continue; }
 
+    // Cheap mask test to decide WHICH existing shapes to merge (fast, tolerant).
     const newMask = rasterizeUnion(group, gw, gh, scale);
     const overlapping = existing.filter((e) => masksIntersect(rasterizeShapes([e], gw, gh, scale), newMask));
     if (overlapping.length === 0) { add.push(...group); continue; }
 
-    // Union new + overlapping existing into merged polygon(s). Preserve genuine
-    // interior gaps (unlabeled pixels enclosed by the union) as holes — don't fill.
-    const mask = rasterizeShapes([...group, ...overlapping], gw, gh, scale);
-    const polys = maskToPolygonsWithHoles(mask, gw, gh, { minRegion: 4, scale })
-      .filter((p) => p.points.length >= 6)
-      .map((p) => ({
-        id: uuidv4(),
-        classId,
-        kind: 'polygon' as const,
-        points: p.points,
-        ...(p.holes.length ? { holes: p.holes } : {}),
-      }));
+    // Combine via a true polygon boolean union so the existing shapes keep their
+    // exact vertices (only the merge seam changes). Fall back to a rasterize→
+    // re-vectorize union if the boolean op fails (self-intersecting input, etc.).
+    let polys = unionShapesToPolygons([...group, ...overlapping], classId, width, height);
+    if (!polys) {
+      const mask = rasterizeShapes([...group, ...overlapping], gw, gh, scale);
+      polys = maskToPolygonsWithHoles(mask, gw, gh, { minRegion: 4, scale })
+        .filter((p) => p.points.length >= 6)
+        .map((p) => ({
+          id: uuidv4(),
+          classId,
+          kind: 'polygon' as const,
+          points: p.points,
+          ...(p.holes.length ? { holes: p.holes } : {}),
+        }));
+    }
 
     if (polys.length === 0) { add.push(...group); continue; } // fallback: keep originals
     add.push(...polys);

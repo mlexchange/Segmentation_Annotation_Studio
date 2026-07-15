@@ -24,16 +24,34 @@ describe('clipShapesToOthers', () => {
     const newB = rect('b', 2, 50, 0, 100, 100);         // class B overlaps A in x∈[50,100]
     const clipped = clipShapesToOthers([newB], [classA], W, H);
     expect(clipped.length).toBeGreaterThanOrEqual(1);
-    // No clipped-B pixel may fall inside A.
     const { gw, gh, scale } = gridFor(W, H);
     const aMask = rasterizeShapes([classA], gw, gh, scale);
     const bMask = rasterizeShapes(clipped, gw, gh, scale);
+    // A's interior deep in the overlap region must NOT be covered by clipped B.
+    expect(bMask[Math.floor(50 / scale) * gw + Math.floor(75 / scale)]).toBe(0);
+    // Adjacent classes now tile flush (boolean difference), so only a hairline
+    // shared boundary may overlap — not the interior.
     let overlap = 0;
     for (let i = 0; i < aMask.length; i++) if (aMask[i] && bMask[i]) overlap++;
-    expect(overlap).toBe(0);
+    expect(overlap).toBeLessThan(area([classA]) * 0.05);
     // Area is roughly halved (the non-overlapping right half remains).
     expect(area(clipped)).toBeLessThan(area([newB]) * 0.7);
     expect(area(clipped)).toBeGreaterThan(0);
+  });
+
+  it('tiles flush against the neighbor with no unlabeled gap', () => {
+    const classA = rect('a', 1, 0, 0, 100, 200);   // left region
+    const newB = rect('b', 2, 90, 0, 110, 200);     // overlaps A, extends right
+    const clipped = clipShapesToOthers([newB], [classA], W, H);
+    const { gw, gh, scale } = gridFor(W, H);
+    const aMask = rasterizeShapes([classA], gw, gh, scale);
+    const bMask = rasterizeShapes(clipped, gw, gh, scale);
+    // Across a middle row spanning the seam, every pixel is covered by A or B —
+    // boolean clipping leaves no unlabeled column between the two classes.
+    const y = Math.floor(100 / scale);
+    for (let x = 0; x < Math.floor(150 / scale); x++) {
+      expect(aMask[y * gw + x] || bMask[y * gw + x]).toBeTruthy();
+    }
   });
 
   it('leaves a non-overlapping shape essentially unchanged', () => {

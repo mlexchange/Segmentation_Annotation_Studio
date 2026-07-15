@@ -23,6 +23,17 @@ export function gridFor(width: number, height: number, maxDim = 1600): MaskGrid 
 }
 
 /**
+ * Grid for mask round-trips that must PRESERVE geometry (clip / merge / erase):
+ * full native resolution (scale 1) for reasonably sized images, so re-vectorizing
+ * an unchanged region is ~idempotent and existing nodes don't erode or shift a
+ * little each time a stroke is added. Only very large images (>4096 px) downsample.
+ */
+export function fullResGridFor(width: number, height: number): MaskGrid {
+  const emax = Math.max(width, height);
+  return gridFor(width, height, emax <= 4096 ? emax : 1600);
+}
+
+/**
  * Rasterize *shapes* into a `gw × gh` binary mask (Uint8Array of 0/1). Paint
  * strokes and shape bodies set 1; brush erase strokes and vector `erased`
  * carve-outs set 0, applied per-shape so a later shape can repaint.
