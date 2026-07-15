@@ -55,3 +55,6 @@ frontend/public/models/
 
 # MkDocs build output (regenerate with `mkdocs build`)
 site/
+
+# peter's version of the repo
+peter/

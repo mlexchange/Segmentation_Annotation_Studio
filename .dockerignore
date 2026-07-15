@@ -34,3 +34,6 @@ data
 
 # Plans / docs not needed in the image
 *.md
+
+# peter's version of the repo
+peter/

@@ -203,6 +203,25 @@ function shapeNearPoint(shape: Shape, x: number, y: number, r: number): boolean 
   return false;
 }
 
+/** True if a new brush stroke (points + radius) touches any paint stroke already in
+ *  `strokes` — i.e. their thick outlines overlap. Used to decide whether a stroke
+ *  extends the current brush region or starts a new (disconnected) one. */
+function strokeTouchesBrush(points: number[], radius: number, strokes: BrushStroke[]): boolean {
+  for (const st of strokes) {
+    if (st.mode === 'erase') continue;
+    const p = st.points;
+    const tol = st.radius + radius;
+    for (let i = 0; i + 1 < points.length; i += 2) {
+      const x = points[i], y = points[i + 1];
+      for (let j = 0; j + 3 < p.length; j += 2) {
+        if (distToSegment(x, y, p[j], p[j + 1], p[j + 2], p[j + 3]) <= tol) return true;
+      }
+      if (p.length >= 2 && distToSegment(x, y, p[0], p[1], p[0], p[1]) <= tol) return true;
+    }
+  }
+  return false;
+}
+
 /** Insert a vertex on the polygon edge (outer ring or a hole) nearest to (px,py),
  *  at the projected point on that segment. Used for double-click "add node". */
 function insertVertexNearest(shape: PolygonShape, px: number, py: number): PolygonShape {
@@ -1123,6 +1142,27 @@ export default function AnnotationCanvas({
           onNewBrushInstance(''); // this brush instance is now polygon(s)
           return;
         }
+      }
+    }
+
+    // Plain brush paint (no clip/merge conversion): if this stroke doesn't connect
+    // to the target instance's existing strokes, start a NEW brush shape so painting
+    // separate blobs yields separate, individually-selectable shapes.
+    if (mode === 'paint') {
+      const shapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
+      const target = shapes.find((s) => s.id === shapeId);
+      if (
+        target && target.kind === 'brush' &&
+        target.strokes.some((st) => st.mode === 'paint') &&
+        !strokeTouchesBrush(finalPoints, radius, target.strokes)
+      ) {
+        const newId = uuidv4();
+        addShape(sourceKey, currentSlice, {
+          id: newId, classId: target.classId, kind: 'brush',
+          strokes: [{ points: finalPoints, radius, mode: 'paint' }],
+        });
+        onNewBrushInstance(newId); // subsequent connected strokes extend this blob
+        return;
       }
     }
     appendBrushStroke(sourceKey, currentSlice, shapeId, { points: finalPoints, radius, mode });

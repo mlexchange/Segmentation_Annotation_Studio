@@ -32,10 +32,12 @@ interface ClassRowProps {
   onClassDeleted: (deletedClassId: number) => void;
   /** Matching guide entry (description + example crops), if the guide defines this class. */
   guide?: GuideClass;
+  /** Keyboard shortcut digit (1–9) that activates this class, if any. */
+  hotkey?: number;
 }
 
 /** Renders a single class row with inline rename, visibility toggle, and delete. */
-function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRowProps) {
+function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide, hotkey }: ClassRowProps) {
   const { updateClass, deleteClass, toggleVisibility } = useClassStore();
   const removeShapesByClassId = useAnnotationStore((s) => s.removeShapesByClassId);
   const setSelectedShapeId = useToolStore((s) => s.setSelectedShapeId);
@@ -93,6 +95,16 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide }: ClassRow
         )}
         onClick={onActivate}
       >
+        <span
+          className={cn(
+            'w-4 flex-shrink-0 text-center text-[10px] font-mono font-semibold leading-none',
+            isActive ? 'text-sky-600 dark:text-sky-300' : 'text-gray-400'
+          )}
+          title={hotkey ? `Press ${hotkey} to select this class` : undefined}
+          aria-hidden={!hotkey}
+        >
+          {hotkey ?? ''}
+        </span>
         {editing ? (
           <input
             type="color"
@@ -344,7 +356,7 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
         {classes.length === 0 && (
           <p className="text-xs text-gray-400 text-center py-2">No classes yet. Click + to add one.</p>
         )}
-        {classes.map((cls) => (
+        {classes.map((cls, idx) => (
           <ClassRow
             key={cls.classId}
             cls={cls}
@@ -352,6 +364,7 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
             onActivate={() => onActivate(cls.classId)}
             onClassDeleted={handleClassDeleted}
             guide={guideByLabel.get(cls.label.trim().toLowerCase())}
+            hotkey={idx < 9 ? idx + 1 : undefined}
           />
         ))}
       </div>
