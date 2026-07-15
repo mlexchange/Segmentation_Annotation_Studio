@@ -393,6 +393,55 @@ def write_coco_split(
     }
 
 
+def write_lightly_split(
+    split_dir: Path,
+    images: list[dict[str, Any]],
+    *,
+    zf: Any = None,
+    arc_prefix: str = "",
+) -> dict[str, Any]:
+    """Write one split in the DINOv3 / Lightly semantic-segmentation layout:
+    ``<split>/images/<stem>.png`` (rendered frame) + ``<split>/masks/<stem>.png``
+    (single-channel label map, pixel = class index, 0 = background) with MATCHING
+    filename stems. Reuses the ``png_bytes`` / ``label_png_bytes`` already built by
+    ``build_export_plan`` (the same rasterization as the COCO/semantic export).
+
+    If ``zf`` is given, each file is mirrored into the download zip under
+    ``arc_prefix`` from the same bytes.
+    """
+    img_dir = split_dir / "images"
+    mask_dir = split_dir / "masks"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    def _emit(rel: str, data: bytes) -> None:
+        if zf is not None:
+            zf.writestr(arc_prefix + rel, data)
+
+    n = 0
+    for img in images:
+        fname = img["file_name"]  # e.g. "sample_0003.png"
+        png_bytes = img.get("png_bytes")
+        label_png = img.get("label_png_bytes")
+        if png_bytes is not None:
+            (img_dir / fname).write_bytes(png_bytes)
+            _emit(f"images/{fname}", png_bytes)
+        if label_png is not None:
+            (mask_dir / fname).write_bytes(label_png)
+            _emit(f"masks/{fname}", label_png)
+        n += 1
+    return {"n_images": n, "n_annotations": 0, "path": str(img_dir)}
+
+
+def lightly_classes_map(categories: list[dict[str, Any]]) -> dict[str, str]:
+    """Build the Lightly ``classes`` mapping (index → name), 0 = background.
+    Category ids start at 1 and are contiguous (see build_export_plan)."""
+    out: dict[str, str] = {"0": "background"}
+    for c in categories:
+        out[str(int(c["id"]))] = str(c["name"])
+    return out
+
+
 def build_export_plan(
     node: Any,
     payload: Any,

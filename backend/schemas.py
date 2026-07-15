@@ -201,6 +201,9 @@ class ExportRequest(BaseModel):
     # inter-annotator-agreement analysis.
     annotator: str = ""
     mode: Literal["fail", "overwrite", "merge"] = "merge"
+    # Export target format: COCO-for-SAM3 (default) or DINOv3/Lightly semantic-seg
+    # (per-split images/ + masks/ with matching filename stems + classes.json).
+    format: Literal["coco_sam3", "lightly_dinov3"] = "coco_sam3"
     dry_run: bool = False
     # Include the (costly) polygon copy in COCO segmentation_poly. RLE is always
     # written and is exact; polygons are opt-in for external viewers.

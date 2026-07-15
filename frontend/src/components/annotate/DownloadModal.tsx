@@ -74,6 +74,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
 
   const [scope, setScope] = useState<Scope>('current');
   const [includePolygons, setIncludePolygons] = useState(false);
+  const [format, setFormat] = useState<'coco_sam3' | 'lightly_dinov3'>('coco_sam3');
   const { state: job, start, startMaskSync, downloadUrl } = useExportJob();
   const status = job.status;
   const maskResult = Array.isArray(job.result?.written) ? (job.result.written as Array<{ container?: string; n_slices?: number; updated?: number }>) : null;
@@ -148,7 +149,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
       return;
     }
     if (sources.length === 0) { window.alert('No samples match the selected scope.'); return; }
-    start({ sources, classes, mode: 'merge', include_polygons: includePolygons, annotator: annotatorName.trim() });
+    start({ sources, classes, mode: 'merge', format, include_polygons: includePolygons, annotator: annotatorName.trim() });
   };
 
   /** True when the chosen scope can actually write back to Tiled. */
@@ -180,7 +181,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-white">
             <DownloadSimple size={20} />
-            <span className="text-base font-semibold">Download COCO Dataset</span>
+            <span className="text-base font-semibold">Download Dataset</span>
           </div>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-white transition-colors">
             <X size={18} />
@@ -238,17 +239,39 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
 
         {/* Options */}
         {status === 'idle' && (
-          <label className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={includePolygons}
-              onChange={(e) => setIncludePolygons(e.target.checked)}
-              className="mt-0.5 accent-sky-500"
-            />
-            <span>
-              Include polygon copy in COCO <span className="text-slate-500">(slower; RLE masks are always exact — only needed for some external viewers)</span>
-            </span>
-          </label>
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Format</p>
+            <div className="flex flex-col gap-1.5">
+              {([
+                ['coco_sam3', 'COCO (SAM3)', 'RLE masks + images, for SAM3 fine-tuning'],
+                ['lightly_dinov3', 'DINOv3 / Lightly', 'images/ + masks/ label PNGs (same filename) + classes.json'],
+              ] as const).map(([value, label, desc]) => (
+                <label key={value} className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="export-format"
+                    checked={format === value}
+                    onChange={() => setFormat(value)}
+                    className="mt-0.5 accent-sky-500"
+                  />
+                  <span>{label} <span className="text-slate-500">— {desc}</span></span>
+                </label>
+              ))}
+            </div>
+            {format === 'coco_sam3' && (
+              <label className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includePolygons}
+                  onChange={(e) => setIncludePolygons(e.target.checked)}
+                  className="mt-0.5 accent-sky-500"
+                />
+                <span>
+                  Include polygon copy in COCO <span className="text-slate-500">(slower; RLE masks are always exact — only needed for some external viewers)</span>
+                </span>
+              </label>
+            )}
+          </div>
         )}
 
         {/* Preview count */}

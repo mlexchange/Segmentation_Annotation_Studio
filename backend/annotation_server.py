@@ -923,9 +923,10 @@ def _run_export_job(
 ) -> None:
     """Background worker: render+rasterize all sources, write the dataset tree
     (images + masks + COCO), zip it for download, then sync Tiled metadata."""
-    from coco_export import build_export_plan, write_coco_split
+    from coco_export import build_export_plan, write_coco_split, write_lightly_split, lightly_classes_map
     import images as images_mod_local
     import arrays as arrays_mod_local
+    lightly = getattr(payload, "format", "coco_sam3") == "lightly_dinov3"
 
     try:
         export_jobs.update(jid, state="running", phase="reading")
@@ -1004,23 +1005,44 @@ def _run_export_job(
         export_jobs.update(jid, phase="writing")
         zip_path = f"{out_root}.zip"
         written: dict = {}
+        # Create the dataset dir (and its parent EXPORT_ROOT, e.g. ~/data/exports)
+        # BEFORE opening the zip — the zip lives at {out_root}.zip, so its parent
+        # must exist or ZipFile("w") raises FileNotFoundError on a fresh install.
+        out_root.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
-            out_root.mkdir(parents=True, exist_ok=True)
             manifest_json = json.dumps(manifest, indent=2)
             (out_root / "manifest.json").write_text(manifest_json)
             zf.writestr("manifest.json", manifest_json)
-            for split_name, split_data in merged_splits.items():
-                export_jobs.log(jid, f"Writing split '{split_name}' ({len(split_data['images'])} images + masks)…")
-                written[split_name] = write_coco_split(
-                    out_root / split_name,
-                    images=split_data["images"],
-                    categories=merged_categories,
-                    annotations=split_data["annotations"],
-                    mode=payload.mode,
-                    info=merged_info,
-                    zf=zf,
-                    arc_prefix=f"{split_name}/",
-                )
+
+            if lightly:
+                # DINOv3 / Lightly: classes.json (index→name, 0=bg) at the dataset
+                # root; each split as images/ + masks/ with matching stems.
+                classes_json = json.dumps(lightly_classes_map(merged_categories), indent=2)
+                (out_root / "classes.json").write_text(classes_json)
+                zf.writestr("classes.json", classes_json.encode("utf-8"))
+                for split_name, split_data in merged_splits.items():
+                    # Lightly convention: 'valid' → 'val'; 'train'/'test' unchanged.
+                    dir_name = "val" if split_name == "valid" else split_name
+                    export_jobs.log(jid, f"Writing split '{dir_name}' ({len(split_data['images'])} images + masks)…")
+                    written[dir_name] = write_lightly_split(
+                        out_root / dir_name,
+                        images=split_data["images"],
+                        zf=zf,
+                        arc_prefix=f"{dir_name}/",
+                    )
+            else:
+                for split_name, split_data in merged_splits.items():
+                    export_jobs.log(jid, f"Writing split '{split_name}' ({len(split_data['images'])} images + masks)…")
+                    written[split_name] = write_coco_split(
+                        out_root / split_name,
+                        images=split_data["images"],
+                        categories=merged_categories,
+                        annotations=split_data["annotations"],
+                        mode=payload.mode,
+                        info=merged_info,
+                        zf=zf,
+                        arc_prefix=f"{split_name}/",
+                    )
 
         export_jobs.update(jid, phase="syncing")
         import tiled_annotation_sync
