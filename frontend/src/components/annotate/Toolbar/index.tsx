@@ -88,6 +88,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     magicEdgeStop, setMagicEdgeStop, magicEngine, setMagicEngine,
     samDetail, setSamDetail, samThreshold, setSamThreshold,
     samAvoidLabeled, setSamAvoidLabeled,
+    samConnectedOnly, setSamConnectedOnly,
     clipToOtherClasses, setClipToOtherClasses,
     mergeOverlappingSameClass, setMergeOverlappingSameClass,
     eraseAllClasses, setEraseAllClasses,
@@ -242,16 +243,14 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
 
       {tool === 'fill' && (
         <div className="flex flex-col gap-1 mt-1">
-          <label className="text-xs text-gray-500">
-            Fill threshold: {Math.round(fillThreshold * 100)}%
-          </label>
-          <input
-            type="range"
+          <DebouncedSlider
+            label="Fill threshold"
+            format={(v) => `${v}%`}
             min={1}
             max={100}
             value={Math.round(fillThreshold * 100)}
-            onChange={(e) => setFillThreshold(Number(e.target.value) / 100)}
-            className="w-full"
+            onChange={(v) => setFillThreshold(v / 100)}
+            allowLog
           />
           <p className="text-[10px] text-gray-400 leading-snug">
             Click a region to flood-fill pixels within this intensity threshold of the clicked point.
@@ -351,6 +350,20 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
                   </span>
                 </span>
               </label>
+              <label className="flex items-start gap-2 text-[11px] text-gray-600 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={samConnectedOnly}
+                  onChange={(e) => setSamConnectedOnly(e.target.checked)}
+                  className="mt-0.5 accent-sky-600"
+                />
+                <span>
+                  Connected regions only
+                  <span className="block text-[10px] text-gray-400 leading-snug">
+                    Keeps only the region at your click/box and drops detached speckle.
+                  </span>
+                </span>
+              </label>
               <p className="text-[10px] text-gray-400 leading-snug">
                 Drag a box around the object (most reliable), or click it. Shift-click adds to the
                 object; <b>{REMOVE_KEY_LABEL}-click drops a "not" point (red)</b> to remove an area
@@ -385,6 +398,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
                 max={60}
                 value={Math.round(magicTolerance * 100)}
                 onChange={(v) => setMagicTolerance(v / 100)}
+                allowLog
               />
               {magicMode === 'contiguous' && (
                 <DebouncedSlider

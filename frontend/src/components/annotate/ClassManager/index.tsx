@@ -8,10 +8,13 @@ import { Eye, EyeSlash, Pencil, Trash, Plus, Info, Eyedropper, Check } from '@ph
 import { useClassStore, type AnnotationClass } from '@/stores/classStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
+import { useDatasetStore } from '@/stores/datasetStore';
 import { useReferenceGuideStore, type GuideClass } from '@/stores/referenceGuideStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { getClassPalette } from '@/lib/classColors';
+import { buildSourceKey } from '@/lib/sourceKey';
 import { cn } from '@/lib/utils';
+import { Copy } from '@phosphor-icons/react';
 
 /** Counts all shapes assigned to a class across every image/slice in the annotation store. */
 function countShapesForClass(classId: number): number {
@@ -30,6 +33,8 @@ interface ClassRowProps {
   isActive: boolean;
   onActivate: () => void;
   onClassDeleted: (deletedClassId: number) => void;
+  /** Duplicate this class + all its shapes into a new class. */
+  onDuplicate: () => void;
   /** Matching guide entry (description + example crops), if the guide defines this class. */
   guide?: GuideClass;
   /** Keyboard shortcut digit (1–9) that activates this class, if any. */
@@ -37,7 +42,7 @@ interface ClassRowProps {
 }
 
 /** Renders a single class row with inline rename, visibility toggle, and delete. */
-function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide, hotkey }: ClassRowProps) {
+function ClassRow({ cls, isActive, onActivate, onClassDeleted, onDuplicate, guide, hotkey }: ClassRowProps) {
   const { updateClass, deleteClass, toggleVisibility } = useClassStore();
   const removeShapesByClassId = useAnnotationStore((s) => s.removeShapesByClassId);
   const setSelectedShapeId = useToolStore((s) => s.setSelectedShapeId);
@@ -166,6 +171,14 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, guide, hotkey }: 
           {editing ? <Check size={14} /> : <Pencil size={14} />}
         </button>
         <button
+          aria-label="Duplicate class and its annotations"
+          title="Duplicate class (copies its shapes into a new class)"
+          className="shrink-0 p-0.5 hover:text-sky-600"
+          onClick={(e) => { e.stopPropagation(); onDuplicate(); }}
+        >
+          <Copy size={14} />
+        </button>
+        <button
           aria-label="Delete class and its annotations"
           className="shrink-0 p-0.5 hover:text-red-500"
           onClick={handleDelete}
@@ -207,6 +220,9 @@ const DEFAULT_SUGGESTED_CLASSES = ['air', 'sample', 'void', 'pore', 'background'
 /** Renders the class list, add form, and quick-add suggestion chips. */
 export default function ClassManager({ activeClassId, onActivate, onClassDeleted }: ClassManagerProps) {
   const { classes, addClass } = useClassStore();
+  const duplicateClassShapes = useAnnotationStore((s) => s.duplicateClassShapes);
+  const { source, kind, serverUri } = useDatasetStore();
+  const sourceKey = source && kind ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri) : null;
   const guideEntries = useReferenceGuideStore((s) => s.entries);
   const colorblindMode = useSettingsStore((s) => s.colorblindMode);
   const setColorblindMode = useSettingsStore((s) => s.setColorblindMode);
@@ -259,6 +275,17 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
     setNewLabel('');
     setNewColor('');
     setShowAdd(false);
+  };
+
+  /** Duplicate a class: create a new class and copy all of its shapes (across every
+   *  slice of the current sample) into it, then activate the copy. */
+  const handleDuplicate = (cls: AnnotationClass) => {
+    const taken = new Set(classes.map((c) => c.label.toLowerCase()));
+    let label = `${cls.label} copy`;
+    for (let i = 2; taken.has(label.toLowerCase()); i++) label = `${cls.label} copy ${i}`;
+    const newId = addClass(label, nextColor());
+    if (sourceKey) duplicateClassShapes(sourceKey, cls.classId, newId);
+    onActivate(newId);
   };
 
   /** One-click add (or re-activate) a suggested class. Inherits the guide color if
@@ -363,6 +390,7 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
             isActive={cls.classId === activeClassId}
             onActivate={() => onActivate(cls.classId)}
             onClassDeleted={handleClassDeleted}
+            onDuplicate={() => handleDuplicate(cls)}
             guide={guideByLabel.get(cls.label.trim().toLowerCase())}
             hotkey={idx < 9 ? idx + 1 : undefined}
           />

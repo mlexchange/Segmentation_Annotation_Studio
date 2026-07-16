@@ -88,6 +88,9 @@ export interface AnnotationState {
   copySliceShapes: (sourceKey: string, fromSlice: number, toSlices: number[], classId?: number | null) => void;
   /** Remove every shape with *classId* across all loaded samples (all slices). */
   removeShapesByClassId: (classId: number) => void;
+  /** Clone every shape of *fromClassId* into *toClassId*, across ALL slices of
+   *  *sourceKey* (fresh ids), in one undo step. Used to duplicate a class. */
+  duplicateClassShapes: (sourceKey: string, fromClassId: number, toClassId: number) => void;
   appendBrushStroke: (sourceKey: string, sliceIdx: number, shapeId: string, stroke: BrushStroke) => void;
   /** Append an erase carve-out to any shape (brush → erase stroke; vector → `erased`). */
   appendEraseStroke: (sourceKey: string, sliceIdx: number, shapeId: string, stroke: EraseStroke) => void;
@@ -255,6 +258,22 @@ export const useAnnotationStore = create<AnnotationState>()(
             }
           }
           return { byImage: nextByImage };
+        }),
+
+      /** Clone every shape of *fromClassId* into *toClassId* across all slices of
+       *  *sourceKey* (fresh ids), merged with existing shapes. One undo step. */
+      duplicateClassShapes: (sourceKey, fromClassId, toClassId) =>
+        set((s) => {
+          const slices = s.byImage[sourceKey];
+          if (!slices) return {};
+          const nextSlices: Record<string, Shape[]> = {};
+          for (const [sliceKey, shapes] of Object.entries(slices)) {
+            const copies = shapes
+              .filter((sh) => sh.classId === fromClassId)
+              .map((sh) => ({ ...cloneShapeWithNewId(sh), classId: toClassId }));
+            nextSlices[sliceKey] = copies.length ? [...shapes, ...copies] : shapes;
+          }
+          return { byImage: { ...s.byImage, [sourceKey]: nextSlices } };
         }),
 
       /** Appends a brush stroke to the named brush shape; no-op for non-brush shapes. */

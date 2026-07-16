@@ -36,6 +36,9 @@ export interface ToolState {
   /** When true, feed interior points of other-class regions to SAM as negative
    *  ("not") prompts so a new selection won't bleed into already-labeled areas. */
   samAvoidLabeled: boolean;
+  /** When true, keep only the SAM component(s) containing a positive prompt (else
+   *  the largest) — drops detached speckle regions. */
+  samConnectedOnly: boolean;
   /** When true, new annotations are clipped so they can't overlap other classes'
    *  regions on the current slice (neighbor classes act as a hard boundary). */
   clipToOtherClasses: boolean;
@@ -67,6 +70,7 @@ export interface ToolState {
   setSamDetail: (d: SamDetail) => void;
   setSamThreshold: (t: number) => void;
   setSamAvoidLabeled: (v: boolean) => void;
+  setSamConnectedOnly: (v: boolean) => void;
   setClipToOtherClasses: (v: boolean) => void;
   setMergeOverlappingSameClass: (v: boolean) => void;
   setEraseAllClasses: (v: boolean) => void;
@@ -89,6 +93,7 @@ export const useToolStore = create<ToolState>((set) => ({
   samDetail: 'auto',
   samThreshold: 0,
   samAvoidLabeled: true,
+  samConnectedOnly: true,
   clipToOtherClasses: true,
   mergeOverlappingSameClass: false,
   eraseAllClasses: false,
@@ -123,6 +128,8 @@ export const useToolStore = create<ToolState>((set) => ({
   setSamThreshold: (samThreshold) => set({ samThreshold }),
   /** Toggles using other-class regions as SAM negative ("not") prompts. */
   setSamAvoidLabeled: (samAvoidLabeled) => set({ samAvoidLabeled }),
+  /** Toggles keeping only SAM component(s) at a positive prompt (drops speckle). */
+  setSamConnectedOnly: (samConnectedOnly) => set({ samConnectedOnly }),
   /** Toggles clipping new annotations against other classes' regions. */
   setClipToOtherClasses: (clipToOtherClasses) => set({ clipToOtherClasses }),
   /** Toggles auto-merging new annotations with overlapping same-class shapes. */

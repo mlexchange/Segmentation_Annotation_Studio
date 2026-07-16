@@ -17,6 +17,7 @@ export type HubAppLayoutProps = {
     sidebarActiveLinkClassName?: string;
     sidebarInactiveLinkClassName?: string;
     onFeedback?: () => void;
+    onDocs?: () => void;
     onOpenTabSelector?: () => void;
     }
 /** HubAppLayout — overall app shell wiring the fixed sidebar, header, and routed main content. */
@@ -32,6 +33,7 @@ export default function HubAppLayout ( {
     sidebarActiveLinkClassName,
     sidebarInactiveLinkClassName,
     onFeedback,
+    onDocs,
     onOpenTabSelector
   }: HubAppLayoutProps) {
 
@@ -47,6 +49,7 @@ return (
                     inactiveLinkClassName={sidebarInactiveLinkClassName}
                     docsUrl={docsUrl}
                     onFeedback={onFeedback}
+                    onDocs={onDocs}
                     onOpenTabSelector={onOpenTabSelector}
                 />
             </div>

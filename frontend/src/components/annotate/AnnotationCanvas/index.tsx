@@ -31,6 +31,7 @@ import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type 
 import { useSam } from '@/hooks/useSam';
 import { renderAdjusted, renderPreprocessOnly } from '@/lib/sam/adjust';
 import { gridFor, fullResGridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
+import { keepComponentsAtPoints } from '@/lib/morphology';
 import { unionShapesToPolygons, unionShapesToMultiPolygon, eraseStampToMultiPolygon, subtractFromShape } from '@/lib/polybool';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
 import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
@@ -453,6 +454,7 @@ export default function AnnotationCanvas({
   const samDetail = useToolStore((s) => s.samDetail);
   const samThreshold = useToolStore((s) => s.samThreshold);
   const samAvoidLabeled = useToolStore((s) => s.samAvoidLabeled);
+  const samConnectedOnly = useToolStore((s) => s.samConnectedOnly);
   const fitRequestId = useToolStore((s) => s.fitRequestId);
   const clipToOtherClasses = useToolStore((s) => s.clipToOtherClasses);
   const mergeOverlappingSameClass = useToolStore((s) => s.mergeOverlappingSameClass);
@@ -876,8 +878,21 @@ export default function AnnotationCanvas({
         if (cancelled) return;
         if (res) {
           const scale = res.width > 0 ? meta.width / res.width : 1;
+          let mask = res.mask;
+          // "Connected regions only": keep the component(s) at the positive prompts
+          // (positive seeds, else the box center), dropping detached speckle.
+          if (samConnectedOnly) {
+            const sx = res.width / meta.width, sy = res.height / meta.height;
+            const pos = magicSeeds
+              .filter((s) => s.label === 1)
+              .map((s) => ({ x: s.x * sx, y: s.y * sy }));
+            if (pos.length === 0 && magicBox) {
+              pos.push({ x: (magicBox.x + magicBox.w / 2) * sx, y: (magicBox.y + magicBox.h / 2) * sy });
+            }
+            mask = keepComponentsAtPoints(mask, res.width, res.height, pos);
+          }
           setMagicPreview(
-            maskToPolygons(res.mask, res.width, res.height, {
+            maskToPolygons(mask, res.width, res.height, {
               smooth: magicSigma, scale, minRegion: 25,
             }),
           );
@@ -912,7 +927,7 @@ export default function AnnotationCanvas({
       setMagicLoading(false);
     });
     return () => cancelAnimationFrame(id);
-  }, [tool, magicSeeds, magicBox, autoNegPoints, samDetail, samThreshold, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, fillThreshold, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tool, magicSeeds, magicBox, autoNegPoints, samDetail, samThreshold, samConnectedOnly, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, fillThreshold, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Commit the magic preview polygons as new shapes (one batched undo step). */
   const commitMagic = useCallback(() => {

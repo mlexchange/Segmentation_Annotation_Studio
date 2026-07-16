@@ -51,6 +51,56 @@ export function removeSmallComponents(mask: Uint8Array, gw: number, gh: number, 
   return out;
 }
 
+/**
+ * Keep only the 4-connected component(s) that contain any of `pts` (grid coords);
+ * drop everything else. If no point lands on a set pixel, returns the LARGEST
+ * component instead (so a box prompt with no seed still yields one clean region).
+ * Used by the SAM magic wand "connected regions only" option to strip speckle.
+ */
+export function keepComponentsAtPoints(
+  mask: Uint8Array, gw: number, gh: number, pts: Array<{ x: number; y: number }>,
+): Uint8Array {
+  const labels = new Int32Array(gw * gh);
+  const sizes: number[] = [0];
+  let next = 1;
+  for (let p = 0; p < mask.length; p++) {
+    if (!mask[p] || labels[p]) continue;
+    const lbl = next++;
+    let size = 0;
+    const stack = [p];
+    labels[p] = lbl;
+    while (stack.length) {
+      const idx = stack.pop()!;
+      size++;
+      const x = idx % gw, y = (idx / gw) | 0;
+      const push = (j: number) => { if (mask[j] && !labels[j]) { labels[j] = lbl; stack.push(j); } };
+      if (x > 0) push(idx - 1);
+      if (x < gw - 1) push(idx + 1);
+      if (y > 0) push(idx - gw);
+      if (y < gh - 1) push(idx + gw);
+    }
+    sizes[lbl] = size;
+  }
+  if (next === 1) return new Uint8Array(mask); // empty
+
+  const keep = new Set<number>();
+  for (const pt of pts) {
+    const gx = Math.max(0, Math.min(gw - 1, Math.round(pt.x)));
+    const gy = Math.max(0, Math.min(gh - 1, Math.round(pt.y)));
+    const lbl = labels[gy * gw + gx];
+    if (lbl) keep.add(lbl);
+  }
+  if (keep.size === 0) {
+    // No prompt hit foreground → keep the largest component.
+    let best = 1;
+    for (let l = 2; l < next; l++) if (sizes[l] > sizes[best]) best = l;
+    keep.add(best);
+  }
+  const out = new Uint8Array(mask.length);
+  for (let p = 0; p < mask.length; p++) if (keep.has(labels[p])) out[p] = 1;
+  return out;
+}
+
 /** One 8-connected dilation pass (a pixel is set if any neighbor is set). */
 function dilateOnce(mask: Uint8Array, gw: number, gh: number): Uint8Array {
   const out = new Uint8Array(gw * gh);

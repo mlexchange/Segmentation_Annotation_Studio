@@ -12,6 +12,7 @@ import AnnotatePage from './pages/AnnotatePage';
 import BrowsePage from './pages/BrowsePage';
 import ReferencePage from './pages/ReferencePage';
 import CustomizePages from '@/components/CustomizePages';
+import IframeModal from '@/components/IframeModal';
 
 const allRoutes: RouteItem[] = [
   {
@@ -53,6 +54,8 @@ function App() {
   const navigate = useNavigate();
   const location = useLocation();
   const [showTabSelector, setShowTabSelector] = useState(false);
+  // Docs / Feedback open in an in-app iframe modal rather than a new tab.
+  const [iframeModal, setIframeModal] = useState<{ title: string; url: string } | null>(null);
 
   // Validate stored paths — discard unknown paths and merge in any newly added tabs.
   const storedValid = selectedPaths?.filter((p) => DEFAULT_PATHS.includes(p)) ?? null;
@@ -95,12 +98,13 @@ function App() {
         routes={filteredRoutes}
         headerTitle="Segmentation Annotation Studio"
         docsUrl={DOCS_URL}
+        onDocs={DOCS_URL ? () => setIframeModal({ title: 'Documentation', url: DOCS_URL }) : undefined}
         onFeedback={
           FEEDBACK_FORM_URL
-            ? () => {
-                const url = buildFeedbackUrl(FEEDBACK_FORM_URL, FEEDBACK_ENTRY_ID, buildFeedbackContext());
-                window.open(url, '_blank', 'noopener,noreferrer');
-              }
+            ? () => setIframeModal({
+                title: 'Bugs & Feature Requests',
+                url: buildFeedbackUrl(FEEDBACK_FORM_URL, FEEDBACK_ENTRY_ID, buildFeedbackContext(), true),
+              })
             : undefined
         }
       />
@@ -109,6 +113,9 @@ function App() {
         selectedPaths={validPaths!}
         onSelectionChange={setSelectedPaths}
       />
+      {iframeModal && (
+        <IframeModal title={iframeModal.title} url={iframeModal.url} onClose={() => setIframeModal(null)} />
+      )}
     </>
   );
 }

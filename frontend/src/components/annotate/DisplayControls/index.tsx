@@ -132,6 +132,7 @@ export default function DisplayControls({
           value={gamma}
           onChange={onGammaChange}
           debounceMs={0}
+          allowLog
         />
       </div>
 

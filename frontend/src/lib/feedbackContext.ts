@@ -42,11 +42,14 @@ export function buildFeedbackContext(): string {
   return lines.join('\n');
 }
 
-/** Build the prefilled Google Form URL for the single "context" question. */
-export function buildFeedbackUrl(formUrl: string, entryId: string, context: string): string {
+/** Build the prefilled Google Form URL for the single "context" question.
+ *  Pass `embedded` when rendering the form inside an `<iframe>` (Google Forms
+ *  honours `embedded=true` for its embedded layout). */
+export function buildFeedbackUrl(formUrl: string, entryId: string, context: string, embedded = false): string {
   if (!formUrl) return formUrl;
   const sep = formUrl.includes('?') ? '&' : '?';
   const params = new URLSearchParams({ usp: 'pp_url' });
+  if (embedded) params.set('embedded', 'true');
   if (entryId) params.set(`entry.${entryId}`, context);
   return `${formUrl}${sep}${params.toString()}`;
 }
