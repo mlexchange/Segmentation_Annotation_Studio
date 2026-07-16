@@ -232,7 +232,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
               value={annotatorName}
               onChange={(e) => setAnnotatorName(e.target.value)}
               placeholder="Your name (recorded in the export)"
-              className="w-full rounded-md border border-slate-600 bg-slate-900/60 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none"
+              className="w-full rounded-md border border-slate-600 bg-slate-900/60 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
             />
           </div>
         )}
@@ -254,7 +254,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
                     onChange={() => setFormat(value)}
                     className="mt-0.5 accent-sky-500"
                   />
-                  <span>{label} <span className="text-slate-500">— {desc}</span></span>
+                  <span>{label} <span className="text-slate-400">— {desc}</span></span>
                 </label>
               ))}
             </div>
@@ -267,7 +267,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
                   className="mt-0.5 accent-sky-500"
                 />
                 <span>
-                  Include polygon copy in COCO <span className="text-slate-500">(slower; RLE masks are always exact — only needed for some external viewers)</span>
+                  Include polygon copy in COCO <span className="text-slate-400">(slower; RLE masks are always exact — only needed for some external viewers)</span>
                 </span>
               </label>
             )}

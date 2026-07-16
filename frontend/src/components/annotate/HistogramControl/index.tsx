@@ -125,7 +125,7 @@ export default function HistogramControl({ bins, lo, hi, onChange, onReset }: Hi
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between">
         <span className="text-[11px] text-gray-500">
-          Levels <span className="tabular-nums text-gray-400">{lo} – {hi}</span>
+          Levels <span className="tabular-nums text-gray-500">{lo} – {hi}</span>
         </span>
         <button
           aria-label="Reset levels"

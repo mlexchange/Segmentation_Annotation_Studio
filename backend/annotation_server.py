@@ -86,6 +86,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Compress text responses (SPA JS/CSS, JSON). Matters for the production path where
+# FastAPI serves the built SPA + API from one origin; PNGs are already compressed so
+# the ~500-byte floor skips tiny/binary payloads. (Dev uses the Vite server instead.)
+from starlette.middleware.gzip import GZipMiddleware  # noqa: E402
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
 
 # ---------------------------------------------------------------------------
 # Response models

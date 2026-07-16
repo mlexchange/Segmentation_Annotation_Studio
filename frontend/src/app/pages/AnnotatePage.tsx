@@ -263,7 +263,7 @@ export default function AnnotatePage() {
             </button>
 
             {/* Dirty / saved status line */}
-            <div className="flex items-center justify-between text-xs text-gray-400 px-0.5">
+            <div className="flex items-center justify-between text-xs text-gray-500 px-0.5">
               <span>{isDirty ? 'Unsaved changes' : (savedLabel ?? 'No saves yet')}</span>
               {versions.length > 0 && (
                 <button

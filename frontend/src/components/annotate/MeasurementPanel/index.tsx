@@ -93,7 +93,7 @@ export default function MeasurementPanel({ sourceKey }: MeasurementPanelProps) {
       </div>
 
       {!geom || geom.count === 0 ? (
-        <p className="text-xs text-gray-400">Select one or more regions to measure.</p>
+        <p className="text-xs text-gray-500">Select one or more regions to measure.</p>
       ) : (
         <div className="flex flex-col gap-1 text-xs">
           <Row label={`Regions`} value={String(geom.count)} />
@@ -107,9 +107,9 @@ export default function MeasurementPanel({ sourceKey }: MeasurementPanelProps) {
           )}
 
           <div className="my-1 border-t border-gray-100" />
-          <div className="text-[10px] uppercase tracking-wide text-gray-400">Intensity (raw)</div>
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Intensity (raw)</div>
           {intensityLoading ? (
-            <p className="text-gray-400">Measuring…</p>
+            <p className="text-gray-500">Measuring…</p>
           ) : intensity && intensity.pixel_count > 0 ? (
             <>
               <Row label="Mean ± SD" value={`${fmt(intensity.mean)} ± ${fmt(intensity.std)}`} />
@@ -117,7 +117,7 @@ export default function MeasurementPanel({ sourceKey }: MeasurementPanelProps) {
               <Row label="Pixels" value={intensity.pixel_count.toLocaleString()} />
             </>
           ) : (
-            <p className="text-gray-400">—</p>
+            <p className="text-gray-500">—</p>
           )}
 
           {/* Pixel-size calibration (optional). */}
@@ -137,7 +137,7 @@ export default function MeasurementPanel({ sourceKey }: MeasurementPanelProps) {
               onChange={(e) => setUnit(e.target.value)}
               className="w-10 rounded border border-gray-200 px-1 py-0.5"
             />
-            <span className="text-gray-400">/px</span>
+            <span className="text-gray-500">/px</span>
           </div>
         </div>
       )}

@@ -58,7 +58,7 @@ export default function ItemsColumn({
         <File size={13} className="text-sky-500" />
         <span className="text-xs font-semibold text-slate-400">Samples</span>
         {!loading && (
-          <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono bg-slate-800 text-slate-500">
+          <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono bg-slate-800 text-slate-400">
             {filtered.length !== total ? `${filtered.length} / ${total}` : total}
           </span>
         )}
@@ -66,7 +66,7 @@ export default function ItemsColumn({
 
       {/* Star filter */}
       <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-slate-700 bg-slate-900/60">
-        <span className="text-[10px] text-slate-500 shrink-0">Min rating</span>
+        <span className="text-[10px] text-slate-400 shrink-0">Min rating</span>
         <div className="flex items-center gap-1">
           {([0, 1, 2, 3] as const).map((n) => (
             <button
@@ -75,8 +75,8 @@ export default function ItemsColumn({
               onClick={() => setMinStars(n)}
               className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
                 minStars === n
-                  ? 'bg-amber-500 text-white font-medium'
-                  : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                  ? 'bg-amber-500 text-slate-900 font-medium'
+                  : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
               }`}
             >
               {n === 0 ? 'All' : '★'.repeat(n)}
@@ -88,11 +88,11 @@ export default function ItemsColumn({
       <div className="flex-1 overflow-y-auto min-h-0">
         {loading && (
           <div className="flex items-center justify-center py-8">
-            <span className="text-xs text-slate-500">Loading…</span>
+            <span className="text-xs text-slate-400">Loading…</span>
           </div>
         )}
         {!loading && filtered.length === 0 && (
-          <p className="text-xs text-slate-500 px-3 py-3">
+          <p className="text-xs text-slate-400 px-3 py-3">
             {annotationFilter !== 'all' || minStars > 0
               ? 'No samples match the current filters.'
               : 'No matching samples'}
@@ -166,7 +166,7 @@ function ItemRow({ item, isSelected, isExpanded, onSelect, onOpenInAnnotate, ser
           {isVolume && <Stack size={11} className="shrink-0 text-sky-400" />}
           <span className="truncate">{item.sample}</span>
           {isVolume && (
-            <span className={`ml-1 shrink-0 text-[9px] font-mono px-1 py-px rounded ${lit ? 'bg-blue-900 text-blue-100' : 'bg-slate-700 text-slate-400'}`}>
+            <span className={`ml-1 shrink-0 text-[9px] font-mono px-1 py-px rounded ${lit ? 'bg-blue-900 text-blue-100' : 'bg-slate-700 text-slate-300'}`}>
               {sliceCount}
             </span>
           )}
@@ -200,7 +200,7 @@ function ItemRow({ item, isSelected, isExpanded, onSelect, onOpenInAnnotate, ser
       {isVolume && (
         <CaretRight
           size={13}
-          className={`shrink-0 mr-1 self-center transition-transform ${isExpanded ? 'rotate-90' : ''} ${lit ? 'text-white' : 'text-slate-500'}`}
+          className={`shrink-0 mr-1 self-center transition-transform ${isExpanded ? 'rotate-90' : ''} ${lit ? 'text-white' : 'text-slate-400'}`}
         />
       )}
     </div>

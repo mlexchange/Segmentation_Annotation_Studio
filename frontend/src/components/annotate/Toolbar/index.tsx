@@ -65,7 +65,7 @@ function ToolButton({ tool, label, icon, keybind, activeTool, disabled, onSelect
         <span
           className={cn(
             'absolute top-1 right-1 text-[9px] font-mono font-semibold leading-none px-0.5 py-0.5 rounded',
-            isActive ? 'text-sky-200/80' : 'text-gray-400'
+            isActive ? 'text-sky-200/80' : 'text-gray-500'
           )}
         >
           {keybind.length > 1 ? keybind.slice(0, 3).toUpperCase() : keybind.toUpperCase()}
@@ -169,7 +169,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
       </div>
 
       {/* Extra (non-tool) shortcuts */}
-      <div className="text-[10px] leading-relaxed text-gray-400">
+      <div className="text-[10px] leading-relaxed text-gray-500">
         <span className="font-mono font-semibold text-gray-500">Space</span> pan (hold) ·{' '}
         <span className="font-mono font-semibold text-gray-500">X</span> next slice ·{' '}
         <span className="font-mono font-semibold text-gray-500">T</span> fit ·{' '}
@@ -252,7 +252,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
             onChange={(v) => setFillThreshold(v / 100)}
             allowLog
           />
-          <p className="text-[10px] text-gray-400 leading-snug">
+          <p className="text-[10px] text-gray-500 leading-snug">
             Click a region to flood-fill pixels within this intensity threshold of the clicked point.
           </p>
         </div>
@@ -344,7 +344,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
                 />
                 <span>
                   Avoid other-class regions
-                  <span className="block text-[10px] text-gray-400 leading-snug">
+                  <span className="block text-[10px] text-gray-500 leading-snug">
                     Uses nearby regions of other classes as "not" hints (faint red rings) so a new
                     selection won't bleed into them.
                   </span>
@@ -359,12 +359,12 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
                 />
                 <span>
                   Connected regions only
-                  <span className="block text-[10px] text-gray-400 leading-snug">
+                  <span className="block text-[10px] text-gray-500 leading-snug">
                     Keeps only the region at your click/box and drops detached speckle.
                   </span>
                 </span>
               </label>
-              <p className="text-[10px] text-gray-400 leading-snug">
+              <p className="text-[10px] text-gray-500 leading-snug">
                 Drag a box around the object (most reliable), or click it. Shift-click adds to the
                 object; <b>{REMOVE_KEY_LABEL}-click drops a "not" point (red)</b> to remove an area
                 SAM grabbed by mistake. Grabs too much? Lower <b>Detail</b> or raise <b>Tightness</b>.
@@ -419,7 +419,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
                 value={magicSigma}
                 onChange={setMagicSigma}
               />
-              <p className="text-[10px] text-gray-400 leading-snug">
+              <p className="text-[10px] text-gray-500 leading-snug">
                 Click a region on the image. For voids that leak, raise <b>Edge stop</b>; for
                 low-contrast scans, adjust contrast (Display) first.
               </p>

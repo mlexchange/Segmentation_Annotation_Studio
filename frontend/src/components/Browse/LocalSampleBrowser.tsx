@@ -91,7 +91,7 @@ export default function LocalSampleBrowser({
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 border-b border-slate-700 bg-slate-800 shrink-0">
         <File size={15} className="text-sky-500" />
         <span className="text-sm font-semibold text-slate-200">Local Samples</span>
-        <span className="text-xs text-slate-500 font-mono truncate">{joinPath(root, rel) || 'root'}</span>
+        <span className="text-xs text-slate-400 font-mono truncate">{joinPath(root, rel) || 'root'}</span>
         <label className="flex items-center gap-2 text-xs text-slate-400 ml-auto">
           Annotation
           <select
@@ -106,14 +106,14 @@ export default function LocalSampleBrowser({
             ))}
           </select>
         </label>
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono bg-slate-700 text-slate-400">
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono bg-slate-700 text-slate-300">
           {filtered.length !== allSamples.length ? `${filtered.length} / ${allSamples.length}` : allSamples.length}
         </span>
       </div>
 
       {/* Star filter */}
       <div className="flex items-center gap-1.5 px-4 py-1.5 border-b border-slate-700 bg-slate-900/60 shrink-0">
-        <span className="text-[10px] text-slate-500 shrink-0">Min rating</span>
+        <span className="text-[10px] text-slate-400 shrink-0">Min rating</span>
         <div className="flex items-center gap-1">
           {([0, 1, 2, 3] as const).map((n) => (
             <button
@@ -122,8 +122,8 @@ export default function LocalSampleBrowser({
               onClick={() => setMinStars(n)}
               className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
                 minStars === n
-                  ? 'bg-amber-500 text-white font-medium'
-                  : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                  ? 'bg-amber-500 text-slate-900 font-medium'
+                  : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
               }`}
             >
               {n === 0 ? 'All' : '★'.repeat(n)}
@@ -134,7 +134,7 @@ export default function LocalSampleBrowser({
 
       <div className="flex-1 overflow-y-auto min-h-0">
         {filtered.length === 0 && (
-          <div className="flex items-center justify-center h-full text-slate-500 text-sm">
+          <div className="flex items-center justify-center h-full text-slate-400 text-sm">
             {annotationFilter !== 'all' || minStars > 0
               ? 'No samples match the current filters.'
               : 'No image files found in this folder.'}

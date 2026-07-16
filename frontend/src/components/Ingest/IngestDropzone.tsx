@@ -217,7 +217,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
       <label className="text-sm font-medium text-sky-100 block">Ingest data into this server</label>
 
       <label className="block text-xs text-sky-300/80">
-        Classes / keywords <span className="text-sky-300/40">(comma-separated, optional)</span>
+        Classes / keywords <span className="text-sky-300/80">(comma-separated, optional)</span>
         <input
           type="text"
           value={description}
@@ -226,7 +226,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
           placeholder="e.g. air, sample, void, pore"
           className="mt-1 w-full border border-white/20 rounded-md px-2 py-1.5 text-sm bg-white/10 text-white focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-50"
         />
-        <span className="block mt-1 text-[11px] text-sky-300/55">
+        <span className="block mt-1 text-[11px] text-sky-300/80">
           Each entry is pre-created as an annotation class for this dataset in Annotate,
           and becomes an individually-searchable tag in Browse.
         </span>
@@ -281,26 +281,26 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
             {uploading ? 'Uploading…' : 'Drag an image file or folder of images here'}
           </p>
           {!uploading && (
-            <p className="text-xs text-sky-300/70">
-              or{' '}
+            <p className="text-xs text-sky-300/90 flex items-center justify-center gap-1 flex-wrap">
+              or
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
-                className="underline hover:text-sky-200"
+                className="underline hover:text-sky-200 inline-flex items-center min-h-[24px] px-1"
               >
                 choose files
               </button>
-              {' · '}
+              ·
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); dirInputRef.current?.click(); }}
-                className="underline hover:text-sky-200"
+                className="underline hover:text-sky-200 inline-flex items-center min-h-[24px] px-1"
               >
                 choose a folder
               </button>
             </p>
           )}
-          <p className="text-[10px] text-sky-300/50 pointer-events-none">TIFF, PNG, JPG, NPY</p>
+          <p className="text-[10px] text-sky-300/80 pointer-events-none">TIFF, PNG, JPG, NPY</p>
         </div>
       </div>
 
@@ -311,7 +311,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
           className="flex items-center gap-1 hover:text-sky-100 transition-colors"
         >
           {showDest ? <CaretDown size={12} /> : <CaretRight size={12} />}
-          Save uploaded images to <span className="text-sky-300/40">(optional)</span>
+          Save uploaded images to <span className="text-sky-300/80">(optional)</span>
         </button>
         {showDest && (
           <>
@@ -322,7 +322,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
               placeholder="browse/my_dataset"
               className="mt-1 w-full border border-white/20 rounded-md px-2 py-1.5 text-sm font-mono bg-white/10 text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
             />
-            <span className="block mt-1 text-[11px] text-sky-300/55">
+            <span className="block mt-1 text-[11px] text-sky-300/80">
               Destination path on the server (created if new). Auto-filled from the dropped
               file/folder — edit if you want.
             </span>

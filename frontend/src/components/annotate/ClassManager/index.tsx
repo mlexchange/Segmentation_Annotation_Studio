@@ -94,6 +94,9 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, onDuplicate, guid
   return (
     <div>
       <div
+        role="option"
+        aria-selected={isActive}
+        aria-label={cls.label}
         className={cn(
           'flex items-center gap-1.5 px-2 py-1.5 rounded-md cursor-pointer select-none min-w-0',
           isActive ? 'bg-sky-100 dark:bg-sky-900' : 'hover:bg-gray-100 dark:hover:bg-gray-800'
@@ -103,7 +106,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, onDuplicate, guid
         <span
           className={cn(
             'w-4 flex-shrink-0 text-center text-[10px] font-mono font-semibold leading-none',
-            isActive ? 'text-sky-600 dark:text-sky-300' : 'text-gray-400'
+            isActive ? 'text-sky-600 dark:text-sky-300' : 'text-gray-500'
           )}
           title={hotkey ? `Press ${hotkey} to select this class` : undefined}
           aria-hidden={!hotkey}
@@ -155,7 +158,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, onDuplicate, guid
           className="shrink-0 p-0.5 hover:text-sky-600"
           onClick={(e) => { e.stopPropagation(); toggleVisibility(cls.classId); }}
         >
-          {cls.isVisible ? <Eye size={14} /> : <EyeSlash size={14} className="text-gray-400" />}
+          {cls.isVisible ? <Eye size={14} /> : <EyeSlash size={14} className="text-gray-500" />}
         </button>
         <button
           aria-label={editing ? 'Finish editing class' : 'Edit class label and color'}
@@ -331,7 +334,7 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
           onChange={handleToggleColorblind}
           className="h-3.5 w-3.5 cursor-pointer accent-sky-600"
         />
-        <Eyedropper size={13} className={colorblindMode ? 'text-sky-600' : 'text-gray-400'} />
+        <Eyedropper size={13} className={colorblindMode ? 'text-sky-600' : 'text-gray-500'} />
         <span>Colorblind-safe colors</span>
       </label>
 
@@ -363,7 +366,7 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
 
       {suggestions.length > 0 && (
         <div className="flex flex-wrap items-center gap-1 mb-1">
-          <span className="text-[10px] uppercase tracking-wide text-gray-400 mr-0.5">Quick add</span>
+          <span className="text-[10px] uppercase tracking-wide text-gray-500 mr-0.5">Quick add</span>
           {suggestions.map((label) => (
             <button
               key={label}
@@ -381,7 +384,7 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
 
       <div role="listbox" aria-label="Annotation classes" className="flex flex-col gap-0.5">
         {classes.length === 0 && (
-          <p className="text-xs text-gray-400 text-center py-2">No classes yet. Click + to add one.</p>
+          <p className="text-xs text-gray-500 text-center py-2">No classes yet. Click + to add one.</p>
         )}
         {classes.map((cls, idx) => (
           <ClassRow

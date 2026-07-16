@@ -21,6 +21,25 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(appVersion()),
     __GIT_COMMIT__: JSON.stringify(gitCommit()),
   },
+  // Split stable vendors into long-cache chunks; the heavy Annotate-only vendors
+  // (konva, polygon-clipping) land in their own chunks that load with the lazy
+  // Annotate page rather than bloating the initial /connect entry.
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (!id.includes('node_modules')) return;
+          if (id.includes('react-konva') || id.includes('/konva/')) return 'konva';
+          if (id.includes('polygon-clipping') || id.includes('splaytree') || id.includes('robust-predicates')) return 'polygon-clipping';
+          if (id.includes('@phosphor-icons')) return 'icons';
+          if (id.includes('@tanstack')) return 'react-query';
+          if (id.includes('react-router') || id.includes('/cookie/') || id.includes('set-cookie-parser')) return 'react-router';
+          if (id.includes('/react-dom/') || id.includes('/react/') || id.includes('/scheduler/')) return 'react';
+          return 'vendor';
+        },
+      },
+    },
+  },
   // Transformers.js bundles onnxruntime-web (wasm/webgpu); let it load its own
   // assets at runtime rather than having Vite pre-bundle/optimize it.
   optimizeDeps: { exclude: ['@huggingface/transformers'] },

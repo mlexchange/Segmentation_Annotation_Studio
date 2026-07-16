@@ -23,6 +23,10 @@ TILED_PORT="${TILED_PORT:-8010}"
 BACKEND_PORT="${BACKEND_PORT:-8002}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 DOCS_PORT="${DOCS_PORT:-8000}"
+# PROD=1 (or SERVE_MODE=prod): build the optimized SPA and have the backend serve
+# it from backend/static/ (single origin, gzip) instead of the Vite dev server.
+if [ "${PROD:-0}" = "1" ] || [ "${SERVE_MODE:-}" = "prod" ]; then FRONTEND_MODE="prod"; else FRONTEND_MODE="dev"; fi
+STATIC_DIR="$BACKEND_DIR/static"
 RUN_DIR="$SCRIPT_DIR/.run"
 TILED_PID_FILE="$RUN_DIR/tiled.pid"
 BACKEND_PID_FILE="$RUN_DIR/backend.pid"
@@ -525,6 +529,29 @@ if [ "$TILED_READY" != 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Production SPA build (PROD=1): build the optimized frontend and stage it in
+# backend/static/ BEFORE the backend starts — the SPA mount is decided at import
+# time. In dev mode, remove any stale build so the backend stays API-only and the
+# Vite dev server owns the SPA.
+# ---------------------------------------------------------------------------
+if [ "$FRONTEND_MODE" = "prod" ]; then
+  echo -e "${CYAN}==> Building production frontend...${NC}"
+  cd "$FRONTEND_DIR"
+  if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}    node_modules not found — running npm install...${NC}"
+    "${NPM_CMD[@]}" install
+  fi
+  "${NPM_CMD[@]}" run build
+  rm -rf "$STATIC_DIR"
+  mkdir -p "$STATIC_DIR"
+  cp -R "$FRONTEND_DIR/dist/." "$STATIC_DIR/"
+  cd "$SCRIPT_DIR"
+  echo -e "${GREEN}    Built SPA → backend/static (served by the backend at :${BACKEND_PORT}).${NC}"
+else
+  rm -rf "$STATIC_DIR"  # ensure the backend serves API-only in dev
+fi
+
+# ---------------------------------------------------------------------------
 # Backend
 # ---------------------------------------------------------------------------
 echo -e "${CYAN}==> Starting backend (port ${BACKEND_PORT})...${NC}"
@@ -571,21 +598,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Frontend
+# Frontend (dev only — in prod the backend already serves the built SPA)
 # ---------------------------------------------------------------------------
-echo -e "${CYAN}==> Starting frontend (port ${FRONTEND_PORT})...${NC}"
+FRONTEND_PID=""
+if [ "$FRONTEND_MODE" = "prod" ]; then
+  echo -e "${CYAN}==> Frontend served by the backend (prod build) at http://127.0.0.1:${BACKEND_PORT}${NC}"
+else
+  echo -e "${CYAN}==> Starting frontend (port ${FRONTEND_PORT})...${NC}"
 
-cd "$FRONTEND_DIR"
+  cd "$FRONTEND_DIR"
 
-if [ ! -d "node_modules" ]; then
-  echo -e "${YELLOW}    node_modules not found — running npm install...${NC}"
-  "${NPM_CMD[@]}" install
+  if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}    node_modules not found — running npm install...${NC}"
+    "${NPM_CMD[@]}" install
+  fi
+
+  "${NPM_CMD[@]}" run dev -- --host --port "$FRONTEND_PORT" &
+  FRONTEND_PID=$!
+  echo "$FRONTEND_PID" > "$FRONTEND_PID_FILE"
+  echo -e "${GREEN}    Frontend PID: $FRONTEND_PID${NC}"
 fi
-
-"${NPM_CMD[@]}" run dev -- --host --port "$FRONTEND_PORT" &
-FRONTEND_PID=$!
-echo "$FRONTEND_PID" > "$FRONTEND_PID_FILE"
-echo -e "${GREEN}    Frontend PID: $FRONTEND_PID${NC}"
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -594,7 +626,11 @@ echo ""
 echo -e "${GREEN}==========================================${NC}"
   echo -e "${GREEN}  Segmentation Annotation Studio is running!${NC}"
 echo -e "${GREEN}  Tiled    : http://127.0.0.1:${TILED_PORT} (public / anonymous)${NC}"
-echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
+if [ "$FRONTEND_MODE" = "prod" ]; then
+  echo -e "${GREEN}  App (prod build) : http://127.0.0.1:${BACKEND_PORT}${NC}"
+else
+  echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
+fi
 echo -e "${GREEN}  Backend  : http://127.0.0.1:${BACKEND_PORT}${NC}"
 if [ -n "$DOCS_PID" ]; then
   echo -e "${GREEN}  Docs     : http://127.0.0.1:${DOCS_PORT}${NC}"

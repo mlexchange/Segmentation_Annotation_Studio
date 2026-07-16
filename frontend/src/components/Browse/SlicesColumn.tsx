@@ -65,7 +65,7 @@ export default function SlicesColumn({
           Slices
         </span>
         {!loading && (
-          <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono bg-slate-800 text-slate-500">
+          <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-mono bg-slate-800 text-slate-400">
             {slices.length}
           </span>
         )}
@@ -81,18 +81,18 @@ export default function SlicesColumn({
         <PencilSimple size={13} />
         Open all {slices.length || ''} slices as a volume
       </button>
-      <p className="px-3 pb-2 text-[10px] text-slate-500 leading-snug">
+      <p className="px-3 pb-2 text-[10px] text-slate-400 leading-snug">
         …or pick one slice below to open it on its own.
       </p>
 
       <div className="flex-1 overflow-y-auto min-h-0">
         {loading && (
           <div className="flex items-center justify-center py-8">
-            <span className="text-xs text-slate-500">Loading slices…</span>
+            <span className="text-xs text-slate-400">Loading slices…</span>
           </div>
         )}
         {!loading && slices.length === 0 && (
-          <p className="text-xs text-slate-500 px-3 py-3">No slices found.</p>
+          <p className="text-xs text-slate-400 px-3 py-3">No slices found.</p>
         )}
         {!loading &&
           slices.map((slice) => (

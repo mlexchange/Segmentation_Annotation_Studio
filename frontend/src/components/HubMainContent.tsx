@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Routes, Route, useNavigate, useLocation } from "react-router";
 import { cn } from "@/lib/utils";
 
@@ -55,16 +56,18 @@ export default function HubMainContent({ routes, className }: HubMainContentProp
                     fullBleed ? "overflow-hidden" : "overflow-y-auto",
                 )}
             >
-                <Routes>
-                    {routes.map((route) => (
-                        <Route
-                            key={route.path}
-                            path={route.path}
-                            element={route.element}
-                        />
-                    ))}
-                    <Route path="*" element={<NotFoundFallback routes={routes} />} />
-                </Routes>
+                <Suspense fallback={<div className="flex h-full w-full items-center justify-center text-white/70 text-sm">Loading…</div>}>
+                    <Routes>
+                        {routes.map((route) => (
+                            <Route
+                                key={route.path}
+                                path={route.path}
+                                element={route.element}
+                            />
+                        ))}
+                        <Route path="*" element={<NotFoundFallback routes={routes} />} />
+                    </Routes>
+                </Suspense>
             </div>
         </main>
     );

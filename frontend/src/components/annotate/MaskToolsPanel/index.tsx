@@ -47,7 +47,7 @@ export default function MaskToolsPanel({ sourceKey, activeClassId }: MaskToolsPa
       <span className="flex items-center gap-1.5 text-xs font-semibold uppercase text-gray-500 tracking-wide">
         <Stack size={13} /> Cross-slice
       </span>
-      <p className="text-[10px] text-gray-400 -mt-1">Acts on ‘{className}’.</p>
+      <p className="text-[10px] text-gray-500 -mt-1">Acts on ‘{className}’.</p>
 
       <button
         className={btn}

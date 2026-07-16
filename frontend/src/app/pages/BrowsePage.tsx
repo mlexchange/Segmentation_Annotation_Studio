@@ -66,7 +66,7 @@ export default function BrowsePage() {
         <span>
           <span className="font-medium text-slate-300">{label}</span>
           {sampleCount !== null && (
-            <span className="ml-2 text-slate-500">
+            <span className="ml-2 text-slate-400">
               · {sampleCount} sample{sampleCount !== 1 ? 's' : ''}
             </span>
           )}

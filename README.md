@@ -5,6 +5,7 @@ Manual image segmentation tool for producing COCO datasets for SAM3 fine-tuning.
 ## Quick start
 
 ```bash
+chmod +x start_all.sh
 ./start_all.sh
 ```
 

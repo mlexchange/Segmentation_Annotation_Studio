@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy } from 'react';
 import { useNavigate, useLocation, Navigate } from 'react-router';
 import './App.css';
 import { RouteItem } from '@/types/navigationRouterTypes';
@@ -7,10 +7,12 @@ import { useHubSelectedTabs } from '@/hooks/useHubSelectedTabs';
 import { DOCS_URL, FEEDBACK_FORM_URL, FEEDBACK_ENTRY_ID } from '@/config';
 import { buildFeedbackContext, buildFeedbackUrl } from '@/lib/feedbackContext';
 import { PlugsConnected, PencilSimple, MagnifyingGlass, BookOpen } from '@phosphor-icons/react';
-import ConnectPage from './pages/ConnectPage';
-import AnnotatePage from './pages/AnnotatePage';
-import BrowsePage from './pages/BrowsePage';
-import ReferencePage from './pages/ReferencePage';
+// Lazy-loaded pages: keeps the heavy Annotate stack (konva, polygon-clipping,
+// magicwand, canvas) out of the initial /connect bundle — each page is its own chunk.
+const ConnectPage = lazy(() => import('./pages/ConnectPage'));
+const AnnotatePage = lazy(() => import('./pages/AnnotatePage'));
+const BrowsePage = lazy(() => import('./pages/BrowsePage'));
+const ReferencePage = lazy(() => import('./pages/ReferencePage'));
 import CustomizePages from '@/components/CustomizePages';
 import IframeModal from '@/components/IframeModal';
 

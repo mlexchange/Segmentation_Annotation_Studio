@@ -218,6 +218,7 @@ export default function ConnectPage() {
                 <p className="text-sky-300 text-sm">Loading servers…</p>
               ) : (
                 <select
+                  aria-label="Tiled server"
                   className="w-full border border-white/20 rounded-md px-3 py-2 text-sm bg-white/10 text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
                   value={selectedServerUri}
                   onChange={(e) => { setSelectedServerUri(e.target.value); setContainerDir(''); setSelectedContainer(''); setConnected(false); setStatus(''); }}
@@ -241,11 +242,11 @@ export default function ConnectPage() {
                   className="flex items-center gap-2 text-sm font-medium text-sky-100 hover:text-white transition-colors"
                 >
                   {showDatasetPicker ? <CaretDown size={14} /> : <CaretRight size={14} />}
-                  <Stack size={15} /> Dataset to view <span className="text-sky-300/60 font-normal">(optional)</span>
+                  <Stack size={15} /> Dataset to view <span className="text-sky-300/80 font-normal">(optional)</span>
                 </button>
                 {showDatasetPicker && (
                   <div className="space-y-2 pl-1">
-                    <p className="text-xs text-sky-300/70">
+                    <p className="text-xs text-sky-300/90">
                       Which collection on the server the <span className="font-medium">Browse</span> tab will show.
                       Most people can leave this blank — it auto-detects, and ingesting below fills it in for you.
                     </p>
@@ -260,7 +261,7 @@ export default function ConnectPage() {
                         const target = arr.slice(0, i + 1).join('/');
                         return (
                           <span key={target} className="flex items-center gap-1">
-                            <span className="text-sky-300/70">/</span>
+                            <span className="text-sky-300/90">/</span>
                             <button
                               className="px-2 py-0.5 rounded hover:bg-white/10 text-sky-200"
                               onClick={() => { setContainerDir(target); setSelectedContainer(''); setConnected(false); }}
@@ -294,7 +295,7 @@ export default function ConnectPage() {
                         </button>
                       ))}
                       {tiledEntries.filter((e) => e.is_dir).length === 0 && (
-                        <div className="px-3 py-3 text-sky-300/60 text-xs">
+                        <div className="px-3 py-3 text-sky-300/80 text-xs">
                           No sub-containers. Leave unset to auto-discover, or pick a parent.
                         </div>
                       )}
@@ -352,7 +353,7 @@ export default function ConnectPage() {
                 onAnnotate={annotateIngested}
               />
             ) : (
-              <p className="text-xs text-sky-300/70">Select a server above to ingest data.</p>
+              <p className="text-xs text-sky-300/90">Select a server above to ingest data.</p>
             )}
           </section>
         )}
@@ -394,7 +395,7 @@ export default function ConnectPage() {
                     const target = arr.slice(0, i + 1).join('/');
                     return (
                       <span key={target} className="flex items-center gap-1">
-                        <span className="text-sky-300/70">/</span>
+                        <span className="text-sky-300/90">/</span>
                         <button
                           className="px-2 py-0.5 rounded hover:bg-white/10 text-sky-200"
                           onClick={() => { setBrowseDir(target); setSelectedFolder(''); }}
@@ -442,7 +443,7 @@ export default function ConnectPage() {
                       ))}
 
                   {!localLoading && localEntries.filter((e) => e.is_dir).length === 0 && (
-                    <div className="px-3 py-4 text-sky-300/60 text-xs">No sub-folders here.</div>
+                    <div className="px-3 py-4 text-sky-300/80 text-xs">No sub-folders here.</div>
                   )}
                 </div>
 

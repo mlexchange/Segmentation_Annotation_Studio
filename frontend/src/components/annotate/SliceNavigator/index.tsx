@@ -17,7 +17,7 @@ export default function SliceNavigator() {
     : null;
 
   if (!meta || !sourceKey) {
-    return <p className="text-xs text-gray-400">No dataset loaded.</p>;
+    return <p className="text-xs text-gray-500">No dataset loaded.</p>;
   }
 
   const n = meta.nSlices;

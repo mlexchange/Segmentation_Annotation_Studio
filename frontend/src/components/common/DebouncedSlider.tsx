@@ -84,7 +84,7 @@ export default function DebouncedSlider({
           </label>
           {allowLog && (
             <label
-              className="flex items-center gap-1 text-[10px] text-gray-400 cursor-pointer select-none"
+              className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer select-none"
               title="Logarithmic slider scaling"
             >
               <input
@@ -106,7 +106,7 @@ export default function DebouncedSlider({
         value={toPos(local)}
         onChange={(e) => handle(fromPos(Number(e.target.value)))}
         className={className}
-        aria-label={ariaLabel}
+        aria-label={ariaLabel ?? (typeof label === 'string' ? label : undefined)}
       />
     </>
   );

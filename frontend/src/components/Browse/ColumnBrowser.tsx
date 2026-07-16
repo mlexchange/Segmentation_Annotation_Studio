@@ -230,7 +230,7 @@ export default function ColumnBrowser({
         >
           {state.columns.length === 0 && !state.showingAll && !state.facetsLoading && (
             <div className="flex items-center justify-center flex-1">
-              <p className="text-sm text-slate-500 text-center px-6">
+              <p className="text-sm text-slate-400 text-center px-6">
                 {state.connectionStatus === 'disconnected'
                   ? 'Connect to a Tiled server to browse.'
                   : state.facets.length === 0
@@ -401,7 +401,7 @@ function Toolbar({
         </label>
       </div>
 
-      {facetsLoading && <span className="text-xs text-slate-500">Loading fields…</span>}
+      {facetsLoading && <span className="text-xs text-slate-400">Loading fields…</span>}
 
       <div className="flex items-center gap-1 ml-auto">
         {activeFilterCount > 0 && (
@@ -426,7 +426,7 @@ function Toolbar({
           type="button"
           onClick={onRefresh}
           title="Refresh"
-          className="flex items-center gap-1 px-2 py-1 rounded text-xs text-slate-500 hover:bg-slate-700 transition-colors"
+          className="flex items-center gap-1 px-2 py-1 rounded text-xs text-slate-400 hover:bg-slate-700 transition-colors"
         >
           <ArrowsClockwise size={13} />
         </button>
