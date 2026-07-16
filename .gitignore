@@ -60,4 +60,6 @@ frontend/public/models/
 site/
 
 # peter's version of the repo
-peter/.reset-backups/
+peter/
+
+.reset-backups/
