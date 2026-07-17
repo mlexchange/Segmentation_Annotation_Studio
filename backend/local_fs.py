@@ -13,8 +13,6 @@ Supported array formats
 
 from __future__ import annotations
 
-IMAGE_EXTS: frozenset[str] = frozenset({".tif", ".tiff", ".npy", ".png", ".jpg", ".jpeg"})
-
 import logging
 import os
 from pathlib import Path
@@ -22,6 +20,8 @@ from typing import Any
 
 import numpy as np
 from fastapi import HTTPException
+
+IMAGE_EXTS: frozenset[str] = frozenset({".tif", ".tiff", ".npy", ".png", ".jpg", ".jpeg"})
 
 logger = logging.getLogger(__name__)
 

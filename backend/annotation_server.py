@@ -24,14 +24,18 @@ import shutil
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from starlette.middleware.gzip import GZipMiddleware
 
+import annotation_thumbnails
 import arrays as arrays_mod
 import drafts as drafts_mod
 import export_jobs
@@ -40,16 +44,32 @@ import images as images_mod
 import ingest as ingest_mod
 import local_fs
 from browse_helpers import (
+    _SINGLE_VALUE_FACET_RAW_KEYS,
     FieldMapping,
     build_field_mapping,
     distinct_from_rows,
     scoped_metadata_rows,
     tiled_distinct_values,
     tiled_search_items,
-    _SINGLE_VALUE_FACET_RAW_KEYS,
 )
 from cache import TTLCache
-from schemas import DraftPayload, ExportRequest, ExportSourceItem, GuidePayload, ImageMeta, MeasureRequest, SaveVersionRequest
+from coco_export import (
+    build_export_plan,
+    lightly_classes_map,
+    shape_to_mask,
+    write_coco_split,
+    write_lightly_split,
+)
+from schemas import (
+    DraftPayload,
+    ExportRequest,
+    ExportSourceItem,
+    GuidePayload,
+    ImageMeta,
+    MeasureRequest,
+    SaveVersionRequest,
+)
+from source_keys import parse_source_key
 from thumbnails import render_thumbnail
 from tiled_clients import (
     api_key_for_uri,
@@ -89,7 +109,6 @@ app.add_middleware(
 # Compress text responses (SPA JS/CSS, JSON). Matters for the production path where
 # FastAPI serves the built SPA + API from one origin; PNGs are already compressed so
 # the ~500-byte floor skips tiny/binary payloads. (Dev uses the Vite server instead.)
-from starlette.middleware.gzip import GZipMiddleware  # noqa: E402
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
@@ -660,11 +679,6 @@ async def measure_region(
     display-rendered image), so results are meaningful for scientific data.
     """
     def _run() -> dict:
-        import numpy as np
-        import arrays as arrays_mod
-        from coco_export import shape_to_mask
-        from source_keys import parse_source_key
-
         parsed = parse_source_key(source_key)
         kind = parsed["kind"] or "local"
         node = arrays_mod.resolve_array(parsed["path"] or "", kind, parsed["server_uri"])
@@ -755,9 +769,6 @@ async def save_annotation_version(
     thumbnail was generated.
     """
     def _run() -> dict:
-        import annotation_thumbnails
-        import threading
-
         payload = body.payload.model_dump()
         # Persist version JSON first so the critical data lands quickly.
         result = drafts_mod.save_version(
@@ -929,9 +940,6 @@ def _run_export_job(
 ) -> None:
     """Background worker: render+rasterize all sources, write the dataset tree
     (images + masks + COCO), zip it for download, then sync Tiled metadata."""
-    from coco_export import build_export_plan, write_coco_split, write_lightly_split, lightly_classes_map
-    import images as images_mod_local
-    import arrays as arrays_mod_local
     lightly = getattr(payload, "format", "coco_sam3") == "lightly_dinov3"
 
     try:
@@ -949,7 +957,7 @@ def _run_export_job(
 
         for item in source_items:
             export_jobs.log(jid, f"Reading {item.source} …")
-            node = arrays_mod_local.resolve_array(item.source, item.kind, item.server_uri)
+            node = arrays_mod.resolve_array(item.source, item.kind, item.server_uri)
             tmp = ExportRequest(
                 kind=item.kind,
                 source=item.source,
@@ -968,10 +976,10 @@ def _run_export_job(
 
             plan = build_export_plan(
                 node, tmp,
-                render_slice_fn=images_mod_local.render_slice,
-                array_shape_meta_fn=arrays_mod_local.array_shape_meta,
-                read_slice_fn=arrays_mod_local.read_slice,
-                sample_global_stats_fn=images_mod_local._sample_global_stats,
+                render_slice_fn=images_mod.render_slice,
+                array_shape_meta_fn=arrays_mod.array_shape_meta,
+                read_slice_fn=arrays_mod.read_slice,
+                sample_global_stats_fn=images_mod._sample_global_stats,
                 progress_cb=_cb,
                 include_polygons=payload.include_polygons,
             )
@@ -986,9 +994,8 @@ def _run_export_job(
 
         # Stamp the annotator so downloads are self-identifying for external
         # inter-annotator-agreement analysis (folder name + COCO info + manifest).
-        from datetime import datetime as _dt, timezone as _tz
         annotator = (payload.annotator or "").strip()
-        exported_at = _dt.now(_tz.utc).isoformat()
+        exported_at = datetime.now(timezone.utc).isoformat()
         if annotator:
             merged_info = {**(merged_info or {}), "annotator": annotator}
         source_keys = [

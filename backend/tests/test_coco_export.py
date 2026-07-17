@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import math
-import pytest
+
 import numpy as np
+import pytest
 
 
 def test_brush_width_parity() -> None:
@@ -42,8 +43,9 @@ def test_brush_width_parity() -> None:
 
 def test_brush_erase_ring() -> None:
     """Paint a disk, erase its center -> ring. Area should match expected annulus."""
-    from coco_export import _brush_mask
     import pycocotools.mask as mask_utils
+
+    from coco_export import _brush_mask
 
     h, w = 100, 100
     cx, cy = 50.0, 50.0
@@ -103,8 +105,9 @@ def test_rect_normalization_all_directions() -> None:
 
 def test_rle_json_serializable() -> None:
     """RLE counts must be ascii-decoded so the annotation is JSON-serializable."""
-    from coco_export import _rect_mask, mask_to_coco_ann
     import json
+
+    from coco_export import _rect_mask, mask_to_coco_ann
 
     h, w = 50, 50
     mask = _rect_mask(5, 5, 10, 10, h, w)
@@ -119,8 +122,9 @@ def test_mask_export_writes_semantic_and_per_class(tmp_path) -> None:
     """build_export_plan emits label-map + per-class masks; write_coco_split lays them out."""
     import numpy as np
     from PIL import Image
+
     from coco_export import build_export_plan, write_coco_split
-    from schemas import ExportRequest, AnnotationClass, RenderOpts
+    from schemas import AnnotationClass, ExportRequest, RenderOpts
 
     h, w = 40, 40
     poly = {"id": "s1", "kind": "polygon", "classId": 7, "points": [5, 5, 25, 5, 25, 25, 5, 25]}
@@ -180,8 +184,9 @@ def test_mask_export_writes_semantic_and_per_class(tmp_path) -> None:
 def test_export_polygons_opt_in() -> None:
     """include_polygons=True populates segmentation_poly (reusing polygon points)."""
     import numpy as np
+
     from coco_export import build_export_plan
-    from schemas import ExportRequest, AnnotationClass, RenderOpts
+    from schemas import AnnotationClass, ExportRequest, RenderOpts
 
     h, w = 30, 30
     poly = {"id": "s1", "kind": "polygon", "classId": 1, "points": [4, 4, 20, 4, 20, 20, 4, 20]}
@@ -204,8 +209,9 @@ def test_export_polygons_opt_in() -> None:
 
 def test_zero_area_polygon_skipped() -> None:
     """A 1-px degenerate polygon produces zero area."""
-    from coco_export import _polygon_mask
     import pycocotools.mask as mask_utils
+
+    from coco_export import _polygon_mask
 
     h, w = 50, 50
     mask = _polygon_mask([10.0, 10.0, 10.0, 10.0], h, w)

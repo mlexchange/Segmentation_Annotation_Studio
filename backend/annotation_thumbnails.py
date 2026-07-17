@@ -12,7 +12,8 @@ from io import BytesIO
 from typing import Any
 
 import numpy as np
-from PIL import Image as PILImage, ImageDraw
+from PIL import Image as PILImage
+from PIL import ImageDraw
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ def render_annotated_thumbnail(
     """
     try:
         import arrays as arrays_mod
-        from thumbnails import _prepare_rgb, _prepare_intensity
+        from thumbnails import _prepare_intensity, _prepare_rgb
     except ImportError as exc:
         logger.warning("annotation_thumbnails: missing module: %s", exc)
         return None

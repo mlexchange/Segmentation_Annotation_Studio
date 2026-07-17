@@ -34,8 +34,8 @@ from typing import Any
 import numpy as np
 from fastapi import HTTPException
 
-from cache import TTLCache
 import local_fs
+from cache import TTLCache
 from tiled_clients import api_key_for_uri, get_tiled_client
 
 logger = logging.getLogger(__name__)

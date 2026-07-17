@@ -5,16 +5,19 @@ Ports mlex ShapeConversion rasterizers, replacing matplotlib contains_points
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
 import random
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pycocotools.mask as mask_utils
+from PIL import Image as PILImage
 from skimage import draw, measure
 
 logger = logging.getLogger(__name__)
@@ -140,9 +143,6 @@ def _encode_png(arr: np.ndarray, compress_level: int = 0) -> bytes:
     Masks are tiny and pre-binarized; ``compress_level=0`` (store) is the fastest
     and the size cost is negligible.
     """
-    import io
-    from PIL import Image as PILImage
-
     buf = io.BytesIO()
     PILImage.fromarray(arr, mode="L").save(buf, format="PNG", compress_level=compress_level)
     return buf.getvalue()
@@ -465,10 +465,6 @@ def build_export_plan(
     Returns:
         Dict with splits (each has images, categories, annotations, info).
     """
-    import io
-    from concurrent.futures import ThreadPoolExecutor
-    from PIL import Image as PILImage
-
     meta = array_shape_meta_fn(node)
     h, w = meta["height"], meta["width"]
     render_opts = payload.render.model_dump() if hasattr(payload.render, "model_dump") else dict(payload.render)
