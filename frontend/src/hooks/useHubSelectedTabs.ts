@@ -2,6 +2,10 @@ import { useState, useEffect } from 'react';
 
 const STORAGE_KEY = 'sam3_hub_selected_tab_paths';
 
+/**
+ * useHubSelectedTabs — persists the set of selected hub tab paths in localStorage.
+ * Returns the stored paths (null if none) and a setter that writes through to storage.
+ */
 export function useHubSelectedTabs() {
   const [selectedPaths, setSelectedPathsState] = useState<string[] | null>(() => {
     try {
@@ -18,6 +22,7 @@ export function useHubSelectedTabs() {
     return null;
   });
 
+  /** Persist `paths` to localStorage and update state; logs on storage failure. */
   const setSelectedPaths = (paths: string[]) => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(paths));

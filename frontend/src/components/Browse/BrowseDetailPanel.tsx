@@ -8,6 +8,8 @@ interface BrowseDetailPanelProps {
   onClose: () => void;
   serverUri?: string;
   onOpenInAnnotate?: () => void;
+  /** Panel width in px; the preview image scales with it. */
+  width?: number;
 }
 
 const SECTION_ORDER = [
@@ -19,6 +21,7 @@ const SECTION_ORDER = [
   { label: 'Chemistry', keys: ['OrganicSalt', 'OrganicSalt_Abbrev', 'MetalSalt', 'MetalSalt_Abbrev', 'Solvent', 'Concentration_M', 'MixingRatio', 'TargetStoichiometry', 'Stoichiometry'] },
 ];
 
+/** Render a metadata value for display: arrays/objects are summarised and ISO dates are localised. */
 function formatValue(v: unknown): string {
   if (v === null || v === undefined) return '—';
   if (Array.isArray(v)) return `[${v.length} items]`;
@@ -36,6 +39,7 @@ function formatValue(v: unknown): string {
   return text;
 }
 
+/** Map a raw metadata key to a friendlier label, falling back to the key itself. */
 function displayKey(key: string): string {
   const aliases: Record<string, string> = {
     studio_annotated: 'Annotated',
@@ -46,8 +50,18 @@ function displayKey(key: string): string {
   return aliases[key] ?? key;
 }
 
-export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAnnotate }: BrowseDetailPanelProps) {
+/**
+ * BrowseDetailPanel — side panel showing a sample's thumbnail and grouped metadata.
+ * Fetches a backend thumbnail (size quantised to the panel width) and offers Open in Annotate.
+ */
+export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAnnotate, width = 340 }: BrowseDetailPanelProps) {
   const meta = item.metadata;
+
+  // Preview scales with the panel width. The fetched thumbnail size is
+  // quantised to 128px steps so resizing doesn't spam the backend.
+  const previewHeight = Math.round(Math.min(Math.max(width * 0.9, 180), 760));
+  // Backend caps thumbnail size at 512; request in 128px steps to limit refetches.
+  const requestedSize = Math.min(512, Math.max(256, Math.ceil(width / 128) * 128));
 
   // Thumbnail state
   const [thumbSrc, setThumbSrc] = useState<string | null>(null);
@@ -56,7 +70,7 @@ export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAn
   useEffect(() => {
     setThumbSrc(null);
     setThumbStatus('loading');
-    const params = new URLSearchParams({ tiled_path: item.path, size: '320' });
+    const params = new URLSearchParams({ tiled_path: item.path, size: String(requestedSize) });
     if (serverUri) params.set('server_uri', serverUri);
     const url = `${API_BASE}/api/browse/thumbnail?${params}`;
     const img = new window.Image();
@@ -64,7 +78,7 @@ export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAn
     img.onerror = () => setThumbStatus('error');
     img.src = url;
     return () => { img.onload = null; img.onerror = null; };
-  }, [item.path, serverUri]);
+  }, [item.path, serverUri, requestedSize]);
 
   // Build sections, collecting remaining keys for "Other"
   const shown = new Set<string>();
@@ -120,10 +134,10 @@ export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAn
         </button>
       </div>
 
-      {/* Thumbnail */}
+      {/* Thumbnail — scales with the panel width */}
       <div
         className="shrink-0 border-b flex items-center justify-center"
-        style={{ borderColor: '#334155', background: '#0a1120', height: thumbStatus === 'error' ? 0 : 180, overflow: 'hidden' }}
+        style={{ borderColor: '#334155', background: '#0a1120', height: thumbStatus === 'error' ? 0 : previewHeight, overflow: 'hidden' }}
       >
         {thumbStatus === 'loading' && (
           <div className="flex flex-col items-center gap-2">
@@ -135,7 +149,7 @@ export default function BrowseDetailPanel({ item, onClose, serverUri, onOpenInAn
           <img
             src={thumbSrc}
             alt="Array preview"
-            style={{ maxHeight: 180, maxWidth: '100%', objectFit: 'contain', imageRendering: 'pixelated' }}
+            style={{ maxHeight: previewHeight, maxWidth: '100%', objectFit: 'contain', imageRendering: 'pixelated' }}
           />
         )}
         {thumbStatus === 'error' && null}

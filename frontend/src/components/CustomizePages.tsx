@@ -9,23 +9,30 @@ export type CustomizePagesProps = {
   onSelectionChange: (selectedPaths: string[]) => void;
 };
 
-export default function CustomizePages({ 
-  routes, 
-  selectedPaths, 
+/**
+ * CustomizePages — floating button + full-screen modal for choosing which route tabs are visible.
+ * Edits a temporary selection and commits it via onSelectionChange on Apply.
+ */
+export default function CustomizePages({
+  routes,
+  selectedPaths,
   onSelectionChange
 }: CustomizePagesProps) {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [tempSelected, setTempSelected] = useState<Set<string>>(() => new Set(selectedPaths));
 
+  /** Open the modal, seeding the temp selection from the current selection. */
   const openModal = () => {
     setTempSelected(new Set(selectedPaths));
     setIsModalOpen(true);
   };
 
+  /** Close the modal without committing changes. */
   const closeModal = () => {
     setIsModalOpen(false);
   };
 
+  /** Add or remove a route path from the temporary selection. */
   const toggleTab = (path: string) => {
     setTempSelected(prev => {
       const next = new Set(prev);
@@ -38,12 +45,14 @@ export default function CustomizePages({
     });
   };
 
+  /** Commit the temporary selection (ignored if empty) and close. */
   const handleApply = () => {
     if (tempSelected.size === 0) return;
     onSelectionChange(Array.from(tempSelected));
     closeModal();
   };
 
+  /** Discard changes, reset the temp selection, and close. */
   const handleCancel = () => {
     setTempSelected(new Set(selectedPaths));
     closeModal();

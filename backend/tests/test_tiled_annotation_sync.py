@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from source_keys import parse_source_key
-from tiled_annotation_sync import annotation_metadata, STUDIO_ANNOTATED
+from tiled_annotation_sync import STUDIO_ANNOTATED, annotation_metadata
 
 
 def test_parse_local_source_key() -> None:

@@ -34,23 +34,29 @@ from typing import Any
 import numpy as np
 from fastapi import HTTPException
 
-from cache import TTLCache
 import local_fs
+from cache import TTLCache
 from tiled_clients import api_key_for_uri, get_tiled_client
 
 logger = logging.getLogger(__name__)
 _node_cache: TTLCache = TTLCache(ttl_seconds=300.0, max_entries=32)
 
 
-def resolve_array(source: str, kind: str, server_uri: str | None = None) -> Any:
+def resolve_array(
+    source: str,
+    kind: str,
+    server_uri: str | None = None,
+    root: str | None = None,
+) -> Any:
     """Return a lazily-sliceable array node for *source*.
 
-    Results are cached by ``(kind, source, server_uri)`` for 5 minutes.
+    Results are cached by ``(kind, source, server_uri, root)`` for 5 minutes.
 
     Args:
         source: Tiled path (slash-separated) or local relative path.
         kind: ``"tiled"`` or ``"local"``.
         server_uri: Tiled server URI; only used when ``kind == "tiled"``.
+        root: Granted absolute local root; only used when ``kind == "local"``.
 
     Returns:
         A Tiled array node or a NumPy-compatible array.
@@ -58,7 +64,7 @@ def resolve_array(source: str, kind: str, server_uri: str | None = None) -> Any:
     Raises:
         HTTPException: 404 if the path does not exist; 422 for unknown kind.
     """
-    key = (kind, source, server_uri or "")
+    key = (kind, source, server_uri or "", root or "")
     cached = _node_cache.get(key)
     if cached is not None:
         return cached
@@ -72,13 +78,91 @@ def resolve_array(source: str, kind: str, server_uri: str | None = None) -> Any:
                 node = node[part]
             except KeyError as exc:
                 raise HTTPException(404, f"Tiled path not found: {source!r}") from exc
+        # Drag-and-drop ingest nests datasets as browse/<dataset>/<array(s)>, so
+        # a Browse selection resolves to the wrapping container — descend to the
+        # array or slice-stack it represents. Direct array paths are unchanged.
+        node = _descend_to_stack(node)
     elif kind == "local":
-        node = local_fs.open_array(source)
+        node = local_fs.open_array(source, root)
     else:
         raise HTTPException(422, f"Unknown source kind: {kind!r}")
 
     _node_cache.set(key, node)
     return node
+
+
+def _is_container_node(node: Any) -> bool:
+    """True if *node* is a Tiled container (vs. an array/leaf) node."""
+    sf = getattr(node, "structure_family", None)
+    return str(getattr(sf, "value", sf)) == "container"
+
+
+def _descend_to_stack(node: Any, max_depth: int = 8) -> Any:
+    """Resolve a Browse selection to the array/stack it should open.
+
+    Drag-and-drop ingest nests datasets as ``browse/<dataset>/<array(s)>``. This
+    descends through *wrapper* containers (a container whose only/first child is
+    itself a container) but STOPS at a container whose children are arrays —
+    returning that container so it can be treated as a slice stack (one array
+    node per slice). Array nodes (and non-Tiled inputs) are returned unchanged.
+    """
+    depth = 0
+    while _is_container_node(node) and depth < max_depth:
+        try:
+            first = next(iter(node))
+        except StopIteration:
+            return node  # empty container — nothing to descend into
+        child = node[first]
+        if not _is_container_node(child):
+            return node  # container of arrays → the stack itself
+        node = child
+        depth += 1
+    return node
+
+
+def _stack_keys(node: Any) -> list[str]:
+    """Sorted child keys of a container-stack (ingest zero-pads, so lexical
+    order == slice order)."""
+    return sorted(node)
+
+
+def node_keywords(node: Any) -> list[str]:
+    """Return the ``keywords`` tag list stored on *node* (or its first child).
+
+    Ingest writes ``keywords`` on both the dataset container and each array
+    child. For a stack container we read the container metadata first, then fall
+    back to the first slice. Non-Tiled inputs have no metadata → empty list.
+
+    Args:
+        node: A resolved Tiled node (array or container-stack) or NumPy array.
+
+    Returns:
+        List of tag strings; empty when none are present.
+    """
+    def _from_meta(meta: Any) -> list[str] | None:
+        try:
+            value = (meta or {}).get("keywords")
+        except AttributeError:
+            return None
+        if isinstance(value, (list, tuple)):
+            return [str(v) for v in value if str(v).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return None
+
+    tags = _from_meta(getattr(node, "metadata", None))
+    if tags:
+        return tags
+    if _is_container_node(node):
+        try:
+            keys = _stack_keys(node)
+            if keys:
+                child_tags = _from_meta(getattr(node[keys[0]], "metadata", None))
+                if child_tags:
+                    return child_tags
+        except Exception:  # noqa: BLE001 — metadata is best-effort
+            pass
+    return []
 
 
 def array_shape_meta(node: Any) -> dict[str, Any]:
@@ -94,6 +178,9 @@ def array_shape_meta(node: Any) -> dict[str, Any]:
     Raises:
         HTTPException: 422 for unsupported array shapes (e.g. 1-D or 5-D).
     """
+    if _is_container_node(node):
+        return _stack_shape_meta(node)
+
     raw = (
         np.asarray(node)
         if hasattr(node, "__array__") and not hasattr(node, "shape")
@@ -145,6 +232,41 @@ def array_shape_meta(node: Any) -> dict[str, Any]:
     raise HTTPException(422, f"Unsupported array shape: {shape}")
 
 
+def _stack_shape_meta(node: Any) -> dict[str, Any]:
+    """Shape-dispatch metadata for a container-of-arrays treated as a stack.
+
+    Each child is one slice; ``n_slices`` is the child count and the per-slice
+    H/W/dtype/is_rgb come from the first child. The sorted child keys are stored
+    under ``"keys"`` so :func:`read_slice` maps a slice index to its node.
+
+    Raises:
+        HTTPException: 422 for an empty container or unsupported slice shape.
+    """
+    keys = _stack_keys(node)
+    if not keys:
+        raise HTTPException(422, "Container has no array slices")
+    first = node[keys[0]]
+    fshape = tuple(first.shape)
+    dtype = str(first.dtype)
+
+    if len(fshape) == 2:
+        h, w, is_rgb = fshape[0], fshape[1], False
+    elif len(fshape) == 3 and fshape[2] in (3, 4):
+        h, w, is_rgb = fshape[0], fshape[1], True
+    else:
+        raise HTTPException(422, f"Unsupported slice shape in stack: {fshape}")
+
+    return {
+        "n_slices": len(keys),
+        "height": h,
+        "width": w,
+        "dtype": dtype,
+        "is_rgb": is_rgb,
+        "shape_kind": "STACK",
+        "keys": keys,
+    }
+
+
 def read_slice(node: Any, meta: dict[str, Any], idx: int) -> np.ndarray:
     """Read one slice from *node* and return it as a NumPy array.
 
@@ -168,4 +290,10 @@ def read_slice(node: Any, meta: dict[str, Any], idx: int) -> np.ndarray:
         return np.asarray(node[idx])
     if kind == "NHWC":
         return np.asarray(node[idx])
+    if kind == "STACK":
+        keys = meta.get("keys") or _stack_keys(node)
+        if not keys:
+            raise HTTPException(422, "Container has no array slices")
+        key = keys[idx] if 0 <= idx < len(keys) else keys[0]
+        return np.asarray(node[key])
     raise HTTPException(422, f"Cannot slice shape kind: {kind}")

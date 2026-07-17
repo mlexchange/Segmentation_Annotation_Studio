@@ -11,6 +11,7 @@ import { API_BASE } from '@/config';
 const BROWSE_TIMEOUT_MS = 60_000;
 const FACETS_POLL_INTERVAL_MS = 30_000;
 
+/** Fetch JSON with an abort-on-timeout; throws on non-OK responses. */
 async function fetchJson<T>(url: string, timeoutMs = BROWSE_TIMEOUT_MS): Promise<T> {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -33,6 +34,8 @@ export interface BrowseItem {
   path: string;
   sample: string;
   metadata: Record<string, unknown>;
+  /** Number of array slices when this item is a multi-image volume (>1 = drillable). */
+  n_slices?: number;
 }
 
 export interface ColumnState {
@@ -52,6 +55,13 @@ export interface BrowseState {
   facetsLoading: boolean;
   selectedItem: BrowseItem | null;
   connectionStatus: 'loading' | 'connected' | 'disconnected';
+  /** True when showing every sample (no column filters). */
+  showingAll: boolean;
+  /** Multi-slice dataset currently drilled into (its slices listed), or null. */
+  expandedSample: BrowseItem | null;
+  /** Individual array slices of `expandedSample`. */
+  slices: BrowseItem[];
+  slicesLoading: boolean;
 }
 
 const INITIAL_STATE: BrowseState = {
@@ -63,6 +73,10 @@ const INITIAL_STATE: BrowseState = {
   facetsLoading: true,
   selectedItem: null,
   connectionStatus: 'loading',
+  showingAll: false,
+  expandedSample: null,
+  slices: [],
+  slicesLoading: false,
 };
 
 /** Build a filter dict from the first `upToIndex` selected column values. */
@@ -75,6 +89,7 @@ function buildFilters(columns: ColumnState[], upToIndex: number): Record<string,
   return out;
 }
 
+/** Build an absolute Browse API URL with params plus optional server creds. */
 function buildUrl(
   path: string,
   params: Record<string, string | number>,
@@ -88,7 +103,17 @@ function buildUrl(
   return `${API_BASE}${path}?${qs.toString()}`;
 }
 
-export function useBrowseData(serverUri: string, technique: string, serverApiKey?: string) {
+/**
+ * Drives the column-browser UI: fetches facets/column values/leaf items from the
+ * Browse API and re-polls facets every 30s. Returns the `state` plus immutable
+ * `actions` (add/remove/change columns, select value/item, showAll, refresh).
+ */
+export function useBrowseData(
+  serverUri: string,
+  technique: string,
+  serverApiKey?: string,
+  containerPath?: string | null,
+) {
   const [state, setState] = useState<BrowseState>(INITIAL_STATE);
 
   // Stable reference so `refresh` can read the latest columns without re-creating itself.
@@ -96,14 +121,15 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
   stateRef.current = state;
 
   // ---- server params wrapped in a stable ref so callbacks don't change identity ----
-  const paramsRef = useRef({ serverUri, technique, serverApiKey });
-  paramsRef.current = { serverUri, technique, serverApiKey };
+  const paramsRef = useRef({ serverUri, technique, serverApiKey, containerPath });
+  paramsRef.current = { serverUri, technique, serverApiKey, containerPath };
 
   // ------------------------------------------------------------------
   // API calls
   // ------------------------------------------------------------------
+  /** Fetch available facet fields; `silent` skips the loading flag for polling. */
   const loadFacets = useCallback(async (options?: { silent?: boolean }) => {
-    const { serverUri: su, technique: tq, serverApiKey: sk } = paramsRef.current;
+    const { serverUri: su, technique: tq, serverApiKey: sk, containerPath: cp } = paramsRef.current;
     const silent = Boolean(options?.silent);
     if (!silent) {
       setState((s) => ({ ...s, facetsLoading: true }));
@@ -111,6 +137,7 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
     try {
       // 'All' can hit stale empty facet caches; force a refresh.
       const params: Record<string, string> = { technique: tq };
+      if (cp) params.container_path = cp;
       if (tq === 'All') params.refresh = 'true';
       const data = await fetchJson<{ facets?: string[] }>(buildUrl('/api/browse/facets', params, su, sk));
       setState((s) => ({
@@ -125,9 +152,10 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
     }
   }, []);
 
+  /** Load value counts for the column at `colIndex` given the upstream filters. */
   const loadColumn = useCallback(
     async (colIndex: number, field: string, filters: Record<string, string>) => {
-      const { serverUri: su, technique: tq, serverApiKey: sk } = paramsRef.current;
+      const { serverUri: su, technique: tq, serverApiKey: sk, containerPath: cp } = paramsRef.current;
       setState((s) => {
         if (!s.columns[colIndex]) return s;
         const cols = [...s.columns];
@@ -136,13 +164,14 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
       });
 
       try {
+        const columnParams: Record<string, string> = {
+          technique: tq,
+          field,
+          filters: JSON.stringify(filters),
+        };
+        if (cp) columnParams.container_path = cp;
         const data = await fetchJson<{ values?: BrowseValue[] }>(
-          buildUrl(
-            '/api/browse/column',
-            { technique: tq, field, filters: JSON.stringify(filters) },
-            su,
-            sk,
-          ),
+          buildUrl('/api/browse/column', columnParams, su, sk),
         );
         setState((s) => {
           if (!s.columns[colIndex] || s.columns[colIndex].field !== field) return s;
@@ -163,8 +192,9 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
     [],
   );
 
+  /** Load leaf items matching `filters` (forces a backend refresh for array-level filters). */
   const loadItems = useCallback(async (filters: Record<string, string>) => {
-    const { serverUri: su, technique: tq, serverApiKey: sk } = paramsRef.current;
+    const { serverUri: su, technique: tq, serverApiKey: sk, containerPath: cp } = paramsRef.current;
     setState((s) => ({ ...s, itemsLoading: true }));
     try {
       // Array-level filters (e.g. `angle_id`) need a backend refresh so the
@@ -176,6 +206,7 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
         technique: tq,
         filters: JSON.stringify(filters),
       };
+      if (cp) params.container_path = cp;
       if (shouldRefresh) params.refresh = 'true';
 
       const data = await fetchJson<{ items?: BrowseItem[]; total?: number }>(
@@ -193,9 +224,42 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
     }
   }, []);
 
+  /** Fetch the individual array slices of a multi-image dataset container. */
+  const loadSlices = useCallback(async (item: BrowseItem) => {
+    const { serverUri: su, serverApiKey: sk } = paramsRef.current;
+    setState((s) => ({ ...s, expandedSample: item, slices: [], slicesLoading: true, selectedItem: null }));
+    try {
+      const data = await fetchJson<{ items?: BrowseItem[] }>(
+        buildUrl('/api/browse/slices', { path: item.path }, su, sk),
+      );
+      setState((s) =>
+        s.expandedSample?.path === item.path
+          ? { ...s, slices: data.items ?? [], slicesLoading: false }
+          : s,
+      );
+    } catch (err) {
+      console.warn('Browse slices unavailable:', err);
+      setState((s) =>
+        s.expandedSample?.path === item.path ? { ...s, slices: [], slicesLoading: false } : s,
+      );
+    }
+  }, []);
+
   // ------------------------------------------------------------------
   // Public actions
   // ------------------------------------------------------------------
+  /** Drill into a multi-image dataset to list its slices, or collapse with null. */
+  const expandSample = useCallback(
+    (item: BrowseItem | null) => {
+      if (!item) {
+        setState((s) => ({ ...s, expandedSample: null, slices: [], slicesLoading: false }));
+        return;
+      }
+      void loadSlices(item);
+    },
+    [loadSlices],
+  );
+  /** Append a new column for `field` and asynchronously load its values. */
   const addColumn = useCallback(
     (field: string) => {
       setState((s) => {
@@ -203,12 +267,13 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
         const newCols = [...s.columns, newCol];
         const newIndex = newCols.length - 1;
         queueMicrotask(() => loadColumn(newIndex, field, buildFilters(newCols, newIndex)));
-        return { ...s, columns: newCols };
+        return { ...s, columns: newCols, showingAll: false, items: [], itemsTotal: 0, expandedSample: null, slices: [] };
       });
     },
     [loadColumn],
   );
 
+  /** Drop the column at `colIndex` and all columns after it, clearing items. */
   const removeColumn = useCallback((colIndex: number) => {
     setState((s) => ({
       ...s,
@@ -216,9 +281,12 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
       items: [],
       itemsTotal: 0,
       selectedItem: null,
+      expandedSample: null,
+      slices: [],
     }));
   }, []);
 
+  /** Replace the column at `colIndex` with a new `field`, dropping later columns. */
   const changeColumnField = useCallback(
     (colIndex: number, field: string) => {
       setState((s) => {
@@ -226,12 +294,14 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
         const newCol: ColumnState = { field, values: [], loading: true, error: null, selected: null };
         const newCols = [...cols, newCol];
         queueMicrotask(() => loadColumn(colIndex, field, buildFilters(newCols, colIndex)));
-        return { ...s, columns: newCols, items: [], itemsTotal: 0, selectedItem: null };
+        return { ...s, columns: newCols, items: [], itemsTotal: 0, selectedItem: null, expandedSample: null, slices: [] };
       });
     },
     [loadColumn],
   );
 
+  /** Select a value in a column: loads the next column's values, or leaf items
+   *  if it's the last column. Passing null clears the selection and items. */
   const selectValue = useCallback(
     (colIndex: number, value: string | null) => {
       setState((s) => {
@@ -240,7 +310,7 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
         );
 
         if (value === null) {
-          return { ...s, columns: cols, items: [], itemsTotal: 0, selectedItem: null };
+          return { ...s, columns: cols, items: [], itemsTotal: 0, selectedItem: null, expandedSample: null, slices: [] };
         }
 
         const hasNext = colIndex + 1 < s.columns.length;
@@ -256,23 +326,35 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
           queueMicrotask(() =>
             loadColumn(colIndex + 1, nextCol.field, buildFilters(nextCols, colIndex + 1)),
           );
-          return { ...s, columns: nextCols, items: [], itemsTotal: 0, selectedItem: null };
+          return { ...s, columns: nextCols, items: [], itemsTotal: 0, selectedItem: null, expandedSample: null, slices: [] };
         }
 
         // No next column — load leaf items.
         queueMicrotask(() => loadItems(buildFilters(cols, cols.length)));
-        return { ...s, columns: cols, selectedItem: null };
+        return { ...s, columns: cols, selectedItem: null, expandedSample: null, slices: [] };
       });
     },
     [loadColumn, loadItems],
   );
 
+  /** Set the currently selected leaf item (or clear it with null). */
   const selectItem = useCallback((item: BrowseItem | null) => {
     setState((s) => ({ ...s, selectedItem: item }));
   }, []);
 
+  /** Show every sample with no column filters (useful for metadata-less data). */
+  const showAll = useCallback(() => {
+    setState((s) => ({ ...s, columns: [], showingAll: true, selectedItem: null, expandedSample: null, slices: [] }));
+    void loadItems({});
+  }, [loadItems]);
+
+  /** Reload current columns and items from the server using the latest state. */
   const refresh = useCallback(() => {
     const s = stateRef.current;
+    if (s.showingAll) {
+      loadItems({});
+      return;
+    }
     if (s.columns.length === 0) return;
     s.columns.forEach((col, i) => loadColumn(i, col.field, buildFilters(s.columns, i)));
     loadItems(buildFilters(s.columns, s.columns.length));
@@ -284,16 +366,16 @@ export function useBrowseData(serverUri: string, technique: string, serverApiKey
   // ------------------------------------------------------------------
   useEffect(() => {
     void loadFacets();
-    setState((s) => ({ ...s, columns: [], items: [], itemsTotal: 0, selectedItem: null }));
+    setState((s) => ({ ...s, columns: [], items: [], itemsTotal: 0, selectedItem: null, showingAll: false, expandedSample: null, slices: [] }));
     const interval = setInterval(() => {
       void loadFacets({ silent: true });
     }, FACETS_POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [loadFacets, serverUri, technique, serverApiKey]);
+  }, [loadFacets, serverUri, technique, serverApiKey, containerPath]);
 
   const actions = useMemo(
-    () => ({ addColumn, removeColumn, changeColumnField, selectValue, selectItem, refresh, loadFacets }),
-    [addColumn, removeColumn, changeColumnField, selectValue, selectItem, refresh, loadFacets],
+    () => ({ addColumn, removeColumn, changeColumnField, selectValue, selectItem, expandSample, showAll, refresh, loadFacets }),
+    [addColumn, removeColumn, changeColumnField, selectValue, selectItem, expandSample, showAll, refresh, loadFacets],
   );
 
   return { state, actions };

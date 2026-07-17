@@ -4,12 +4,19 @@
  * Deleting a class removes all of its annotations (with confirmation).
  */
 import { useState } from 'react';
-import { Eye, EyeSlash, Pencil, Trash, Plus } from '@phosphor-icons/react';
-import { useClassStore, DEFAULT_COLORS, type AnnotationClass } from '@/stores/classStore';
+import { Eye, EyeSlash, Pencil, Trash, Plus, Info, Eyedropper, Check } from '@phosphor-icons/react';
+import { useClassStore, type AnnotationClass } from '@/stores/classStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
+import { useDatasetStore } from '@/stores/datasetStore';
+import { useReferenceGuideStore, type GuideClass } from '@/stores/referenceGuideStore';
+import { useSettingsStore } from '@/stores/settingsStore';
+import { getClassPalette } from '@/lib/classColors';
+import { buildSourceKey } from '@/lib/sourceKey';
 import { cn } from '@/lib/utils';
+import { Copy } from '@phosphor-icons/react';
 
+/** Counts all shapes assigned to a class across every image/slice in the annotation store. */
 function countShapesForClass(classId: number): number {
   const { byImage } = useAnnotationStore.getState();
   let total = 0;
@@ -26,21 +33,43 @@ interface ClassRowProps {
   isActive: boolean;
   onActivate: () => void;
   onClassDeleted: (deletedClassId: number) => void;
+  /** Duplicate this class + all its shapes into a new class. */
+  onDuplicate: () => void;
+  /** Matching guide entry (description + example crops), if the guide defines this class. */
+  guide?: GuideClass;
+  /** Keyboard shortcut digit (1–9) that activates this class, if any. */
+  hotkey?: number;
 }
 
-function ClassRow({ cls, isActive, onActivate, onClassDeleted }: ClassRowProps) {
+/** Renders a single class row with inline rename, visibility toggle, and delete. */
+function ClassRow({ cls, isActive, onActivate, onClassDeleted, onDuplicate, guide, hotkey }: ClassRowProps) {
   const { updateClass, deleteClass, toggleVisibility } = useClassStore();
   const removeShapesByClassId = useAnnotationStore((s) => s.removeShapesByClassId);
   const setSelectedShapeId = useToolStore((s) => s.setSelectedShapeId);
   const [editing, setEditing] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
   const [labelInput, setLabelInput] = useState(cls.label);
+  const hasGuide = !!guide && (!!guide.description || guide.exampleCrops.length > 0);
 
+  /** Saves the edited label (if non-empty and changed) without leaving edit mode. */
   const commitLabel = () => {
     const trimmed = labelInput.trim();
-    if (trimmed) updateClass(cls.classId, { label: trimmed });
+    if (trimmed && trimmed !== cls.label) updateClass(cls.classId, { label: trimmed });
+  };
+
+  /** Commits the label and exits edit mode. */
+  const finishEditing = () => {
+    commitLabel();
     setEditing(false);
   };
 
+  /** Discards any label edit and exits edit mode (color changes are applied live). */
+  const cancelEditing = () => {
+    setLabelInput(cls.label);
+    setEditing(false);
+  };
+
+  /** Confirms with the user, then removes the class and all of its shapes from the stores. */
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();
     const shapeCount = countShapesForClass(cls.classId);
@@ -63,52 +92,121 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted }: ClassRowProps) 
   };
 
   return (
-    <div
-      className={cn(
-        'flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer select-none',
-        isActive ? 'bg-sky-100 dark:bg-sky-900' : 'hover:bg-gray-100 dark:hover:bg-gray-800'
+    <div>
+      <div
+        role="option"
+        aria-selected={isActive}
+        aria-label={cls.label}
+        className={cn(
+          'flex items-center gap-1.5 px-2 py-1.5 rounded-md cursor-pointer select-none min-w-0',
+          isActive ? 'bg-sky-100 dark:bg-sky-900' : 'hover:bg-gray-100 dark:hover:bg-gray-800'
+        )}
+        onClick={onActivate}
+      >
+        <span
+          className={cn(
+            'w-4 flex-shrink-0 text-center text-[10px] font-mono font-semibold leading-none',
+            isActive ? 'text-sky-600 dark:text-sky-300' : 'text-gray-500'
+          )}
+          title={hotkey ? `Press ${hotkey} to select this class` : undefined}
+          aria-hidden={!hotkey}
+        >
+          {hotkey ?? ''}
+        </span>
+        {editing ? (
+          <input
+            type="color"
+            aria-label="Class color"
+            title="Change class color"
+            value={cls.color}
+            onChange={(e) => updateClass(cls.classId, { color: e.target.value })}
+            onClick={(e) => e.stopPropagation()}
+            className="w-4 h-4 flex-shrink-0 cursor-pointer rounded-sm border border-black/10 bg-transparent p-0"
+          />
+        ) : (
+          <span
+            className="w-4 h-4 rounded-sm flex-shrink-0 border border-black/10"
+            style={{ backgroundColor: cls.color }}
+          />
+        )}
+        {editing ? (
+          <input
+            autoFocus
+            className="flex-1 min-w-0 text-sm border rounded px-1 py-0.5"
+            value={labelInput}
+            onChange={(e) => setLabelInput(e.target.value)}
+            onBlur={commitLabel}
+            onKeyDown={(e) => { if (e.key === 'Enter') finishEditing(); if (e.key === 'Escape') cancelEditing(); }}
+            onClick={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <span className="flex-1 min-w-0 text-sm truncate">{cls.label}</span>
+        )}
+        {hasGuide && (
+          <button
+            aria-label="Show annotation guide for this class"
+            aria-pressed={showGuide}
+            className={cn('shrink-0 p-0.5 hover:text-sky-600', showGuide && 'text-sky-600')}
+            onClick={(e) => { e.stopPropagation(); setShowGuide((v) => !v); }}
+          >
+            <Info size={14} />
+          </button>
+        )}
+        <button
+          aria-pressed={cls.isVisible}
+          aria-label={cls.isVisible ? 'Hide class' : 'Show class'}
+          className="shrink-0 p-0.5 hover:text-sky-600"
+          onClick={(e) => { e.stopPropagation(); toggleVisibility(cls.classId); }}
+        >
+          {cls.isVisible ? <Eye size={14} /> : <EyeSlash size={14} className="text-gray-500" />}
+        </button>
+        <button
+          aria-label={editing ? 'Finish editing class' : 'Edit class label and color'}
+          aria-pressed={editing}
+          title={editing ? 'Done' : 'Edit label and color'}
+          className={cn('shrink-0 p-0.5 hover:text-sky-600', editing && 'text-sky-600')}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (editing) { finishEditing(); }
+            else { setLabelInput(cls.label); setEditing(true); }
+          }}
+        >
+          {editing ? <Check size={14} /> : <Pencil size={14} />}
+        </button>
+        <button
+          aria-label="Duplicate class and its annotations"
+          title="Duplicate class (copies its shapes into a new class)"
+          className="shrink-0 p-0.5 hover:text-sky-600"
+          onClick={(e) => { e.stopPropagation(); onDuplicate(); }}
+        >
+          <Copy size={14} />
+        </button>
+        <button
+          aria-label="Delete class and its annotations"
+          className="shrink-0 p-0.5 hover:text-red-500"
+          onClick={handleDelete}
+        >
+          <Trash size={14} />
+        </button>
+      </div>
+
+      {hasGuide && showGuide && guide && (
+        <div className="mx-2 mt-1 mb-1 rounded-md border border-sky-100 bg-sky-50/60 p-2 text-xs text-gray-600">
+          {guide.description && <p className="whitespace-pre-wrap break-words">{guide.description}</p>}
+          {guide.exampleCrops.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {guide.exampleCrops.map((src, i) => (
+                <img
+                  key={i}
+                  src={src}
+                  alt={`${cls.label} example ${i + 1}`}
+                  className="h-12 w-12 rounded border border-gray-200 object-cover"
+                />
+              ))}
+            </div>
+          )}
+        </div>
       )}
-      onClick={onActivate}
-    >
-      <span
-        className="w-4 h-4 rounded-sm flex-shrink-0 border border-black/10"
-        style={{ backgroundColor: cls.color }}
-      />
-      {editing ? (
-        <input
-          autoFocus
-          className="flex-1 text-sm border rounded px-1 py-0.5"
-          value={labelInput}
-          onChange={(e) => setLabelInput(e.target.value)}
-          onBlur={commitLabel}
-          onKeyDown={(e) => { if (e.key === 'Enter') commitLabel(); if (e.key === 'Escape') setEditing(false); }}
-          onClick={(e) => e.stopPropagation()}
-        />
-      ) : (
-        <span className="flex-1 text-sm truncate">{cls.label}</span>
-      )}
-      <button
-        aria-pressed={cls.isVisible}
-        aria-label={cls.isVisible ? 'Hide class' : 'Show class'}
-        className="p-0.5 hover:text-sky-600"
-        onClick={(e) => { e.stopPropagation(); toggleVisibility(cls.classId); }}
-      >
-        {cls.isVisible ? <Eye size={14} /> : <EyeSlash size={14} className="text-gray-400" />}
-      </button>
-      <button
-        aria-label="Edit class label"
-        className="p-0.5 hover:text-sky-600"
-        onClick={(e) => { e.stopPropagation(); setEditing(true); setLabelInput(cls.label); }}
-      >
-        <Pencil size={14} />
-      </button>
-      <button
-        aria-label="Delete class and its annotations"
-        className="p-0.5 hover:text-red-500"
-        onClick={handleDelete}
-      >
-        <Trash size={14} />
-      </button>
     </div>
   );
 }
@@ -119,12 +217,34 @@ export interface ClassManagerProps {
   onClassDeleted?: (deletedClassId: number) => void;
 }
 
+/** Fallback quick-add chips when the dataset has no annotation guide. */
+const DEFAULT_SUGGESTED_CLASSES = ['air', 'sample', 'void', 'pore', 'background', 'substrate'];
+
+/** Renders the class list, add form, and quick-add suggestion chips. */
 export default function ClassManager({ activeClassId, onActivate, onClassDeleted }: ClassManagerProps) {
   const { classes, addClass } = useClassStore();
+  const duplicateClassShapes = useAnnotationStore((s) => s.duplicateClassShapes);
+  const { source, kind, serverUri } = useDatasetStore();
+  const sourceKey = source && kind ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri) : null;
+  const guideEntries = useReferenceGuideStore((s) => s.entries);
+  const colorblindMode = useSettingsStore((s) => s.colorblindMode);
+  const setColorblindMode = useSettingsStore((s) => s.setColorblindMode);
   const [showAdd, setShowAdd] = useState(false);
   const [newLabel, setNewLabel] = useState('');
   const [newColor, setNewColor] = useState('');
 
+  // Toggle the colorblind-safe palette preference. This only affects the color
+  // auto-assigned to NEWLY added classes; existing classes keep their colors so
+  // we never silently rewrite already-annotated datasets.
+  const handleToggleColorblind = () => setColorblindMode(!colorblindMode);
+
+  // Guide-defined classes drive suggestions + colors so annotators stay consistent
+  // with the lead's intended labels; fall back to generic defaults when no guide.
+  const guideByLabel = new Map(
+    guideEntries.filter((g) => g.label.trim()).map((g) => [g.label.trim().toLowerCase(), g]),
+  );
+
+  /** Notifies the parent of a deletion and re-activates the first remaining class if the active one was removed. */
   const handleClassDeleted = (deletedClassId: number) => {
     onClassDeleted?.(deletedClassId);
     if (activeClassId === deletedClassId) {
@@ -135,11 +255,14 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
     }
   };
 
+  /** Returns the first unused color from the active palette, or cycles back if all are taken. */
   const nextColor = () => {
+    const palette = getClassPalette();
     const used = new Set(classes.map((c) => c.color));
-    return DEFAULT_COLORS.find((c) => !used.has(c)) ?? DEFAULT_COLORS[classes.length % DEFAULT_COLORS.length];
+    return palette.find((c) => !used.has(c)) ?? palette[classes.length % palette.length];
   };
 
+  /** Validates the new-class form (rejecting duplicate labels), adds the class, and activates it. */
   const handleAdd = () => {
     const label = newLabel.trim();
     if (!label) return;
@@ -157,6 +280,37 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
     setShowAdd(false);
   };
 
+  /** Duplicate a class: create a new class and copy all of its shapes (across every
+   *  slice of the current sample) into it, then activate the copy. */
+  const handleDuplicate = (cls: AnnotationClass) => {
+    const taken = new Set(classes.map((c) => c.label.toLowerCase()));
+    let label = `${cls.label} copy`;
+    for (let i = 2; taken.has(label.toLowerCase()); i++) label = `${cls.label} copy ${i}`;
+    const newId = addClass(label, nextColor());
+    if (sourceKey) duplicateClassShapes(sourceKey, cls.classId, newId);
+    onActivate(newId);
+  };
+
+  /** One-click add (or re-activate) a suggested class. Inherits the guide color if
+   *  defined, unless colorblind mode is on — then the colorblind-safe palette wins. */
+  const handleQuickAdd = (label: string) => {
+    const existing = classes.find((c) => c.label.toLowerCase() === label.toLowerCase());
+    if (existing) { onActivate(existing.classId); return; }
+    const guideColor = guideByLabel.get(label.toLowerCase())?.color;
+    const color = colorblindMode ? nextColor() : (guideColor || nextColor());
+    const classId = addClass(label, color);
+    onActivate(classId);
+  };
+
+  // Prefer the guide's classes (in guide order); otherwise the generic defaults.
+  const suggestionLabels =
+    guideByLabel.size > 0
+      ? guideEntries.map((g) => g.label.trim()).filter(Boolean)
+      : DEFAULT_SUGGESTED_CLASSES;
+  const suggestions = suggestionLabels.filter(
+    (label) => !classes.some((c) => c.label.toLowerCase() === label.toLowerCase()),
+  );
+
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between mb-1">
@@ -169,6 +323,20 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
           <Plus size={14} />
         </button>
       </div>
+
+      <label
+        className="flex items-center gap-1.5 mb-1 text-xs text-gray-600 cursor-pointer select-none"
+        title="Color newly added classes from a colorblind-safe palette (Okabe–Ito). Existing classes keep their colors."
+      >
+        <input
+          type="checkbox"
+          checked={colorblindMode}
+          onChange={handleToggleColorblind}
+          className="h-3.5 w-3.5 cursor-pointer accent-sky-600"
+        />
+        <Eyedropper size={13} className={colorblindMode ? 'text-sky-600' : 'text-gray-500'} />
+        <span>Colorblind-safe colors</span>
+      </label>
 
       {showAdd && (
         <div className="flex flex-col gap-1 bg-gray-50 rounded p-2 mb-1 text-sm">
@@ -196,17 +364,38 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
         </div>
       )}
 
+      {suggestions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1 mb-1">
+          <span className="text-[10px] uppercase tracking-wide text-gray-500 mr-0.5">Quick add</span>
+          {suggestions.map((label) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => handleQuickAdd(label)}
+              title={guideByLabel.get(label.toLowerCase())?.description || label}
+              className="flex items-center gap-0.5 max-w-full min-w-0 text-xs px-1.5 py-0.5 rounded-full border border-gray-200 text-gray-600 hover:bg-sky-50 hover:border-sky-300 hover:text-sky-700 transition-colors"
+            >
+              <Plus size={10} className="shrink-0" />
+              <span className="truncate">{label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       <div role="listbox" aria-label="Annotation classes" className="flex flex-col gap-0.5">
         {classes.length === 0 && (
-          <p className="text-xs text-gray-400 text-center py-2">No classes yet. Click + to add one.</p>
+          <p className="text-xs text-gray-500 text-center py-2">No classes yet. Click + to add one.</p>
         )}
-        {classes.map((cls) => (
+        {classes.map((cls, idx) => (
           <ClassRow
             key={cls.classId}
             cls={cls}
             isActive={cls.classId === activeClassId}
             onActivate={() => onActivate(cls.classId)}
             onClassDeleted={handleClassDeleted}
+            onDuplicate={() => handleDuplicate(cls)}
+            guide={guideByLabel.get(cls.label.trim().toLowerCase())}
+            hotkey={idx < 9 ? idx + 1 : undefined}
           />
         ))}
       </div>

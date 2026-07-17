@@ -5,38 +5,73 @@ import { useCallback } from 'react';
 import { useNavigate } from 'react-router';
 import { API_BASE } from '@/config';
 import { useDatasetStore } from '@/stores/datasetStore';
-import { useClassStore } from '@/stores/classStore';
+import { useClassStore, type AnnotationClass } from '@/stores/classStore';
+import { getClassPalette } from '@/lib/classColors';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { loadDraft } from '@/hooks/useDraftSync';
 import { buildSourceKey } from '@/lib/sourceKey';
 import type { Shape } from '@/stores/annotationStore';
 
-/** Merge a loaded draft into the stores for the given sourceKey. */
+/** Build annotation classes from a dataset's ingest keyword tags (one per tag). */
+function classesFromKeywords(keywords: string[]): AnnotationClass[] {
+  const palette = getClassPalette();
+  const seen = new Set<string>();
+  const classes: AnnotationClass[] = [];
+  for (const raw of keywords) {
+    const label = raw.trim();
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    classes.push({
+      classId: classes.length + 1,
+      label,
+      color: palette[classes.length % palette.length],
+      isVisible: true,
+    });
+  }
+  return classes;
+}
+
+/** Merge a loaded draft into the stores for the given sourceKey.
+ *  Returns true if the draft supplied a class list (so callers can skip seeding
+ *  pre-created classes). Types are derived from each store's STATE (`getState`)
+ *  rather than the hook's overloaded return type, which TS resolves to `unknown`. */
 async function applyDraft(
   sourceKey: string,
-  setClasses: (classes: Parameters<ReturnType<typeof useClassStore>['setClasses']>[0]) => void,
-  mergeSourceDraft: ReturnType<typeof useAnnotationStore>['mergeSourceDraft'],
-) {
+  setClasses: ReturnType<typeof useClassStore.getState>['setClasses'],
+  mergeSourceDraft: ReturnType<typeof useAnnotationStore.getState>['mergeSourceDraft'],
+): Promise<boolean> {
   const draft = await loadDraft(sourceKey);
-  if (!draft?.payload) return;
+  if (!draft?.payload) return false;
   const payload = draft.payload as Record<string, unknown>;
-  if (Array.isArray(payload.classes)) {
+  let hadClasses = false;
+  if (Array.isArray(payload.classes) && payload.classes.length > 0) {
     setClasses(payload.classes as Parameters<typeof setClasses>[0]);
+    hadClasses = true;
   }
   const slices = (payload.slices ?? {}) as Record<string, Shape[]>;
   const splitMap = (payload.split_by_slice ?? {}) as Record<string, string>;
   const negSlices = (payload.negative_slices ?? []) as string[];
   mergeSourceDraft(sourceKey, slices, splitMap, negSlices);
+  return hadClasses;
 }
 
+/**
+ * Returns openers that load a sample's metadata, seed the dataset/class stores,
+ * restore its saved draft, and navigate to the Annotate tab.
+ */
 export function useOpenInAnnotate() {
   const navigate = useNavigate();
-  const { setDataset } = useDatasetStore();
+  const { setDataset, setSlice } = useDatasetStore();
   const { setClasses } = useClassStore();
   const { mergeSourceDraft } = useAnnotationStore();
 
+  /** Open a Tiled array: fetch meta, set the dataset, apply its draft, then navigate.
+   *  Pass `initialSlice` to jump to a slice of a volume (keeps one sourceKey for
+   *  the whole stack, so per-slice annotations stay unified). */
   const openTiledArray = useCallback(
-    async (tiledPath: string, serverUri: string) => {
+    async (tiledPath: string, serverUri: string, initialSlice = 0) => {
       const params = new URLSearchParams({ source: tiledPath, kind: 'tiled' });
       if (serverUri) params.set('server_uri', serverUri);
 
@@ -52,14 +87,21 @@ export function useOpenInAnnotate() {
         isRgb: meta.is_rgb,
         valueRange: meta.value_range,
       });
+      // setDataset resets to slice 0; jump to the requested slice (clamped).
+      if (initialSlice > 0) setSlice(Math.min(initialSlice, Math.max(0, meta.n_slices - 1)));
 
       const sourceKey = buildSourceKey('tiled', tiledPath, serverUri);
-      await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      const hadClasses = await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      // No saved classes yet → pre-create one class per ingest keyword tag.
+      if (!hadClasses && Array.isArray(meta.keywords) && meta.keywords.length > 0) {
+        setClasses(classesFromKeywords(meta.keywords));
+      }
       navigate('/annotate');
     },
-    [navigate, setDataset, setClasses, mergeSourceDraft],
+    [navigate, setDataset, setSlice, setClasses, mergeSourceDraft],
   );
 
+  /** Open a local file by relative path: fetch meta, set the dataset, apply its draft, then navigate. */
   const openLocalFile = useCallback(
     async (relPath: string) => {
       const params = new URLSearchParams({ source: relPath, kind: 'local' });
@@ -78,7 +120,10 @@ export function useOpenInAnnotate() {
       });
 
       const sourceKey = buildSourceKey('local', relPath);
-      await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      const hadClasses = await applyDraft(sourceKey, setClasses, mergeSourceDraft);
+      if (!hadClasses && Array.isArray(meta.keywords) && meta.keywords.length > 0) {
+        setClasses(classesFromKeywords(meta.keywords));
+      }
       navigate('/annotate');
     },
     [navigate, setDataset, setClasses, mergeSourceDraft],

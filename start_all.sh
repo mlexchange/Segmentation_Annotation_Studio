@@ -2,6 +2,15 @@
 # start_all.sh — Start Tiled, Browse backend, and frontend together.
 # Usage: ./start_all.sh
 # Stop everything: Ctrl+C
+#
+# NOTE: Tiled auth. tiled/config.yml sets `allow_anonymous_access: true`
+# (anonymous access is READ-ONLY); WRITES (e.g. ingest) require the API key.
+# No key is hardcoded: this script GENERATES a strong TILED_API_KEY into
+# backend/.env (gitignored) on first run, passes it to Tiled at launch via
+# `--api-key` (robust across Tiled versions), and the backend resolves the same
+# value server-side (backend/tiled_config.py) — never exposing it to the frontend.
+# Server binds to 127.0.0.1 (local-only). Do NOT change --host to 0.0.0.0
+# without reconsidering the auth posture.
 
 set -e
 
@@ -9,13 +18,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 TILED_CONFIG="$SCRIPT_DIR/tiled/config.yml"
+MKDOCS_CONFIG="$SCRIPT_DIR/mkdocs.yml"
 TILED_PORT="${TILED_PORT:-8010}"
 BACKEND_PORT="${BACKEND_PORT:-8002}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+DOCS_PORT="${DOCS_PORT:-8000}"
+# PROD=1 (or SERVE_MODE=prod): build the optimized SPA and have the backend serve
+# it from backend/static/ (single origin, gzip) instead of the Vite dev server.
+if [ "${PROD:-0}" = "1" ] || [ "${SERVE_MODE:-}" = "prod" ]; then FRONTEND_MODE="prod"; else FRONTEND_MODE="dev"; fi
+STATIC_DIR="$BACKEND_DIR/static"
 RUN_DIR="$SCRIPT_DIR/.run"
 TILED_PID_FILE="$RUN_DIR/tiled.pid"
 BACKEND_PID_FILE="$RUN_DIR/backend.pid"
 FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
+DOCS_PID_FILE="$RUN_DIR/docs.pid"
 ENV_DIR=""
 ENV_KIND=""
 REQUIRED_PYTHON_MAJOR=3
@@ -51,6 +67,21 @@ require_free_port() {
     echo -e "${RED}Stop the existing process or rerun with a different port.${NC}"
     exit 1
   fi
+}
+
+# Echo the first free port at/above $1 (scanning up to +50), or exit if none.
+# Only the chosen port goes to stdout; status messages go to stderr.
+pick_free_port() {
+  local port="$1" label="$2" p="$1" max=$(( $1 + 50 ))
+  while [ "$p" -le "$max" ]; do
+    if ! port_is_listening "$p"; then
+      echo "$p"
+      return 0
+    fi
+    p=$(( p + 1 ))
+  done
+  echo -e "${RED}Error: no free ${label} port in ${port}..${max} on 127.0.0.1.${NC}" >&2
+  exit 1
 }
 
 cleanup_pid_file() {
@@ -92,6 +123,7 @@ stop_managed_process() {
 
 cleanup_managed_processes() {
   mkdir -p "$RUN_DIR"
+  stop_managed_process "$DOCS_PID_FILE" "docs"
   stop_managed_process "$FRONTEND_PID_FILE" "frontend"
   stop_managed_process "$BACKEND_PID_FILE" "backend"
   stop_managed_process "$TILED_PID_FILE" "Tiled"
@@ -99,7 +131,9 @@ cleanup_managed_processes() {
 
 get_process_command() {
   local pid="$1"
-  ps -o command= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//'
+  # -ww: don't truncate the command line (macOS ps truncates to ~terminal width
+  # by default, which would drop the config path / args we match on).
+  ps -ww -o command= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//'
 }
 
 get_process_cwd() {
@@ -188,6 +222,10 @@ reclaim_orphaned_repo_ports() {
   fi
   stop_repo_listener_on_port "$FRONTEND_PORT" "frontend" "$FRONTEND_DIR" "vite" ""
   stop_repo_listener_on_port "$BACKEND_PORT" "backend" "$BACKEND_DIR" "annotation_server:app" "uvicorn"
+  stop_repo_listener_on_port "$DOCS_PORT" "docs" "$SCRIPT_DIR" "mkdocs" ""
+  # Repo-scoped: only reclaim OUR own stale Tiled (its command line contains this
+  # repo's config path). A foreign Tiled on the port is left alone — we coexist by
+  # falling back to a second port (pick_free_port) and the frontend adapts.
   stop_repo_listener_on_port "$TILED_PORT" "Tiled" "$SCRIPT_DIR" "$TILED_CONFIG" "tiled"
 }
 
@@ -197,12 +235,29 @@ can_run_npm() {
 }
 
 ensure_uv() {
-  if ! command -v uv >/dev/null 2>&1; then
-    echo -e "${RED}Error: uv is not installed.${NC}"
-    echo -e "${RED}Install with: curl -LsSf https://astral.sh/uv/install.sh | sh${NC}"
-    echo -e "${RED}Then open a new shell (or run: source \$HOME/.local/bin/env) and retry.${NC}"
+  if command -v uv >/dev/null 2>&1; then
+    return 0
+  fi
+  echo -e "${YELLOW}    uv not found — installing via astral.sh...${NC}"
+  if ! command -v curl >/dev/null 2>&1; then
+    echo -e "${RED}Error: curl is required to auto-install uv. Install uv manually:${NC}"
+    echo -e "${RED}  curl -LsSf https://astral.sh/uv/install.sh | sh${NC}"
     exit 1
   fi
+  if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    echo -e "${RED}Error: uv installation failed. Install manually and retry.${NC}"
+    exit 1
+  fi
+  # Put uv on PATH for this session (the installer drops it in ~/.local/bin).
+  # shellcheck source=/dev/null
+  [ -f "$HOME/.local/bin/env" ] && . "$HOME/.local/bin/env"
+  export PATH="$HOME/.local/bin:$PATH"
+  if ! command -v uv >/dev/null 2>&1; then
+    echo -e "${RED}Error: uv installed but not on PATH. Open a new shell (or run:${NC}"
+    echo -e "${RED}  source \$HOME/.local/bin/env) and re-run start_all.sh.${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}    uv installed.${NC}"
 }
 
 ensure_backend_env() {
@@ -239,6 +294,22 @@ ensure_frontend_runtime() {
   exit 1
 }
 
+# Ensure MkDocs + Material live in the .venv. Best-effort: never abort startup
+# (docs are a convenience — a failure here just means the in-app Docs link won't
+# resolve). Returns non-zero if mkdocs is unavailable so the caller can skip it.
+ensure_docs_env() {
+  if [ -x "$ENV_DIR/bin/mkdocs" ] && "$PYTHON" -c "import material" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo -e "${YELLOW}    Installing docs dependencies (mkdocs-material) via uv...${NC}"
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install --python "$PYTHON" -q -r "$SCRIPT_DIR/docs/requirements.txt" >/dev/null 2>&1 || true
+  else
+    "$PYTHON" -m pip install -q -r "$SCRIPT_DIR/docs/requirements.txt" >/dev/null 2>&1 || true
+  fi
+  [ -x "$ENV_DIR/bin/mkdocs" ] && "$PYTHON" -c "import material" >/dev/null 2>&1
+}
+
 tiled_cmd() {
   if [ -x "$ENV_DIR/bin/tiled" ]; then
     "$ENV_DIR/bin/tiled" "$@"
@@ -254,11 +325,12 @@ tiled_cmd() {
 cleanup() {
   echo ""
   echo -e "${YELLOW}Shutting down...${NC}"
-  kill "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
-  wait "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+  kill "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
+  wait "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
   cleanup_pid_file "$TILED_PID_FILE"
   cleanup_pid_file "$BACKEND_PID_FILE"
   cleanup_pid_file "$FRONTEND_PID_FILE"
+  cleanup_pid_file "$DOCS_PID_FILE"
   echo -e "${GREEN}Done.${NC}"
   exit 0
 }
@@ -268,9 +340,40 @@ ensure_backend_env
 ensure_frontend_runtime
 cleanup_managed_processes
 reclaim_orphaned_repo_ports
-require_free_port "$TILED_PORT" "Tiled"
-require_free_port "$BACKEND_PORT" "Backend"
-require_free_port "$FRONTEND_PORT" "Frontend"
+# Tiled: fall back to the next free port if the default is taken by something we
+# don't manage (e.g. another app's Tiled). Point the backend at the chosen port.
+_orig_tiled_port="$TILED_PORT"
+TILED_PORT="$(pick_free_port "$TILED_PORT" "Tiled")"
+if [ "$TILED_PORT" != "$_orig_tiled_port" ]; then
+  echo -e "${YELLOW}    Tiled port ${_orig_tiled_port} is in use — using ${TILED_PORT} instead.${NC}"
+fi
+# NOTE: TILED_URI is exported AFTER sourcing .env below, so the chosen port wins
+# over any TILED_URI baked into .env (otherwise .env would clobber it).
+
+# Backend: fall back to the next free port if busy. The Vite dev proxy targets
+# whatever port we choose (via API_PROXY_TARGET, read in vite.config.ts).
+_orig_backend_port="$BACKEND_PORT"
+BACKEND_PORT="$(pick_free_port "$BACKEND_PORT" "Backend")"
+if [ "$BACKEND_PORT" != "$_orig_backend_port" ]; then
+  echo -e "${YELLOW}    Backend port ${_orig_backend_port} is in use — using ${BACKEND_PORT} instead.${NC}"
+fi
+export API_PROXY_TARGET="http://127.0.0.1:${BACKEND_PORT}"
+
+# Frontend: fall back to the next free port if busy (Vite serves on --port below).
+_orig_frontend_port="$FRONTEND_PORT"
+FRONTEND_PORT="$(pick_free_port "$FRONTEND_PORT" "Frontend")"
+if [ "$FRONTEND_PORT" != "$_orig_frontend_port" ]; then
+  echo -e "${YELLOW}    Frontend port ${_orig_frontend_port} is in use — using ${FRONTEND_PORT} instead.${NC}"
+fi
+
+# Docs (MkDocs): fall back to the next free port if busy. The in-app "Docs" link
+# targets whatever port we choose (via VITE_DOCS_URL, read in frontend/src/config.ts).
+_orig_docs_port="$DOCS_PORT"
+DOCS_PORT="$(pick_free_port "$DOCS_PORT" "Docs")"
+if [ "$DOCS_PORT" != "$_orig_docs_port" ]; then
+  echo -e "${YELLOW}    Docs port ${_orig_docs_port} is in use — using ${DOCS_PORT} instead.${NC}"
+fi
+export VITE_DOCS_URL="http://127.0.0.1:${DOCS_PORT}"
 
 # ---------------------------------------------------------------------------
 # Load .env — create it from .env.example if missing
@@ -285,21 +388,85 @@ set -a
 source "$BACKEND_DIR/.env"
 set +a
 
-# Generate a stable API key if TILED_API_KEY is empty or missing
-if [ -z "${TILED_API_KEY:-}" ]; then
-  TILED_API_KEY=$("$PYTHON" -c "import secrets; print(secrets.token_hex(32))")
-  # Persist it back into .env so it survives restarts
-  if grep -q "^TILED_API_KEY=" "$BACKEND_DIR/.env"; then
-    sed -i.bak "s|^TILED_API_KEY=.*|TILED_API_KEY=${TILED_API_KEY}|" "$BACKEND_DIR/.env" && rm -f "$BACKEND_DIR/.env.bak"
-  else
-    echo "TILED_API_KEY=${TILED_API_KEY}" >> "$BACKEND_DIR/.env"
-  fi
-  echo -e "${YELLOW}    Generated new TILED_API_KEY and saved to backend/.env${NC}"
+# Point the backend (and its /api/config/servers list) at the Tiled instance we
+# actually launch — the chosen port, which may differ from any TILED_URI baked
+# into .env. Exported AFTER sourcing .env so it wins; the frontend then discovers
+# the real port from /api/config/servers on startup.
+export TILED_URI="http://127.0.0.1:${TILED_PORT}"
+
+# Generate a strong Tiled API key so nothing is hardcoded. Runs when the key is
+# blank (fresh install) OR still the old committed/leaked value (auto-rotate it).
+# Persisted to backend/.env (gitignored) and exported so the Tiled server pulls it
+# via ${TILED_API_KEY} in tiled/config.yml and the backend resolves the same value.
+LEAKED_TILED_KEY="3b1d23cdd45e7ada521c729cbd71763dd51b058e0a3e0c1cdeddbcbe13168c88"
+if [ -z "${TILED_API_KEY// }" ] || [ "$TILED_API_KEY" = "$LEAKED_TILED_KEY" ]; then
+  # Alphanumeric only (Tiled validates single_user_api_key against [a-zA-Z0-9]+).
+  NEW_KEY="$(openssl rand -base64 16 2>/dev/null | tr -dc 'A-Za-z0-9')"
+  [ -z "$NEW_KEY" ] && NEW_KEY="$("$PYTHON" -c 'import secrets,base64,re;print(re.sub(r"[^A-Za-z0-9]","",base64.b64encode(secrets.token_bytes(16)).decode()))')"
+  "$PYTHON" - "$BACKEND_DIR/.env" "$NEW_KEY" <<'PYEOF'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); key = sys.argv[2]
+lines = p.read_text().splitlines() if p.exists() else []
+out, found = [], False
+for ln in lines:
+    out.append(f"TILED_API_KEY={key}" if ln.strip().startswith("TILED_API_KEY=") else ln)
+    found = found or ln.strip().startswith("TILED_API_KEY=")
+if not found:
+    out.append(f"TILED_API_KEY={key}")
+p.write_text("\n".join(out) + "\n")
+PYEOF
+  export TILED_API_KEY="$NEW_KEY"
+  echo -e "${GREEN}    Generated a new Tiled API key → backend/.env${NC}"
 fi
-export TILED_API_KEY
+
+# Defensive: a blank TILED_* key exported here would make the Tiled client build an
+# "Authorization: Apikey " (trailing space) header that httpx rejects. Unset any
+# blank key vars (no-op once a key is generated above).
+[ -z "${TILED_API_KEY// }" ] && unset TILED_API_KEY
+[ -z "${TILED_LOCAL_API_KEY// }" ] && unset TILED_LOCAL_API_KEY
 
 # ---------------------------------------------------------------------------
-# Tiled (must match backend/tiled_config.py default: port 8010)
+# SAM (Magic tool) model — vendor SlimSAM locally so "Smart (AI)" works offline.
+# Best-effort + backgrounded: never blocks or fails startup (SAM falls back to
+# the remote HF model if this can't complete).
+# ---------------------------------------------------------------------------
+ensure_sam_model() {
+  local MODEL_DIR="$FRONTEND_DIR/public/models/slimsam-77-uniform"
+  if [ -d "$MODEL_DIR" ] && [ -n "$(ls -A "$MODEL_DIR" 2>/dev/null)" ]; then
+    echo -e "${GREEN}    SAM model already vendored.${NC}"
+    return 0
+  fi
+  echo -e "${CYAN}==> Vendoring SlimSAM model for the Magic tool (background)...${NC}"
+  (
+    # The .venv is uv-managed and has no pip; install huggingface_hub via uv,
+    # falling back to python -m pip only if uv is unavailable.
+    if ! "$PYTHON" -c "import huggingface_hub" >/dev/null 2>&1; then
+      if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$PYTHON" -q huggingface_hub >/dev/null 2>&1 || true
+      else
+        "$PYTHON" -m pip install -q huggingface_hub >/dev/null 2>&1 || true
+      fi
+    fi
+    if "$PYTHON" - "$MODEL_DIR" <<'PYEOF'
+import sys
+from huggingface_hub import snapshot_download
+snapshot_download("Xenova/slimsam-77-uniform", local_dir=sys.argv[1])
+print("SAM model vendored to", sys.argv[1])
+PYEOF
+    then
+      echo -e "${GREEN}    SAM model vendored — hard-refresh the app to enable Smart (AI).${NC}"
+    else
+      echo -e "${YELLOW}    SAM model vendoring skipped (no huggingface_hub / offline) — Smart (AI) falls back to remote.${NC}"
+    fi
+  ) &
+}
+ensure_sam_model
+
+# ---------------------------------------------------------------------------
+# Tiled — local server. Anonymous access is READ-ONLY (allow_anonymous_access);
+# writes (ingest) authenticate with tiled/config.yml's single_user_api_key,
+# resolved server-side by backend/tiled_config.py. Keys are never sent to the
+# frontend. (Port must match backend/tiled_config.py default: 8010.)
 # ---------------------------------------------------------------------------
 echo -e "${CYAN}==> Starting Tiled (port ${TILED_PORT})...${NC}"
 
@@ -314,14 +481,21 @@ fi
 mkdir -p "$SCRIPT_DIR/.tiled"
 if [ ! -f "$SCRIPT_DIR/.tiled/catalog.db" ]; then
   echo -e "${YELLOW}    Initializing Tiled catalog (first run)...${NC}"
-  (cd "$SCRIPT_DIR" && TILED_SINGLE_USER_API_KEY="$TILED_API_KEY" tiled_cmd catalog init --if-not-exists \
+  (cd "$SCRIPT_DIR" && tiled_cmd catalog init --if-not-exists \
     "sqlite+aiosqlite:///./.tiled/catalog.db") || {
     echo -e "${RED}    Tiled catalog init failed. Install: pip install 'tiled[server]'${NC}"
     exit 1
   }
 fi
 
-(cd "$SCRIPT_DIR" && TILED_SINGLE_USER_API_KEY="$TILED_API_KEY" tiled_cmd serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT") &
+# tiled_cmd is a shell function (can't be exec'd); the subshell waits on the real
+# tiled child. The ready-check below curls the port before declaring failure, so a
+# dead wrapper alone won't trip a false "Tiled failed to start".
+# Pass the key via --api-key so Tiled's single_user_api_key exactly matches what
+# the backend sends — robust across Tiled versions (no YAML ${VAR} dependency).
+TILED_KEY_ARGS=()
+[ -n "${TILED_API_KEY// }" ] && TILED_KEY_ARGS=(--api-key "$TILED_API_KEY")
+(cd "$SCRIPT_DIR" && tiled_cmd serve config "$TILED_CONFIG" --host 127.0.0.1 --port "$TILED_PORT" "${TILED_KEY_ARGS[@]}") &
 TILED_PID=$!
 echo "$TILED_PID" > "$TILED_PID_FILE"
 echo -e "${GREEN}    Tiled PID: $TILED_PID${NC}"
@@ -335,7 +509,15 @@ for i in $(seq 1 40); do
     TILED_READY=1
     break
   fi
+  # Only treat a dead PID as failure if the port is ALSO not serving (avoids a
+  # false negative from a wrapper exiting while Tiled itself is up).
   if ! kill -0 "$TILED_PID" 2>/dev/null; then
+    code=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${TILED_PORT}/" 2>/dev/null || echo "000")
+    if [[ "$code" =~ ^(200|301|302|401|403|404)$ ]]; then
+      echo -e "${GREEN}    Tiled ready at http://127.0.0.1:${TILED_PORT}${NC}"
+      TILED_READY=1
+      break
+    fi
     echo -e "${RED}    Tiled failed to start. Install: pip install 'tiled[server]' (see backend/requirements.txt).${NC}"
     exit 1
   fi
@@ -344,6 +526,29 @@ done
 if [ "$TILED_READY" != 1 ]; then
   echo -e "${RED}    Tiled did not become ready in time (http code: ${code:-unknown}).${NC}"
   exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Production SPA build (PROD=1): build the optimized frontend and stage it in
+# backend/static/ BEFORE the backend starts — the SPA mount is decided at import
+# time. In dev mode, remove any stale build so the backend stays API-only and the
+# Vite dev server owns the SPA.
+# ---------------------------------------------------------------------------
+if [ "$FRONTEND_MODE" = "prod" ]; then
+  echo -e "${CYAN}==> Building production frontend...${NC}"
+  cd "$FRONTEND_DIR"
+  if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}    node_modules not found — running npm install...${NC}"
+    "${NPM_CMD[@]}" install
+  fi
+  "${NPM_CMD[@]}" run build
+  rm -rf "$STATIC_DIR"
+  mkdir -p "$STATIC_DIR"
+  cp -R "$FRONTEND_DIR/dist/." "$STATIC_DIR/"
+  cd "$SCRIPT_DIR"
+  echo -e "${GREEN}    Built SPA → backend/static (served by the backend at :${BACKEND_PORT}).${NC}"
+else
+  rm -rf "$STATIC_DIR"  # ensure the backend serves API-only in dev
 fi
 
 # ---------------------------------------------------------------------------
@@ -378,31 +583,58 @@ for i in $(seq 1 20); do
 done
 
 # ---------------------------------------------------------------------------
-# Frontend
+# Docs (MkDocs Material) — served live so the in-app "Docs" link works. Best-effort:
+# a failure here never blocks the app (the button simply won't resolve).
 # ---------------------------------------------------------------------------
-echo -e "${CYAN}==> Starting frontend (port ${FRONTEND_PORT})...${NC}"
-
-cd "$FRONTEND_DIR"
-
-if [ ! -d "node_modules" ]; then
-  echo -e "${YELLOW}    node_modules not found — running npm install...${NC}"
-  "${NPM_CMD[@]}" install
+DOCS_PID=""
+if [ -f "$MKDOCS_CONFIG" ] && ensure_docs_env; then
+  echo -e "${CYAN}==> Starting docs (port ${DOCS_PORT})...${NC}"
+  (cd "$SCRIPT_DIR" && "$ENV_DIR/bin/mkdocs" serve -f "$MKDOCS_CONFIG" -a "127.0.0.1:${DOCS_PORT}") &
+  DOCS_PID=$!
+  echo "$DOCS_PID" > "$DOCS_PID_FILE"
+  echo -e "${GREEN}    Docs PID: $DOCS_PID${NC}"
+else
+  echo -e "${YELLOW}==> Skipping docs (mkdocs-material unavailable) — the in-app Docs link may not resolve.${NC}"
 fi
 
-"${NPM_CMD[@]}" run dev -- --host --port "$FRONTEND_PORT" &
-FRONTEND_PID=$!
-echo "$FRONTEND_PID" > "$FRONTEND_PID_FILE"
-echo -e "${GREEN}    Frontend PID: $FRONTEND_PID${NC}"
+# ---------------------------------------------------------------------------
+# Frontend (dev only — in prod the backend already serves the built SPA)
+# ---------------------------------------------------------------------------
+FRONTEND_PID=""
+if [ "$FRONTEND_MODE" = "prod" ]; then
+  echo -e "${CYAN}==> Frontend served by the backend (prod build) at http://127.0.0.1:${BACKEND_PORT}${NC}"
+else
+  echo -e "${CYAN}==> Starting frontend (port ${FRONTEND_PORT})...${NC}"
+
+  cd "$FRONTEND_DIR"
+
+  if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}    node_modules not found — running npm install...${NC}"
+    "${NPM_CMD[@]}" install
+  fi
+
+  "${NPM_CMD[@]}" run dev -- --host --port "$FRONTEND_PORT" &
+  FRONTEND_PID=$!
+  echo "$FRONTEND_PID" > "$FRONTEND_PID_FILE"
+  echo -e "${GREEN}    Frontend PID: $FRONTEND_PID${NC}"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "${GREEN}==========================================${NC}"
-  echo -e "${GREEN}  SAM3 Annotation Studio is running!${NC}"
-echo -e "${GREEN}  Tiled    : http://127.0.0.1:${TILED_PORT}${NC}"
-echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
+  echo -e "${GREEN}  Segmentation Annotation Studio is running!${NC}"
+echo -e "${GREEN}  Tiled    : http://127.0.0.1:${TILED_PORT} (public / anonymous)${NC}"
+if [ "$FRONTEND_MODE" = "prod" ]; then
+  echo -e "${GREEN}  App (prod build) : http://127.0.0.1:${BACKEND_PORT}${NC}"
+else
+  echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
+fi
 echo -e "${GREEN}  Backend  : http://127.0.0.1:${BACKEND_PORT}${NC}"
+if [ -n "$DOCS_PID" ]; then
+  echo -e "${GREEN}  Docs     : http://127.0.0.1:${DOCS_PORT}${NC}"
+fi
 echo -e "${GREEN}  Press Ctrl+C to stop all servers.${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo ""

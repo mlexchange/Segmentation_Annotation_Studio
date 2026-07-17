@@ -8,8 +8,15 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
+  # Required by FastAPI for multipart form data (the /api/ingest/upload route uses
+  # Form/UploadFile). Not pulled in transitively, so it must be declared explicitly.
+  "python-multipart>=0.0.9",
   "uvicorn[standard]>=0.30",
-  "tiled[all]>=0.1",
+  # Client only — the app talks to an EXTERNAL Tiled (tiled.client / tiled.queries).
+  # The Tiled *server* is not a runtime dependency and is intentionally not shipped
+  # in the Docker image. Local dev runs its own Tiled server via start_all.sh, which
+  # installs tiled[all] into .venv independently of this file.
+  "tiled[client]>=0.1",
   "numpy>=1.26",
   "pillow>=10.3",
   "python-dotenv>=1.0",
@@ -26,6 +33,12 @@ test = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
 
 [tool.setuptools]
 py-modules = []
+
+[tool.isort]
+# Align isort's wrap width with flake8's --max-line-length=120 so import ordering
+# doesn't rewrap everything to 79 columns. flake8-isort reads this config.
+profile = "black"
+line_length = 120
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

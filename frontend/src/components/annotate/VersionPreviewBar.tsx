@@ -7,6 +7,7 @@
  */
 import { ArrowCounterClockwise, X, CaretLeft, CaretRight } from '@phosphor-icons/react';
 import type { VersionMeta } from '@/hooks/useSave';
+import DebouncedSlider from '@/components/common/DebouncedSlider';
 
 interface Props {
   versions: VersionMeta[];
@@ -19,6 +20,7 @@ interface Props {
   onRestore: (version: number) => void;
 }
 
+/** Formats an ISO timestamp as a short local date/time; falls back to the raw string. */
 function formatDate(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
@@ -32,6 +34,7 @@ function formatDate(iso: string): string {
   }
 }
 
+/** Renders the version time-travel overlay (scrub/restore/exit). */
 export default function VersionPreviewBar({
   versions,
   current,
@@ -49,6 +52,7 @@ export default function VersionPreviewBar({
   const meta = sorted.find((v) => v.version === current) ?? sorted[sorted.length - 1];
   const isLatest = current === max;
 
+  /** Moves the preview one version older/newer, clamped to the available range. */
   const step = (dir: -1 | 1) => {
     const next = current + dir;
     if (next >= min && next <= max) onChange(next);
@@ -106,14 +110,15 @@ export default function VersionPreviewBar({
 
           <span className="text-xs text-gray-400 w-8 text-right tabular-nums">v{min}</span>
 
-          <input
-            type="range"
+          <DebouncedSlider
             min={min}
             max={max}
             step={1}
             value={current}
-            onChange={(e) => onChange(Number(e.target.value))}
+            onChange={onChange}
+            debounceMs={150}
             className="flex-1 accent-sky-500 cursor-pointer"
+            ariaLabel="Preview version"
           />
 
           <span className="text-xs text-gray-400 w-8 tabular-nums">v{max}</span>

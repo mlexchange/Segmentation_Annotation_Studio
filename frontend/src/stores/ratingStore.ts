@@ -20,9 +20,11 @@ export const useRatingStore = create<RatingState>()(
     (set, get) => ({
       ratings: {},
 
+      /** Stores the star rating for a sample, keyed by canonical sourceKey. */
       setRating: (sourceKey, rating) =>
         set((s) => ({ ratings: { ...s.ratings, [sourceKey]: rating } })),
 
+      /** Returns the sample's rating, or 0 (unrated) if none is stored. */
       getRating: (sourceKey) => get().ratings[sourceKey] ?? 0,
     }),
     { name: 'sam3_ratings' },

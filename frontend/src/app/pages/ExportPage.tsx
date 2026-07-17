@@ -5,10 +5,12 @@ import { useState } from 'react';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
+import { useExportJob } from '@/hooks/useExportJob';
 import { API_BASE } from '@/config';
 
 type Split = 'train' | 'valid' | 'test' | 'auto';
 
+/** Renders the COCO export page: split table, dry-run preview, and write/download actions. */
 export default function ExportPage() {
   const { source, kind, serverUri, meta, renderOpts } = useDatasetStore();
   const { byImage, splitBySlice, negativeSlices, setSplitForSlice } = useAnnotationStore();
@@ -16,9 +18,10 @@ export default function ExportPage() {
 
   const [outDir, setOutDir] = useState('');
   const [mode, setMode] = useState<'fail' | 'overwrite' | 'merge'>('fail');
+  const [includePolygons, setIncludePolygons] = useState(false);
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
   const [status, setStatus] = useState('');
+  const { state: job, start, startMaskSync, downloadUrl } = useExportJob();
 
   if (!source || !meta) {
     return (
@@ -41,6 +44,7 @@ export default function ExportPage() {
     );
   }
 
+  /** Assembles the COCO export request body (render opts, classes, slices, splits) for the current sample. */
   const buildPayload = (dryRun: boolean) => ({
     out_dir: outDir,
     kind,
@@ -48,6 +52,7 @@ export default function ExportPage() {
     server_uri: serverUri,
     mode,
     dry_run: dryRun,
+    include_polygons: includePolygons,
     render: {
       norm: renderOpts.norm,
       scale: renderOpts.scale,
@@ -62,6 +67,7 @@ export default function ExportPage() {
     negative_slices: negSlices,
   });
 
+  /** POSTs a dry-run export to the backend and stores the preview/status. */
   const handleDryRun = async () => {
     if (!outDir) { setStatus('Please enter an output directory.'); return; }
     setStatus('Running dry run…');
@@ -78,20 +84,19 @@ export default function ExportPage() {
     } catch (e) { setStatus(`Failed: ${e}`); }
   };
 
-  const handleWrite = async () => {
-    setStatus('Writing dataset…');
-    try {
-      const res = await fetch(`${API_BASE}/api/export/coco`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPayload(false)),
-      });
-      const data = await res.json();
-      if (!res.ok) { setStatus(`Error: ${JSON.stringify(data)}`); return; }
-      setResult(data);
-      setStatus('');
-    } catch (e) { setStatus(`Failed: ${e}`); }
+  /** Starts the real export job (writes the dataset to the backend). */
+  const handleWrite = () => {
+    setStatus('');
+    start(buildPayload(false));
   };
+
+  /** Writes rasterized masks straight into Tiled as stacked volumes (no zip). */
+  const handleMaskSync = () => {
+    setStatus('');
+    startMaskSync(buildPayload(false));
+  };
+
+  const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
 
   return (
     <div className="flex flex-col h-full overflow-y-auto p-6 max-w-3xl mx-auto space-y-6">
@@ -172,6 +177,18 @@ export default function ExportPage() {
             <option value="merge">merge (replace matched images)</option>
           </select>
         </div>
+        <label className="flex items-start gap-2 text-sm text-sky-100 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={includePolygons}
+            onChange={(e) => setIncludePolygons(e.target.checked)}
+            className="mt-0.5 accent-sky-500"
+          />
+          <span>
+            Include polygon copy in COCO{' '}
+            <span className="text-sky-300/70">(slower; RLE masks are always exact — only needed for some external viewers)</span>
+          </span>
+        </label>
       </div>
 
       {status && <p className="text-sm text-sky-100">{status}</p>}
@@ -184,10 +201,43 @@ export default function ExportPage() {
         </div>
       )}
 
-      {result && (
-        <div className="bg-sky-50 border border-sky-200 rounded-lg p-3 text-sm">
-          <p className="font-medium text-sky-800 mb-1">Export complete</p>
-          <pre className="text-xs text-sky-700 whitespace-pre-wrap">{JSON.stringify(result, null, 2)}</pre>
+      {/* Live export progress (phase + bar + backend log) */}
+      {(job.status === 'running' || job.status === 'done' || job.status === 'error') && (
+        <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm space-y-2">
+          <div className="flex items-center justify-between text-xs text-gray-600">
+            <span className="capitalize font-medium">
+              {job.status === 'error' ? 'Failed' : job.status === 'done' ? 'Export complete' : `${job.phase || 'working'}…`}
+            </span>
+            {job.total > 0 && <span className="tabular-nums">{job.done}/{job.total} slices</span>}
+          </div>
+          {job.status !== 'error' && (
+            <div className="h-1.5 w-full rounded bg-gray-200 overflow-hidden">
+              <div
+                className={`h-full transition-all ${job.status === 'done' ? 'bg-green-500' : 'bg-sky-500'}`}
+                style={{ width: job.status === 'done' ? '100%' : `${Math.max(5, pct)}%` }}
+              />
+            </div>
+          )}
+          {job.error && <p className="text-xs text-red-600">{job.error}</p>}
+          {job.log.length > 0 && (
+            <div className="max-h-32 overflow-y-auto rounded bg-white border border-gray-200 p-2 text-[11px] font-mono text-gray-500 leading-relaxed">
+              {job.log.slice(-15).map((line, i) => <div key={i}>{line}</div>)}
+            </div>
+          )}
+          {job.status === 'done' && Array.isArray(job.result?.written) ? (
+            <p className="text-xs text-gray-600">
+              Wrote masks into Tiled:{' '}
+              {(job.result.written as Array<{ container?: string; n_slices?: number }>).length === 0
+                ? 'nothing (no Tiled sources / no annotated slices).'
+                : (job.result.written as Array<{ container?: string; n_slices?: number }>)
+                    .map((w) => `${w.container} (${w.n_slices} slices)`)
+                    .join(', ')}
+            </p>
+          ) : job.status === 'done' && (
+            <p className="text-xs text-gray-600">
+              Saved to <span className="font-mono">{String(job.result?.dataset_path ?? 'server')}</span> (Tiled). Download includes images + masks (semantic + per-class) + COCO.
+            </p>
+          )}
         </div>
       )}
 
@@ -198,14 +248,36 @@ export default function ExportPage() {
         >
           Dry run preview
         </button>
-        {preview && (
+        {preview && job.status !== 'done' && (
           <button
             onClick={handleWrite}
-            className="px-4 py-2 text-sm rounded-md bg-sky-600 text-white hover:bg-sky-700"
+            disabled={job.status === 'running'}
+            className="px-4 py-2 text-sm rounded-md bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50"
           >
-            Write dataset
+            {job.status === 'running' ? 'Writing…' : 'Write dataset'}
           </button>
         )}
+        {job.status === 'done' && downloadUrl && (
+          <a
+            href={downloadUrl}
+            download
+            className="px-4 py-2 text-sm rounded-md bg-sky-600 text-white hover:bg-sky-700"
+          >
+            Download .zip
+          </a>
+        )}
+        <button
+          onClick={handleMaskSync}
+          disabled={job.status === 'running' || kind !== 'tiled'}
+          title={
+            kind === 'tiled'
+              ? 'Rasterize masks and write them into Tiled as stacked volumes (semantic + per-class) next to this dataset'
+              : 'Only available for Tiled sources'
+          }
+          className="ml-auto px-4 py-2 text-sm rounded-md border border-emerald-600 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+        >
+          {job.status === 'running' ? 'Working…' : 'Push masks to Tiled'}
+        </button>
       </div>
     </div>
   );

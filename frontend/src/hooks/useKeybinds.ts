@@ -1,10 +1,11 @@
 /**
  * useKeybinds — keyboard shortcuts for the annotation workspace.
  *
- * Tools:   a=polygon  w=ellipse  e=rectangle  q=eraser  b=brush  s=select
+ * Tools:   p=polygon  l=ellipse  e=rectangle  r=eraser  b=brush  f=fill  g=magic
+ *          m=magnetic  s=select   (each key is a letter in the tool's label)
  * Pan:     hold Space (reverts to the previous tool on release)
- * View:    x=next slice (forward)  f=fit image to screen  arrows=prev/next slice
- * Edit:    z (or Ctrl/Cmd+Z)=undo   Ctrl/Cmd+Shift+Z / Ctrl+Y=redo
+ * View:    x=next slice (forward)  t=fit image to screen  arrows=prev/next slice
+ * Edit:    Ctrl/Cmd+Z=undo   Ctrl/Cmd+Shift+Z / Ctrl+Y=redo
  * Other:   1-9=class  n=new brush instance  Del/Back=delete  Esc=cancel
  */
 import { useEffect, useRef } from 'react';
@@ -14,15 +15,24 @@ import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
 
+// Each tool's key is a letter in its label (shown underlined in the Toolbar).
 const TOOL_KEYBINDS: Record<string, Tool> = {
   s: 'select',
-  a: 'polygon',
-  e: 'rectangle',
-  w: 'ellipse',
+  p: 'polygon',
+  m: 'magnetic',
+  g: 'magic',       // maGic (m is taken by magnetic)
+  e: 'rectangle',   // Rect
+  l: 'ellipse',     // eLlipse (e is taken by rect)
   b: 'brush',
-  q: 'eraser',
+  f: 'fill',
+  r: 'eraser',      // eRaser
 };
 
+/**
+ * Installs global keydown/keyup listeners for the annotation workspace (tools,
+ * slice nav, undo/redo, class select). Ignores keys typed in form fields.
+ * Invokes the supplied callbacks for class activation, brush, delete, and cancel.
+ */
 export function useKeybinds(
   activeClassId: number | null,
   onActivateClass: (id: number) => void,
@@ -60,6 +70,7 @@ export function useKeybinds(
         const st = useToolStore.getState();
         if (st.tool !== 'pan') {
           prevToolRef.current = st.tool;
+          st.setPanReturnTool(st.tool); // lets the canvas keep the brush/eraser cursor during pan
           st.setTool('pan');
         }
         return;
@@ -76,15 +87,9 @@ export function useKeybinds(
         temporalStore.redo();
         return;
       }
-      // Plain Z = undo
-      if (key === 'z' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
-        e.preventDefault();
-        temporalStore.undo();
-        return;
-      }
 
-      // Fit image to screen
-      if (key === 'f') {
+      // Fit image to screen (moved off 'f', which is now the Fill tool)
+      if (key === 't') {
         requestFit();
         return;
       }
@@ -126,6 +131,7 @@ export function useKeybinds(
       if ((e.key === ' ' || e.key === 'Spacebar') && prevToolRef.current) {
         e.preventDefault();
         useToolStore.getState().setTool(prevToolRef.current);
+        useToolStore.getState().setPanReturnTool(null);
         prevToolRef.current = null;
       }
     };

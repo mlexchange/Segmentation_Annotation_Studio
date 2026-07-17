@@ -14,6 +14,10 @@ interface BrowseColumnProps {
   isLast: boolean;
 }
 
+/**
+ * BrowseColumn — one facet column: a field picker plus its distinct values with counts.
+ * Selecting a value (or re-clicking to clear) drives the filter chain via onSelect.
+ */
 export default function BrowseColumn({
   colIndex,
   column,

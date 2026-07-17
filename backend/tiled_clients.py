@@ -7,6 +7,7 @@ two servers, so a tiny unbounded dict is fine.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from tiled_config import get_tiled_api_key, get_tiled_base, get_tiled_servers
@@ -53,15 +54,31 @@ _BROWSE_CANDIDATES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("beamlines", "bl733", "projects", "10k"), "beamlines/bl733/projects/10k"),
     (("beamlines", "bl733"), "beamlines/bl733"),
     (("beamlines", "bl901"), "beamlines/bl901"),
+    # Plain drag-and-drop ingest writes samples directly under `browse/`; catch
+    # this before falling back to the root (which would list `browse` itself as
+    # a single sample instead of its contents).
+    (("browse",), "browse"),
 )
 
 
 def get_browse_container(client: Any) -> tuple[Any, str]:
     """Return ``(container_node, path_prefix)`` for the Metadata Browser root.
 
-    Walks known beamline-ish paths in priority order and returns the first
-    container that exists and is non-empty. Falls back to the client's root.
+    Checks ``TILED_BROWSE_PATH`` env var first (slash-separated path into the
+    Tiled tree, e.g. ``20260221_135217_petiole22_``). Then walks known
+    beamline-ish paths in priority order. Falls back to the client's root.
     """
+    browse_path = (os.getenv("TILED_BROWSE_PATH") or "").strip().strip("/")
+    if browse_path:
+        try:
+            node: Any = client
+            for k in browse_path.split("/"):
+                node = node[k]
+            if len(node) > 0:
+                return node, browse_path
+        except (KeyError, TypeError):
+            pass
+
     for keys, prefix in _BROWSE_CANDIDATES:
         try:
             node: Any = client
@@ -72,3 +89,19 @@ def get_browse_container(client: Any) -> tuple[Any, str]:
         except (KeyError, TypeError):
             continue
     return client, ""
+
+
+def get_browse_container_for(client: Any, container_path: str | None) -> tuple[Any, str]:
+    """Return ``(container_node, path_prefix)`` for a specific browse target.
+
+    When *container_path* is given (slash-separated, e.g. ``browse/testset``),
+    navigate directly to that node. Otherwise fall back to the heuristic
+    discovery in :func:`get_browse_container`.
+    """
+    path = (container_path or "").strip().strip("/")
+    if not path:
+        return get_browse_container(client)
+    node: Any = client
+    for k in path.split("/"):
+        node = node[k]
+    return node, path

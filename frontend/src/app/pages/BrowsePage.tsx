@@ -16,7 +16,8 @@ import type { AnnotationFilter } from '@/types/annotationFilter';
 
 export default function BrowsePage() {
   const navigate = useNavigate();
-  const { kind, serverUri, localRoot, label, sampleCount, setConnection } = useConnectionStore();
+  const { kind, serverUri, browseContainerPath, localRoot, localRel, label, sampleCount, setConnection } =
+    useConnectionStore();
   const { openLocalFile } = useOpenInAnnotate();
 
   const [annotationFilter, setAnnotationFilter] = useState<AnnotationFilter>('all');
@@ -32,6 +33,7 @@ export default function BrowsePage() {
     enabled: kind === 'tiled',
   });
 
+  /** Switch the active Tiled connection to the chosen server URI. */
   const handleServerChange = (uri: string) => {
     setConnection({
       kind: 'tiled',
@@ -64,7 +66,7 @@ export default function BrowsePage() {
         <span>
           <span className="font-medium text-slate-300">{label}</span>
           {sampleCount !== null && (
-            <span className="ml-2 text-slate-500">
+            <span className="ml-2 text-slate-400">
               · {sampleCount} sample{sampleCount !== 1 ? 's' : ''}
             </span>
           )}
@@ -77,26 +79,31 @@ export default function BrowsePage() {
         </button>
       </div>
 
-      {/* Main browser */}
-      {kind === 'tiled' && serverUri && (
-        <ColumnBrowser
-          key={serverUri}
-          serverUri={serverUri}
-          servers={servers}
-          selectedServerUri={serverUri}
-          onServerChange={handleServerChange}
-          annotationFilter={annotationFilter}
-          onAnnotationFilterChange={setAnnotationFilter}
-        />
-      )}
-      {kind === 'local' && (
-        <LocalSampleBrowser
-          localRoot={localRoot ?? ''}
-          onOpenInAnnotate={openLocalFile}
-          annotationFilter={annotationFilter}
-          onAnnotationFilterChange={setAnnotationFilter}
-        />
-      )}
+      {/* Main browser — flex-1 so it fills the space under the banner and its
+          own internal scroll areas are bounded (otherwise the bottom is clipped). */}
+      <div className="flex-1 min-h-0">
+        {kind === 'tiled' && serverUri && (
+          <ColumnBrowser
+            key={`${serverUri}:${browseContainerPath ?? ''}`}
+            serverUri={serverUri}
+            containerPath={browseContainerPath}
+            servers={servers}
+            selectedServerUri={serverUri}
+            onServerChange={handleServerChange}
+            annotationFilter={annotationFilter}
+            onAnnotationFilterChange={setAnnotationFilter}
+          />
+        )}
+        {kind === 'local' && (
+          <LocalSampleBrowser
+            root={localRoot ?? ''}
+            rel={localRel ?? ''}
+            onOpenInAnnotate={openLocalFile}
+            annotationFilter={annotationFilter}
+            onAnnotationFilterChange={setAnnotationFilter}
+          />
+        )}
+      </div>
     </div>
   );
 }

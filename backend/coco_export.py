@@ -5,16 +5,19 @@ Ports mlex ShapeConversion rasterizers, replacing matplotlib contains_points
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
 import random
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pycocotools.mask as mask_utils
+from PIL import Image as PILImage
 from skimage import draw, measure
 
 logger = logging.getLogger(__name__)
@@ -98,23 +101,57 @@ def _brush_mask(strokes: list[dict[str, Any]], h: int, w: int) -> np.ndarray:
     return mask
 
 
+def _apply_erased(mask: np.ndarray, erased: list[dict[str, Any]] | None) -> np.ndarray:
+    """Subtract erase carve-outs from a vector shape's mask (in-place-safe)."""
+    if not erased:
+        return mask
+    for stroke in erased:
+        stamp = np.zeros(mask.shape, dtype=bool)
+        _stamp_stroke(stamp, stroke["points"], stroke["radius"])
+        mask &= ~stamp
+    return mask
+
+
 def shape_to_mask(shape: dict[str, Any], h: int, w: int) -> np.ndarray:
     """Rasterize one Shape (image-pixel coords) to an (h, w) boolean mask."""
     kind = shape["kind"]
     if kind == "polygon":
-        return _polygon_mask(shape["points"], h, w)
-    if kind == "rectangle":
-        return _rect_mask(shape["x"], shape["y"], shape["w"], shape["h"], h, w)
-    if kind == "ellipse":
-        return _ellipse_mask(shape["cx"], shape["cy"], shape["rx"], shape["ry"], h, w)
-    if kind == "brush":
+        mask = _polygon_mask(shape["points"], h, w)
+        # Carve inner rings (holes), e.g. from "invert shape", so exports match.
+        for hole in shape.get("holes") or []:
+            mask &= ~_polygon_mask(hole, h, w)
+    elif kind == "rectangle":
+        mask = _rect_mask(shape["x"], shape["y"], shape["w"], shape["h"], h, w)
+    elif kind == "ellipse":
+        mask = _ellipse_mask(shape["cx"], shape["cy"], shape["rx"], shape["ry"], h, w)
+    elif kind == "brush":
+        # Brush erase strokes are part of its own stroke list, not `erased`.
         return _brush_mask(shape["strokes"], h, w)
-    raise ValueError(f"Unknown shape kind: {kind!r}")
+    else:
+        raise ValueError(f"Unknown shape kind: {kind!r}")
+    # Vector shapes can carry eraser carve-outs applied after rasterization.
+    return _apply_erased(mask, shape.get("erased"))
 
 
 # ---------------------------------------------------------------------------
 # Mask -> COCO annotation
 # ---------------------------------------------------------------------------
+
+def _encode_png(arr: np.ndarray, compress_level: int = 0) -> bytes:
+    """Encode a single-channel uint8 array as a grayscale PNG.
+
+    Masks are tiny and pre-binarized; ``compress_level=0`` (store) is the fastest
+    and the size cost is negligible.
+    """
+    buf = io.BytesIO()
+    PILImage.fromarray(arr, mode="L").save(buf, format="PNG", compress_level=compress_level)
+    return buf.getvalue()
+
+
+def _safe_name(name: str) -> str:
+    """Filesystem-safe folder name for a class label."""
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name) or "class"
+
 
 def _mask_to_polygons(mask: np.ndarray, min_pts: int = 6) -> list[list[float]]:
     """Outer+inner contours as COCO-style flat polygons (holes NOT encoded -- see RLE)."""
@@ -131,14 +168,26 @@ def mask_to_coco_ann(
     ann_id: int,
     image_id: int,
     category_id: int,
+    *,
+    include_polygons: bool = False,
+    poly_override: list[list[float]] | None = None,
 ) -> dict[str, Any]:
-    """Build a COCO annotation: RLE in segmentation, polygons in segmentation_poly.
+    """Build a COCO annotation: RLE in segmentation, optional polygon copy.
 
     RLE is exact (holes, multiple components) and is what SAM3's pycocotools
-    segm path consumes. The polygon copy is a convenience for external viewers.
+    segm path consumes — always present. The polygon copy (``segmentation_poly``)
+    is a convenience for external viewers; generating it via ``find_contours`` is
+    costly, so it is opt-in. ``poly_override`` lets a polygon-kind shape reuse its
+    own points instead of re-tracing the mask.
     """
     rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
     rle["counts"] = rle["counts"].decode("ascii")
+    if not include_polygons:
+        seg_poly: list[list[float]] = []
+    elif poly_override is not None:
+        seg_poly = poly_override
+    else:
+        seg_poly = _mask_to_polygons(mask)
     return {
         "id": ann_id,
         "image_id": image_id,
@@ -147,7 +196,7 @@ def mask_to_coco_ann(
         "area": float(mask_utils.area(rle)),
         "bbox": [float(v) for v in mask_utils.toBbox(rle)],
         "segmentation": rle,
-        "segmentation_poly": _mask_to_polygons(mask),
+        "segmentation_poly": seg_poly,
     }
 
 
@@ -189,8 +238,14 @@ def write_coco_split(
     *,
     mode: str = "fail",
     info: dict[str, Any] | None = None,
+    zf: Any = None,
+    arc_prefix: str = "",
 ) -> dict[str, Any]:
     """Write/merge one split directory.
+
+    If ``zf`` (an open ``zipfile.ZipFile``) is given, every file is also added to
+    it under ``arc_prefix`` from the same in-memory bytes — a single pass with no
+    disk re-read (used to build the download .zip cheaply).
 
     In merge mode existing image entries are matched by file_name:
     matched images are replaced (their old annotations dropped),
@@ -215,7 +270,11 @@ def write_coco_split(
     """
     split_dir.mkdir(parents=True, exist_ok=True)
     coco_path = split_dir / "_annotations.coco.json"
-    sidecar_path = split_dir / "_studio_shapes.json"
+
+    def _emit(rel: str, data: bytes) -> None:
+        """Mirror a just-written file into the download zip (if building one)."""
+        if zf is not None:
+            zf.writestr(arc_prefix + rel, data)
 
     existing_coco: dict[str, Any] = {"images": [], "annotations": [], "categories": []}
     if coco_path.exists():
@@ -269,12 +328,30 @@ def write_coco_split(
         max_img_id += 1
         img_id = max_img_id
         png_bytes: bytes | None = img.pop("png_bytes", None)
+        # Pop mask payloads so they don't leak into the COCO json.
+        label_png: bytes | None = img.pop("label_png_bytes", None)
+        class_masks: dict[str, bytes] = img.pop("class_masks", {}) or {}
         out_img = {**img, "id": img_id}
         out_images.append(out_img)
 
-        # Write PNG
+        fname = img["file_name"]
+        # Write PNG (+ mirror into zip)
         if png_bytes is not None:
-            (split_dir / img["file_name"]).write_bytes(png_bytes)
+            (split_dir / fname).write_bytes(png_bytes)
+            _emit(fname, png_bytes)
+
+        # Write masks: masks/semantic/<file> (label map) + masks/<class>/<file>.
+        if label_png is not None:
+            sem_dir = split_dir / "masks" / "semantic"
+            sem_dir.mkdir(parents=True, exist_ok=True)
+            (sem_dir / fname).write_bytes(label_png)
+            _emit(f"masks/semantic/{fname}", label_png)
+        for cname, cbytes in class_masks.items():
+            safe = _safe_name(cname)
+            cls_dir = split_dir / "masks" / safe
+            cls_dir.mkdir(parents=True, exist_ok=True)
+            (cls_dir / fname).write_bytes(cbytes)
+            _emit(f"masks/{safe}/{fname}", cbytes)
 
         # Write annotations for this image
         img_anns = [a for a in annotations if a.get("_image_file_name") == img["file_name"]]
@@ -289,7 +366,7 @@ def write_coco_split(
 
     coco_doc = {
         "info": info or {
-            "description": "SAM3 fine-tune dataset -- SAM3 Annotation Studio",
+            "description": "SAM3 fine-tune dataset -- Segmentation Annotation Studio",
             "date_created": datetime.now(timezone.utc).isoformat(),
         },
         "licenses": [],
@@ -297,13 +374,72 @@ def write_coco_split(
         "categories": final_cats,
         "annotations": out_anns,
     }
-    coco_path.write_text(json.dumps(coco_doc, indent=2))
+    coco_json = json.dumps(coco_doc, indent=2)
+    coco_path.write_text(coco_json)
+    _emit("_annotations.coco.json", coco_json.encode("utf-8"))
+
+    # Legend mapping semantic label index -> class name/color (for mask viewers).
+    masks_dir = split_dir / "masks"
+    if masks_dir.exists():
+        legend = [{"id": c["id"], "name": c["name"], "color": c.get("color")} for c in final_cats]
+        legend_json = json.dumps(legend, indent=2)
+        (masks_dir / "legend.json").write_text(legend_json)
+        _emit("masks/legend.json", legend_json.encode("utf-8"))
 
     return {
         "n_images": len(images),
         "n_annotations": sum(1 for a in out_anns if a["image_id"] in {img["id"] for img in out_images[-len(images):]}),
         "path": str(coco_path),
     }
+
+
+def write_lightly_split(
+    split_dir: Path,
+    images: list[dict[str, Any]],
+    *,
+    zf: Any = None,
+    arc_prefix: str = "",
+) -> dict[str, Any]:
+    """Write one split in the DINOv3 / Lightly semantic-segmentation layout:
+    ``<split>/images/<stem>.png`` (rendered frame) + ``<split>/masks/<stem>.png``
+    (single-channel label map, pixel = class index, 0 = background) with MATCHING
+    filename stems. Reuses the ``png_bytes`` / ``label_png_bytes`` already built by
+    ``build_export_plan`` (the same rasterization as the COCO/semantic export).
+
+    If ``zf`` is given, each file is mirrored into the download zip under
+    ``arc_prefix`` from the same bytes.
+    """
+    img_dir = split_dir / "images"
+    mask_dir = split_dir / "masks"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    def _emit(rel: str, data: bytes) -> None:
+        if zf is not None:
+            zf.writestr(arc_prefix + rel, data)
+
+    n = 0
+    for img in images:
+        fname = img["file_name"]  # e.g. "sample_0003.png"
+        png_bytes = img.get("png_bytes")
+        label_png = img.get("label_png_bytes")
+        if png_bytes is not None:
+            (img_dir / fname).write_bytes(png_bytes)
+            _emit(f"images/{fname}", png_bytes)
+        if label_png is not None:
+            (mask_dir / fname).write_bytes(label_png)
+            _emit(f"masks/{fname}", label_png)
+        n += 1
+    return {"n_images": n, "n_annotations": 0, "path": str(img_dir)}
+
+
+def lightly_classes_map(categories: list[dict[str, Any]]) -> dict[str, str]:
+    """Build the Lightly ``classes`` mapping (index → name), 0 = background.
+    Category ids start at 1 and are contiguous (see build_export_plan)."""
+    out: dict[str, str] = {"0": "background"}
+    for c in categories:
+        out[str(int(c["id"]))] = str(c["name"])
+    return out
 
 
 def build_export_plan(
@@ -313,6 +449,8 @@ def build_export_plan(
     array_shape_meta_fn: Any,
     read_slice_fn: Any,
     sample_global_stats_fn: Any,
+    progress_cb: Any = None,
+    include_polygons: bool = False,
 ) -> dict[str, Any]:
     """Build the full export plan (rasterize all shapes, render PNGs).
 
@@ -327,9 +465,6 @@ def build_export_plan(
     Returns:
         Dict with splits (each has images, categories, annotations, info).
     """
-    import io
-    from PIL import Image as PILImage
-
     meta = array_shape_meta_fn(node)
     h, w = meta["height"], meta["width"]
     render_opts = payload.render.model_dump() if hasattr(payload.render, "model_dump") else dict(payload.render)
@@ -345,66 +480,116 @@ def build_export_plan(
     if render_opts_mapped["norm"] == "global":
         global_range = sample_global_stats_fn(node, meta)
 
-    classes_by_id = {c.classId: c for c in payload.classes}
     cat_id_map: dict[int, int] = {}
+    cat_id_to_name: dict[int, str] = {}
     categories: list[dict[str, Any]] = []
     for i, cls in enumerate(payload.classes, 1):
-        categories.append({"id": i, "name": cls.label, "supercategory": "object"})
+        # `color` is an extra key (COCO ignores it) used for the mask legend.
+        categories.append({
+            "id": i, "name": cls.label, "supercategory": "object",
+            "color": getattr(cls, "color", None),
+        })
         cat_id_map[cls.classId] = i
+        cat_id_to_name[i] = cls.label
 
     all_slice_keys = list(payload.slices.keys())
     neg_keys = set(str(k) for k in payload.negative_slices)
-    all_keys = list(set(all_slice_keys) | neg_keys)
+    all_keys = sorted(set(all_slice_keys) | neg_keys, key=int)
 
     resolved_splits = _resolve_split(all_keys, {str(k): v for k, v in payload.split_by_slice.items()}, payload.auto_split)
 
-    splits_data: dict[str, dict[str, Any]] = {}
-    skipped_zero_area = 0
+    source_stem = str(payload.source).replace("/", "_").replace("\\", "_")[-30:]
 
-    for slice_key in all_keys:
-        split = resolved_splits.get(slice_key, "train")
-        if split not in splits_data:
-            splits_data[split] = {"images": [], "annotations": []}
-
+    def _process_slice(slice_key: str) -> dict[str, Any]:
+        """Read → render → PNG-encode → rasterize one slice. Pure & independent,
+        so slices run concurrently — the read/encode I/O dominates wall time."""
         slice_idx = int(slice_key)
         arr = read_slice_fn(node, meta, slice_idx)
         rgb = render_slice_fn(arr, render_opts_mapped, global_range)
 
         buf = io.BytesIO()
-        PILImage.fromarray(rgb).save(buf, format="PNG")
+        # compress_level=1: PNG encode of a large frame is a big chunk of export
+        # time; level 1 is ~3x faster than the default for a small size cost.
+        PILImage.fromarray(rgb).save(buf, format="PNG", compress_level=1)
         png_bytes = buf.getvalue()
 
-        source_stem = str(payload.source).replace("/", "_").replace("\\", "_")[-30:]
         file_name = f"{source_stem}_{slice_idx:04d}.png"
-
-        shapes = payload.slices.get(slice_key, [])
         anns: list[dict[str, Any]] = []
-        for shape in shapes:
+        skipped = 0
+        # Semantic label map (class index per pixel, 0 = bg) + per-class binary
+        # masks, built from the same rasterization used for the COCO annotations.
+        label = np.zeros((h, w), dtype=np.uint8)
+        class_acc: dict[str, np.ndarray] = {}
+        for shape in payload.slices.get(slice_key, []):
             shape_dict = shape if isinstance(shape, dict) else shape.model_dump()
             mask = shape_to_mask(shape_dict, h, w)
-            area = float(mask.sum())
-            if area < 1:
-                skipped_zero_area += 1
+            if float(mask.sum()) < 1:
+                skipped += 1
                 logger.warning("Zero-area shape %r skipped", shape_dict.get("id"))
                 continue
-            class_id = shape_dict.get("classId", 1)
-            cat_id = cat_id_map.get(class_id, 1)
-            ann = mask_to_coco_ann(mask, ann_id=0, image_id=0, category_id=cat_id)
+            cat_id = cat_id_map.get(shape_dict.get("classId", 1), 1)
+            # A polygon shape can reuse its own points instead of re-tracing.
+            poly_override = (
+                [shape_dict["points"]]
+                if include_polygons and shape_dict.get("kind") == "polygon" and shape_dict.get("points")
+                else None
+            )
+            ann = mask_to_coco_ann(
+                mask, ann_id=0, image_id=0, category_id=cat_id,
+                include_polygons=include_polygons, poly_override=poly_override,
+            )
             ann["_image_file_name"] = file_name
             anns.append(ann)
+            # Paint label map (last shape wins on overlap) + accumulate per class.
+            label[mask] = cat_id
+            cname = cat_id_to_name.get(cat_id, str(cat_id))
+            if cname not in class_acc:
+                class_acc[cname] = np.zeros((h, w), dtype=bool)
+            class_acc[cname] |= mask
 
-        splits_data[split]["images"].append({
-            "file_name": file_name,
-            "height": h,
-            "width": w,
-            "source_key": str(payload.source),
-            "slice_index": slice_idx,
-            "png_bytes": png_bytes,
-        })
-        splits_data[split]["annotations"].extend(anns)
+        # Semantic map is always emitted (zeros for negative slices) so every
+        # exported image has a matching label; per-class only where present.
+        class_masks = {name: _encode_png((m * 255).astype(np.uint8)) for name, m in class_acc.items()}
+
+        result = {
+            "split": resolved_splits.get(slice_key, "train"),
+            "image": {
+                "file_name": file_name,
+                "height": h,
+                "width": w,
+                "source_key": str(payload.source),
+                "slice_index": slice_idx,
+                "png_bytes": png_bytes,
+                "label_png_bytes": _encode_png(label),
+                "class_masks": class_masks,
+            },
+            "annotations": anns,
+            "skipped": skipped,
+        }
+        if progress_cb is not None:
+            progress_cb(f"slice {slice_idx}: {len(anns)} object(s)")
+        return result
+
+    splits_data: dict[str, dict[str, Any]] = {}
+    skipped_zero_area = 0
+
+    # I/O-bound (Tiled reads) + partially GIL-releasing (numpy/PIL/pycocotools)
+    # → thread pool. EXPORT_WORKERS tunes parallelism. ex.map preserves order.
+    import os
+    workers = min(int(os.getenv("EXPORT_WORKERS", "16")), max(1, len(all_keys)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(_process_slice, all_keys))
+
+    for r in results:
+        split = r["split"]
+        if split not in splits_data:
+            splits_data[split] = {"images": [], "annotations": []}
+        splits_data[split]["images"].append(r["image"])
+        splits_data[split]["annotations"].extend(r["annotations"])
+        skipped_zero_area += r["skipped"]
 
     info = {
-        "description": "SAM3 fine-tune dataset -- SAM3 Annotation Studio",
+        "description": "SAM3 fine-tune dataset -- Segmentation Annotation Studio",
         "date_created": datetime.now(timezone.utc).isoformat(),
         "render": render_opts_mapped,
     }

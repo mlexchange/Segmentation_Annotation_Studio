@@ -1,0 +1,248 @@
+/* ------------------------------------------------------------------ *
+ * Finch theme for MkDocs Material
+ * Mirrors the Segmentation Annotation Studio "Finch" shell (Tailwind sky/slate).
+ *   sidebar  sky-950  #082f49      main      sky-900  #0c4a6e
+ *   header   sky-100  #e0f2fe      active    sky-300  #7dd3fc
+ *   primary  sky-600  #0284c7      accent    sky-400  #38bdf8
+ * ------------------------------------------------------------------ */
+
+:root {
+  --radius: 0.5rem;
+
+  /* Finch sky scale */
+  --finch-sky-50:  #f0f9ff;
+  --finch-sky-100: #e0f2fe;
+  --finch-sky-200: #bae6fd;
+  --finch-sky-300: #7dd3fc;
+  --finch-sky-400: #38bdf8;
+  --finch-sky-500: #0ea5e9;
+  --finch-sky-600: #0284c7;
+  --finch-sky-700: #0369a1;
+  --finch-sky-800: #075985;
+  --finch-sky-900: #0c4a6e;
+  --finch-sky-950: #082f49;
+}
+
+/* ---------- Light mode (default scheme) ------------------------------ */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color:        var(--finch-sky-950);
+  --md-primary-fg-color--light: var(--finch-sky-900);
+  --md-primary-fg-color--dark:  #041f31;
+  --md-primary-bg-color:        #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
+
+  --md-accent-fg-color:         var(--finch-sky-600);
+  --md-accent-fg-color--transparent: rgba(2, 132, 199, 0.1);
+
+  --md-typeset-a-color:         var(--finch-sky-700);
+  --md-footer-bg-color:         var(--finch-sky-950);
+  --md-footer-bg-color--dark:   #041f31;
+}
+
+/* ---------- Dark mode (slate scheme) --------------------------------- */
+[data-md-color-scheme="slate"] {
+  --md-hue: 210;
+  --md-primary-fg-color:        var(--finch-sky-950);
+  --md-primary-fg-color--light: var(--finch-sky-800);
+  --md-primary-fg-color--dark:  #04151f;
+  --md-primary-bg-color:        #e0f2fe;
+
+  --md-accent-fg-color:         var(--finch-sky-400);
+  --md-accent-fg-color--transparent: rgba(56, 189, 248, 0.1);
+
+  --md-default-bg-color:        #0c1a26;
+  --md-typeset-a-color:         var(--finch-sky-300);
+  --md-footer-bg-color:         #041f31;
+}
+
+/* ---------- Typography ---------------------------------------------- */
+.md-typeset h1,
+.md-typeset h2 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--finch-sky-900);
+}
+[data-md-color-scheme="slate"] .md-typeset h1,
+[data-md-color-scheme="slate"] .md-typeset h2 {
+  color: var(--finch-sky-200);
+}
+
+.md-typeset h2 {
+  margin-top: 2.4rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+/* ---------- Header / logo ------------------------------------------- */
+.md-header {
+  box-shadow: 0 2px 6px rgba(8, 47, 73, 0.25);
+}
+.md-header__button.md-logo img {
+  height: 2rem;
+  width: 2rem;
+  border-radius: var(--radius);
+}
+
+/* ---------- Navigation: active item = Finch sky-300 ----------------- */
+.md-nav__link--active,
+.md-nav__item .md-nav__link--active {
+  color: var(--finch-sky-700);
+  font-weight: 600;
+}
+[data-md-color-scheme="slate"] .md-nav__link--active {
+  color: var(--finch-sky-300);
+}
+
+.md-nav__item--section > .md-nav__link {
+  color: var(--finch-sky-800);
+}
+[data-md-color-scheme="slate"] .md-nav__item--section > .md-nav__link {
+  color: var(--finch-sky-300);
+}
+
+/* ---------- Rounded corners everywhere (Finch --radius) ------------- */
+.md-typeset .admonition,
+.md-typeset details,
+.md-typeset pre > code,
+.md-typeset .tabbed-set > .tabbed-content,
+.md-typeset table:not([class]),
+.md-typeset img {
+  border-radius: var(--radius);
+}
+
+/* ---------- Code blocks --------------------------------------------- */
+.md-typeset pre > code {
+  border: 1px solid var(--md-default-fg-color--lightest);
+}
+.md-typeset code {
+  border-radius: calc(var(--radius) - 2px);
+}
+
+/* ---------- Buttons (.md-button) — Finch primary -------------------- */
+.md-typeset .md-button {
+  border-radius: var(--radius);
+  border-width: 2px;
+  transition: background-color 150ms, color 150ms, border-color 150ms;
+}
+.md-typeset .md-button--primary {
+  background-color: var(--finch-sky-600);
+  border-color: var(--finch-sky-600);
+  color: #ffffff;
+}
+.md-typeset .md-button--primary:hover {
+  background-color: var(--finch-sky-700);
+  border-color: var(--finch-sky-700);
+  color: #ffffff;
+}
+.md-typeset .md-button:not(.md-button--primary):hover {
+  background-color: var(--finch-sky-600);
+  border-color: var(--finch-sky-600);
+  color: #ffffff;
+}
+
+/* ---------- Tables --------------------------------------------------- */
+.md-typeset table:not([class]) {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  overflow: hidden;
+}
+.md-typeset table:not([class]) th {
+  background-color: var(--finch-sky-900);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+/* ---------- Admonitions: recolor "note" to Finch sky ---------------- */
+.md-typeset .admonition.note,
+.md-typeset details.note {
+  border-color: var(--finch-sky-500);
+}
+.md-typeset .note > .admonition-title,
+.md-typeset .note > summary {
+  background-color: rgba(14, 165, 233, 0.1);
+}
+.md-typeset .note > .admonition-title::before,
+.md-typeset .note > summary::before {
+  background-color: var(--finch-sky-500);
+}
+
+/* ---------- Keyboard keys ------------------------------------------- */
+.md-typeset kbd {
+  background-color: var(--finch-sky-50);
+  border-radius: calc(var(--radius) - 2px);
+  box-shadow:
+    0 0 0 1px var(--finch-sky-200),
+    0 2px 0 var(--finch-sky-200);
+  color: var(--finch-sky-900);
+  padding: 0 0.4em;
+}
+[data-md-color-scheme="slate"] .md-typeset kbd {
+  background-color: #10263a;
+  color: var(--finch-sky-100);
+  box-shadow:
+    0 0 0 1px var(--finch-sky-800),
+    0 2px 0 var(--finch-sky-800);
+}
+
+/* ---------- Home hero ----------------------------------------------- */
+.finch-hero {
+  background: linear-gradient(135deg, var(--finch-sky-950) 0%, var(--finch-sky-800) 100%);
+  color: #ffffff;
+  border-radius: calc(var(--radius) * 1.5);
+  padding: 2.5rem 2rem;
+  margin: 1rem 0 2rem;
+  box-shadow: 0 10px 15px -3px rgba(8, 47, 73, 0.35);
+}
+.finch-hero h1 {
+  color: #ffffff !important;
+  margin: 0 0 0.5rem;
+  font-size: 2rem;
+}
+.finch-hero p {
+  color: var(--finch-sky-100);
+  font-size: 1.05rem;
+  margin: 0.25rem 0 0;
+  max-width: 42rem;
+}
+
+/* ---------- Feature grid on home ------------------------------------ */
+.finch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+.finch-card {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  background-color: var(--md-default-bg-color);
+  transition: border-color 150ms, box-shadow 150ms, transform 150ms;
+}
+.finch-card:hover {
+  border-color: var(--finch-sky-400);
+  box-shadow: 0 4px 12px rgba(2, 132, 199, 0.15);
+  transform: translateY(-2px);
+}
+.finch-card h3 {
+  margin-top: 0.25rem;
+  color: var(--finch-sky-700);
+}
+[data-md-color-scheme="slate"] .finch-card h3 {
+  color: var(--finch-sky-300);
+}
+
+/* ---------- Colored "chip" for UI labels in prose ------------------- */
+.finch-chip {
+  display: inline-block;
+  padding: 0.05em 0.5em;
+  border-radius: 9999px;
+  background-color: var(--finch-sky-100);
+  color: var(--finch-sky-800);
+  font-size: 0.85em;
+  font-weight: 600;
+  white-space: nowrap;
+}
+[data-md-color-scheme="slate"] .finch-chip {
+  background-color: #10344d;
+  color: var(--finch-sky-200);
+}

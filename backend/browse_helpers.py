@@ -36,6 +36,26 @@ _STUDIO_RAW_KEYS: tuple[str, ...] = (
     "studio_updated_at",
 )
 
+# Ingest-time keys worth showing as Browse facets even when only ONE distinct
+# value exists (e.g. a single dropped file, or a whole batch sharing one
+# user-supplied description). Without this they'd be hidden by the >=2 rule.
+_INGEST_FACET_RAW_KEYS: tuple[str, ...] = (
+    "description",
+    "keywords",
+    "sample_name",
+    "original_filename",
+)
+
+# Keys that qualify as a facet with a single distinct value (vs. the default >=2).
+_SINGLE_VALUE_FACET_RAW_KEYS: frozenset[str] = frozenset(
+    (*_STUDIO_RAW_KEYS, *_INGEST_FACET_RAW_KEYS),
+)
+
+# Metadata keys stored as a LIST of values (rather than a scalar). Each element
+# is treated as its own distinct Browse value, and filtering matches membership
+# (via Tiled's ``Contains`` query) rather than equality.
+_LIST_VALUED_RAW_KEYS: frozenset[str] = frozenset({"keywords"})
+
 # Raw keys that are stored at the array-node level rather than on the parent
 # sample container. When a filter references one of these, we switch to a
 # per-sample search path.
@@ -116,12 +136,17 @@ def build_field_mapping(container_node: Any) -> FieldMapping:
     )
 
 
+# Ingest writes these at the dataset-container level, so they're always worth
+# offering as facets even when the scanned sample metadata didn't surface them.
+_INJECTED_INGEST_RAW_KEYS: tuple[str, ...] = ("description", "keywords", "sample_name")
+
+
 def _inject_studio_keys(
     display_to_raw: dict[str, str],
     raw_to_display: dict[str, str],
 ) -> None:
-    """Ensure studio annotation fields are always available in Browse."""
-    for raw_key in _STUDIO_RAW_KEYS:
+    """Ensure studio annotation + ingest description fields are always in Browse."""
+    for raw_key in (*_STUDIO_RAW_KEYS, *_INJECTED_INGEST_RAW_KEYS):
         display_key = _display_name(raw_key)
         display_to_raw.setdefault(display_key, raw_key)
         raw_to_display.setdefault(raw_key, display_key)
@@ -157,14 +182,60 @@ def _display_name(raw_key: str) -> str:
 # Distinct values
 # ---------------------------------------------------------------------------
 
+def scoped_metadata_rows(node: Any, limit: int = 5000) -> list[dict]:
+    """Read each child's metadata once for a *specific* container.
+
+    Tiled's ``container.distinct()`` aggregates across the whole catalog, not
+    just the node it's called on, so it can't be used to compute values scoped
+    to a chosen sub-container. Iterating children gives correctly-scoped data
+    at the cost of one metadata read per child.
+    """
+    rows: list[dict] = []
+    try:
+        for key in list(node)[:limit]:
+            try:
+                meta = node[key].metadata
+                rows.append(dict(meta) if meta else {})
+            except Exception:  # noqa: BLE001 — skip children that fail to open
+                continue
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("scoped_metadata_rows iteration failed: %s", exc)
+    return rows
+
+
+def distinct_from_rows(rows: list[dict], raw_key: str) -> list[dict]:
+    """Tally distinct values of *raw_key* across pre-read metadata *rows*.
+
+    List-valued metadata (e.g. ``keywords``) is exploded so each element is
+    counted as its own distinct value, making every tag individually filterable.
+    """
+    counts: dict[Any, int] = {}
+    for meta in rows:
+        val = meta.get(raw_key)
+        if val is None:
+            continue
+        values = val if isinstance(val, (list, tuple)) else [val]
+        for item in values:
+            if item is None:
+                continue
+            counts[item] = counts.get(item, 0) + 1
+    return [{"value": v, "count": c} for v, c in counts.items()]
+
+
 def tiled_distinct_values(
     container_node: Any,
     raw_key: str,
     filters: Optional[dict] = None,
     field_mapping: Optional[FieldMapping] = None,
     limit: int = 500,
+    scoped: bool = False,
 ) -> dict:
-    """Call ``container.distinct(raw_key)`` with optional upstream filters.
+    """Return distinct values (+ counts) for *raw_key* under optional filters.
+
+    When *scoped* is True, values are computed by iterating the (filtered)
+    container's children so they reflect only that container — use this when
+    browsing a specific ``container_path``. Otherwise the faster but
+    catalog-global ``container.distinct()`` is used.
 
     Returns::
 
@@ -189,12 +260,15 @@ def tiled_distinct_values(
         except Exception:  # noqa: BLE001 — Tiled raises a range of errors here
             pass
 
-    try:
-        result = node.distinct(raw_key, counts=True)
-        raw_values = result.get("metadata", {}).get(raw_key, [])
-    except Exception as exc:
-        logger.warning("distinct() failed for key %r: %s", raw_key, exc)
-        raw_values = []
+    if scoped:
+        raw_values = distinct_from_rows(scoped_metadata_rows(node), raw_key)
+    else:
+        try:
+            result = node.distinct(raw_key, counts=True)
+            raw_values = result.get("metadata", {}).get(raw_key, [])
+        except Exception as exc:
+            logger.warning("distinct() failed for key %r: %s", raw_key, exc)
+            raw_values = []
 
     non_null = [entry for entry in raw_values if _is_valid_value(entry.get("value"))]
     sorted_vals = sorted(non_null, key=lambda e: (-e.get("count", 0), str(e["value"])))[:limit]
@@ -262,14 +336,38 @@ def _search_container_only(
         for k in list(node)[:limit]:
             try:
                 entry = node[k]
-                meta = dict(entry.metadata) if hasattr(entry, "metadata") else {}
-                items.append({"path": _join(prefix, k), "sample": k, "metadata": meta})
+                meta = dict(entry.metadata) if hasattr(entry, "metadata") and entry.metadata else {}
+                n_slices = 1
+                # Drag-and-drop ingest nests as browse/<dataset>/<array(s)>: the
+                # dataset is a container of array slices, with the descriptive
+                # metadata on the children. Report the slice count (so the UI can
+                # offer drill-in) and, if the container itself is metadata-less,
+                # borrow the first child's metadata (cheap metadata-only read).
+                if _is_container(entry):
+                    child_keys = list(entry)
+                    if child_keys and not _is_container(entry[child_keys[0]]):
+                        n_slices = len(child_keys)  # flat stack of array slices
+                        if not meta:
+                            cmeta = entry[child_keys[0]].metadata
+                            meta = dict(cmeta) if cmeta else {}
+                items.append({
+                    "path": _join(prefix, k),
+                    "sample": k,
+                    "metadata": meta,
+                    "n_slices": n_slices,
+                })
             except Exception:  # noqa: BLE001
                 continue
     except Exception as exc:  # noqa: BLE001
         logger.warning("tiled_search_items iteration failed: %s", exc)
 
     return {"items": items, "total": len(items)}
+
+
+def _is_container(entry: Any) -> bool:
+    """True if *entry* is a Tiled container (vs. an array/leaf) node."""
+    sf = getattr(entry, "structure_family", None)
+    return str(getattr(sf, "value", sf)) == "container"
 
 
 def _search_array_only(
@@ -363,24 +461,44 @@ def _raw_filters(
 
 
 def _apply_filters(node: Any, raw_filters: Iterable[tuple[str, str]]) -> Any:
-    """Apply each ``Key(...) == value`` filter to *node*, skipping failures."""
+    """Apply each filter to *node*, skipping failures.
+
+    List-valued keys (e.g. ``keywords``) match membership via ``Contains``;
+    scalar keys match equality via ``Key(...) == value``.
+    """
     from tiled.queries import Key
+
+    try:
+        from tiled.queries import Contains
+    except ImportError:  # pragma: no cover — older Tiled without Contains
+        Contains = None
 
     for r_key, val in raw_filters:
         try:
-            node = node.search(Key(r_key) == _typed_query_value(val))
+            if r_key in _LIST_VALUED_RAW_KEYS and Contains is not None:
+                node = node.search(Contains(r_key, val))
+            else:
+                node = node.search(Key(r_key) == _typed_query_value(val))
         except Exception:  # noqa: BLE001
             pass
     return node
 
 
 def _matches_container_filters(meta: dict, container_filters: list[tuple[str, str]]) -> bool:
-    """Case-insensitive exact match over container-level metadata."""
+    """Case-insensitive match over container-level metadata.
+
+    Scalar values match by equality; list-valued metadata matches if the filter
+    value is one of the list's members.
+    """
     for r_key, val in container_filters:
         sample_val = meta.get(r_key)
         if sample_val is None:
             return False
-        if str(sample_val).strip().lower() != val.strip().lower():
+        target = val.strip().lower()
+        if isinstance(sample_val, (list, tuple)):
+            if target not in {str(item).strip().lower() for item in sample_val}:
+                return False
+        elif str(sample_val).strip().lower() != target:
             return False
     return True
 
@@ -398,7 +516,9 @@ def _typed_query_value(raw: str) -> Any:
     except (ValueError, TypeError):
         pass
     try:
-        return float(raw)
+        fv = float(raw)
+        if str(fv) == raw:
+            return fv
     except (ValueError, TypeError):
         pass
     return raw

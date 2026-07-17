@@ -8,14 +8,29 @@ interface ResizeDividerProps {
   onResize: (newWidth: number) => void;
   /** When true, dragging right shrinks this column (resize the column to the right of the divider) */
   resizeRight?: boolean;
+  /** Optional clamp overrides (defaults: 120 / 600). */
+  minWidth?: number;
+  maxWidth?: number;
   className?: string;
 }
 
-export default function ResizeDivider({ currentWidth, onResize, resizeRight = false, className = '' }: ResizeDividerProps) {
+/**
+ * ResizeDivider — draggable vertical separator that resizes an adjacent column.
+ * Tracks mouse drag globally while pressed and reports the clamped width via onResize.
+ */
+export default function ResizeDivider({
+  currentWidth,
+  onResize,
+  resizeRight = false,
+  minWidth = MIN_WIDTH,
+  maxWidth = MAX_WIDTH,
+  className = '',
+}: ResizeDividerProps) {
   const [dragging, setDragging] = useState(false);
   const startX = useRef(0);
   const startWidth = useRef(currentWidth);
 
+  /** Captures the drag start position/width and begins the resize gesture. */
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -32,7 +47,7 @@ export default function ResizeDivider({ currentWidth, onResize, resizeRight = fa
     const handleMove = (e: MouseEvent) => {
       const delta = e.clientX - startX.current;
       const signed = resizeRight ? -delta : delta;
-      const newWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + signed));
+      const newWidth = Math.min(maxWidth, Math.max(minWidth, startWidth.current + signed));
       onResize(newWidth);
     };
 
@@ -50,7 +65,7 @@ export default function ResizeDivider({ currentWidth, onResize, resizeRight = fa
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
-  }, [dragging, onResize, resizeRight]);
+  }, [dragging, onResize, resizeRight, minWidth, maxWidth]);
 
   return (
     <div

@@ -80,7 +80,6 @@ def _import_from_coco(coco: dict[str, Any]) -> dict[str, Any]:
     from skimage import measure
 
     images_by_id = {img["id"]: img for img in coco.get("images", [])}
-    cats_by_id = {c["id"]: c for c in coco.get("categories", [])}
 
     classes = [
         {"classId": c["id"], "label": c["name"], "color": "#1f77b4", "isVisible": True}

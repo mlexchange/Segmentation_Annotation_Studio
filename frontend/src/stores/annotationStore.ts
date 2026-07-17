@@ -4,6 +4,7 @@
  */
 import { create } from 'zustand';
 import { temporal } from 'zundo';
+import { v4 as uuidv4 } from 'uuid';
 
 // ---- Shape types ----
 
@@ -13,15 +14,26 @@ export interface BrushStroke {
   mode: 'paint' | 'erase';
 }
 
+/** An erase carve-out applied to any vector shape (polygon/rect/ellipse). */
+export interface EraseStroke {
+  points: number[];
+  radius: number;
+}
+
 export interface BaseShape {
   id: string;
   classId: number;
   kind: Shape['kind'];
+  /** Optional erase carve-outs (rendered destination-out, subtracted on export). */
+  erased?: EraseStroke[];
 }
 
 export interface PolygonShape extends BaseShape {
   kind: 'polygon';
   points: number[];
+  /** Optional inner rings (flat [x,y,…] image coords) carved out of the outer
+   *  polygon — e.g. produced by "invert shape". Rendered/rasterized even-odd. */
+  holes?: number[][];
 }
 
 export interface RectShape extends BaseShape {
@@ -48,16 +60,40 @@ export interface BrushShape extends BaseShape {
 export type Shape = PolygonShape | RectShape | EllipseShape | BrushShape;
 export type Split = 'train' | 'valid' | 'test';
 
+/** Deep-clone a shape with a fresh id (used when copying across slices). */
+function cloneShapeWithNewId(shape: Shape): Shape {
+  return { ...structuredClone(shape), id: uuidv4() };
+}
+
 export interface AnnotationState {
   byImage: Record<string, Record<string, Shape[]>>;
   splitBySlice: Record<string, Record<string, Split | 'auto'>>;
   negativeSlices: Record<string, string[]>;
 
   addShape: (sourceKey: string, sliceIdx: number, shape: Shape) => void;
+  /** Append several shapes in one update (one undo step) — used by magic-wand. */
+  addShapes: (sourceKey: string, sliceIdx: number, shapes: Shape[]) => void;
   removeShape: (sourceKey: string, sliceIdx: number, shapeId: string) => void;
+  /** Remove several shapes in one update (one undo step). */
+  removeShapes: (sourceKey: string, sliceIdx: number, shapeIds: string[]) => void;
+  /** Replace a single shape via an updater (used for move / vertex editing). */
+  updateShape: (sourceKey: string, sliceIdx: number, shapeId: string, updater: (shape: Shape) => Shape) => void;
+  /** Reassign several shapes to a class in one update (one undo step). */
+  setClassForShapes: (sourceKey: string, sliceIdx: number, shapeIds: string[], classId: number) => void;
+  /** Replace every shape of *classId* on a slice with *shapes* (one undo step).
+   *  Used by threshold/cleanup/interpolate to write a recomputed region back. */
+  replaceClassShapesOnSlice: (sourceKey: string, sliceIdx: number, classId: number, shapes: Shape[]) => void;
+  /** Clone shapes from *fromSlice* into each *toSlices* index (fresh ids, merged
+   *  with existing), optionally limited to one class. One undo step. */
+  copySliceShapes: (sourceKey: string, fromSlice: number, toSlices: number[], classId?: number | null) => void;
   /** Remove every shape with *classId* across all loaded samples (all slices). */
   removeShapesByClassId: (classId: number) => void;
+  /** Clone every shape of *fromClassId* into *toClassId*, across ALL slices of
+   *  *sourceKey* (fresh ids), in one undo step. Used to duplicate a class. */
+  duplicateClassShapes: (sourceKey: string, fromClassId: number, toClassId: number) => void;
   appendBrushStroke: (sourceKey: string, sliceIdx: number, shapeId: string, stroke: BrushStroke) => void;
+  /** Append an erase carve-out to any shape (brush → erase stroke; vector → `erased`). */
+  appendEraseStroke: (sourceKey: string, sliceIdx: number, shapeId: string, stroke: EraseStroke) => void;
   setShapes: (sourceKey: string, sliceIdx: number, shapes: Shape[]) => void;
   setSplitForSlice: (sourceKey: string, sliceIdx: number, split: Split | 'auto') => void;
   toggleNegativeSlice: (sourceKey: string, sliceIdx: number) => void;
@@ -75,6 +111,7 @@ export const useAnnotationStore = create<AnnotationState>()(
       splitBySlice: {},
       negativeSlices: {},
 
+      /** Appends one shape to the given (sourceKey, slice); one undo step. */
       addShape: (sourceKey, sliceIdx, shape) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -90,6 +127,23 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Appends several shapes in one update (one undo step); used by magic-wand. */
+      addShapes: (sourceKey, sliceIdx, shapes) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: [...prev, ...shapes],
+              },
+            },
+          };
+        }),
+
+      /** Removes the shape with the given id from the (sourceKey, slice). */
       removeShape: (sourceKey, sliceIdx, shapeId) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -105,6 +159,89 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Removes several shapes by id in one update (one undo step). */
+      removeShapes: (sourceKey, sliceIdx, shapeIds) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          const drop = new Set(shapeIds);
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: prev.filter((sh) => !drop.has(sh.id)),
+              },
+            },
+          };
+        }),
+
+      /** Replaces a single shape via the updater fn (move / vertex edit). */
+      updateShape: (sourceKey, sliceIdx, shapeId, updater) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: prev.map((sh) => (sh.id === shapeId ? updater(sh) : sh)),
+              },
+            },
+          };
+        }),
+
+      /** Reassigns every shape in *shapeIds* to *classId* (one undo step). */
+      setClassForShapes: (sourceKey, sliceIdx, shapeIds, classId) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          const ids = new Set(shapeIds);
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: prev.map((sh) => (ids.has(sh.id) ? { ...sh, classId } : sh)),
+              },
+            },
+          };
+        }),
+
+      /** Replaces all shapes of *classId* on one slice with *shapes* (one undo step). */
+      replaceClassShapesOnSlice: (sourceKey, sliceIdx, classId, shapes) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const prev = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          const kept = prev.filter((sh) => sh.classId !== classId);
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: [...kept, ...shapes],
+              },
+            },
+          };
+        }),
+
+      /** Clones shapes (fresh ids) from *fromSlice* into each *toSlices* index. */
+      copySliceShapes: (sourceKey, fromSlice, toSlices, classId = null) =>
+        set((s) => {
+          const src = s.byImage[sourceKey]?.[String(fromSlice)] ?? [];
+          const picked = classId == null ? src : src.filter((sh) => sh.classId === classId);
+          if (picked.length === 0) return {};
+          const slices = { ...(s.byImage[sourceKey] ?? {}) };
+          for (const t of toSlices) {
+            if (t === fromSlice) continue;
+            const key = String(t);
+            slices[key] = [...(slices[key] ?? []), ...picked.map(cloneShapeWithNewId)];
+          }
+          return { byImage: { ...s.byImage, [sourceKey]: slices } };
+        }),
+
+      /** Removes every shape of *classId* across all samples/slices, pruning emptied slices and sources. */
       removeShapesByClassId: (classId) =>
         set((s) => {
           const nextByImage: Record<string, Record<string, Shape[]>> = {};
@@ -123,6 +260,23 @@ export const useAnnotationStore = create<AnnotationState>()(
           return { byImage: nextByImage };
         }),
 
+      /** Clone every shape of *fromClassId* into *toClassId* across all slices of
+       *  *sourceKey* (fresh ids), merged with existing shapes. One undo step. */
+      duplicateClassShapes: (sourceKey, fromClassId, toClassId) =>
+        set((s) => {
+          const slices = s.byImage[sourceKey];
+          if (!slices) return {};
+          const nextSlices: Record<string, Shape[]> = {};
+          for (const [sliceKey, shapes] of Object.entries(slices)) {
+            const copies = shapes
+              .filter((sh) => sh.classId === fromClassId)
+              .map((sh) => ({ ...cloneShapeWithNewId(sh), classId: toClassId }));
+            nextSlices[sliceKey] = copies.length ? [...shapes, ...copies] : shapes;
+          }
+          return { byImage: { ...s.byImage, [sourceKey]: nextSlices } };
+        }),
+
+      /** Appends a brush stroke to the named brush shape; no-op for non-brush shapes. */
       appendBrushStroke: (sourceKey, sliceIdx, shapeId, stroke) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -142,6 +296,29 @@ export const useAnnotationStore = create<AnnotationState>()(
           };
         }),
 
+      /** Appends an erase carve-out: brush shapes get an erase stroke, vector shapes get an `erased` entry. */
+      appendEraseStroke: (sourceKey, sliceIdx, shapeId, stroke) =>
+        set((s) => {
+          const sliceKey = String(sliceIdx);
+          const shapes = s.byImage[sourceKey]?.[sliceKey] ?? [];
+          return {
+            byImage: {
+              ...s.byImage,
+              [sourceKey]: {
+                ...(s.byImage[sourceKey] ?? {}),
+                [sliceKey]: shapes.map((sh) => {
+                  if (sh.id !== shapeId) return sh;
+                  if (sh.kind === 'brush') {
+                    return { ...sh, strokes: [...sh.strokes, { ...stroke, mode: 'erase' as const }] };
+                  }
+                  return { ...sh, erased: [...(sh.erased ?? []), stroke] };
+                }),
+              },
+            },
+          };
+        }),
+
+      /** Replaces all shapes for the given (sourceKey, slice). */
       setShapes: (sourceKey, sliceIdx, shapes) =>
         set((s) => ({
           byImage: {
@@ -153,6 +330,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           },
         })),
 
+      /** Sets the train/valid/test split (or 'auto') for one slice. */
       setSplitForSlice: (sourceKey, sliceIdx, split) =>
         set((s) => ({
           splitBySlice: {
@@ -164,6 +342,7 @@ export const useAnnotationStore = create<AnnotationState>()(
           },
         })),
 
+      /** Toggles whether a slice is flagged as a negative (background-only) example. */
       toggleNegativeSlice: (sourceKey, sliceIdx) =>
         set((s) => {
           const sliceKey = String(sliceIdx);
@@ -174,16 +353,21 @@ export const useAnnotationStore = create<AnnotationState>()(
           return { negativeSlices: { ...s.negativeSlices, [sourceKey]: next } };
         }),
 
+      /** Replaces ALL annotation data wholesale; used only on initial session restore. */
       loadFromDraft: (draft) =>
         set({ byImage: draft.byImage, splitBySlice: draft.splitBySlice, negativeSlices: draft.negativeSlices }),
 
+      /** Merges one sample's data into the store, leaving other samples untouched.
+       *  The draft's split map arrives loosely typed (JSON); its values are always
+       *  'train' | 'valid' | 'test' | 'auto', so we narrow it here. */
       mergeSourceDraft: (sourceKey, slices, splitMap, negSlices) =>
         set((s) => ({
           byImage: { ...s.byImage, [sourceKey]: slices },
-          splitBySlice: { ...s.splitBySlice, [sourceKey]: splitMap },
+          splitBySlice: { ...s.splitBySlice, [sourceKey]: splitMap as Record<string, Split | 'auto'> },
           negativeSlices: { ...s.negativeSlices, [sourceKey]: negSlices },
         })),
 
+      /** Clears all shapes, splits, and negative-slice flags. */
       reset: () => set({ byImage: {}, splitBySlice: {}, negativeSlices: {} }),
     }),
     { limit: 200, partialize: (s) => ({ byImage: s.byImage }) }

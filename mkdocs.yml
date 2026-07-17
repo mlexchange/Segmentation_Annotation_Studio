@@ -1,0 +1,100 @@
+site_name: Segmentation Annotation Studio
+site_description: >-
+  User guide for the Segmentation Annotation Studio — install the tool, annotate
+  images, and export COCO datasets for SAM3 fine-tuning.
+site_author: ALS Computing
+docs_dir: docs
+use_directory_urls: true
+
+theme:
+  name: material
+  language: en
+  logo: assets/logo.png
+  favicon: assets/logo.png
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/git-alt
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+    - content.tooltips
+    - search.suggest
+    - search.highlight
+  palette:
+    # Light mode — Finch sky palette
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    # Dark mode — Finch deep-sky palette
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+extra_css:
+  - stylesheets/finch.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.keys
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quick start: getting-started/quick-start.md
+  - Using the tool:
+      - Overview: guide/index.md
+      - 1. Connect to data: guide/connect.md
+      - 2. Browse & select: guide/browse.md
+      - 3. Annotate: guide/annotate.md
+      - 4. Annotation guide: guide/reference-guide.md
+      - 5. Export & download: guide/export.md
+  - Reference:
+      - Software architecture: reference/architecture.md
+      - Keyboard shortcuts: reference/shortcuts.md
+      - Troubleshooting: reference/troubleshooting.md
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/

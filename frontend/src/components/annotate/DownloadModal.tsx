@@ -3,18 +3,19 @@
  */
 import { useMemo, useState } from 'react';
 import { DownloadSimple, X, CheckCircle, WarningCircle } from '@phosphor-icons/react';
-import { API_BASE } from '@/config';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
 import { useRatingStore } from '@/stores/ratingStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { buildSourceKey } from '@/lib/sourceKey';
+import { useExportJob } from '@/hooks/useExportJob';
 
 interface DownloadModalProps {
   onClose: () => void;
 }
 
-type Scope = 'current' | 'all' | 'stars1' | 'stars2' | 'stars3';
+type Scope = 'slice' | 'current' | 'all' | 'stars1' | 'stars2' | 'stars3';
 
 /** Parse a canonical sourceKey back to { kind, source, serverUri }. */
 function parseSourceKey(sk: string) {
@@ -27,6 +28,11 @@ function parseSourceKey(sk: string) {
 }
 
 const SCOPE_OPTIONS: { value: Scope; label: string; desc: string; stars?: string }[] = [
+  {
+    value: 'slice',
+    label: 'Current slice only',
+    desc: 'Export just the slice currently open in the viewer.',
+  },
   {
     value: 'current',
     label: 'Current sample only',
@@ -57,19 +63,25 @@ const SCOPE_OPTIONS: { value: Scope; label: string; desc: string; stars?: string
   },
 ];
 
+/** Renders the COCO download dialog and drives the export job for the chosen scope. */
 export default function DownloadModal({ onClose }: DownloadModalProps) {
-  const { source, kind, serverUri } = useDatasetStore();
+  const { source, kind, serverUri, currentSlice } = useDatasetStore();
   const { byImage, splitBySlice, negativeSlices } = useAnnotationStore();
   const { classes } = useClassStore();
   const ratings = useRatingStore((s) => s.ratings);
+  const annotatorName = useSettingsStore((s) => s.annotatorName);
+  const setAnnotatorName = useSettingsStore((s) => s.setAnnotatorName);
 
   const [scope, setScope] = useState<Scope>('current');
-  const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [message, setMessage] = useState('');
+  const [includePolygons, setIncludePolygons] = useState(false);
+  const [format, setFormat] = useState<'coco_sam3' | 'lightly_dinov3'>('coco_sam3');
+  const { state: job, start, startMaskSync, downloadUrl } = useExportJob();
+  const status = job.status;
+  const maskResult = Array.isArray(job.result?.written) ? (job.result.written as Array<{ container?: string; n_slices?: number; updated?: number }>) : null;
 
   /** Preview count of samples that would be exported for the selected scope. */
   const previewCount = useMemo(() => {
-    if (scope === 'current') return source ? 1 : 0;
+    if (scope === 'slice' || scope === 'current') return source ? 1 : 0;
     const minStars = scope === 'stars1' ? 1 : scope === 'stars2' ? 2 : scope === 'stars3' ? 3 : 0;
     return Object.keys(byImage).filter((sk) => {
       const hasShapes = Object.values(byImage[sk]).some((s) => s.length > 0);
@@ -79,17 +91,28 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
     }).length;
   }, [scope, source, byImage, ratings]);
 
+  /** Builds the per-sample export source list for the selected scope; throws if no current sample. */
   const buildSources = () => {
-    if (scope === 'current') {
+    if (scope === 'slice' || scope === 'current') {
       if (!source || !kind) throw new Error('No active sample loaded.');
       const sk = buildSourceKey(kind as 'tiled' | 'local', source, serverUri);
+      const allSlices = byImage[sk] ?? {};
+      const allSplits = splitBySlice[sk] ?? {};
+      const allNeg = negativeSlices[sk] ?? [];
+
+      // "Current slice only": keep just the slice open in the viewer.
+      const cur = String(currentSlice);
+      const slices = scope === 'slice' ? (allSlices[cur] ? { [cur]: allSlices[cur] } : {}) : allSlices;
+      const split_by_slice = scope === 'slice' ? (allSplits[cur] ? { [cur]: allSplits[cur] } : {}) : allSplits;
+      const negative_slices = scope === 'slice' ? allNeg.filter((k) => String(k) === cur) : allNeg;
+
       return [{
         kind,
         source,
         server_uri: serverUri ?? null,
-        slices: byImage[sk] ?? {},
-        split_by_slice: splitBySlice[sk] ?? {},
-        negative_slices: negativeSlices[sk] ?? [],
+        slices,
+        split_by_slice,
+        negative_slices,
       }];
     }
 
@@ -115,36 +138,40 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
       });
   };
 
-  const handleExport = async () => {
-    setStatus('running');
-    setMessage('');
+  /** Builds the sources (alerting on error/empty) and starts the COCO export job. */
+  const handleExport = () => {
+    let sources;
     try {
-      const sources = buildSources();
-      if (sources.length === 0) throw new Error('No samples match the selected scope.');
-
-      const res = await fetch(`${API_BASE}/api/export/coco`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sources, classes, mode: 'merge' }),
-      });
-
-      if (!res.ok) throw new Error(await res.text());
-      const result = await res.json();
-
-      setStatus('done');
-      setMessage(
-        `Exported ${sources.length} sample${sources.length !== 1 ? 's' : ''} to ${result.dataset_path ?? 'disk'}.` +
-          (result.written
-            ? '  ' + Object.entries(result.written)
-                .map(([split, r]: [string, any]) => `${split}: ${r.n_images ?? 0} images`)
-                .join(', ')
-            : ''),
-      );
+      sources = buildSources();
     } catch (e) {
-      setStatus('error');
-      setMessage(String(e));
+      // buildSources throws only for an empty/invalid scope; surface inline.
+      window.alert(String(e));
+      return;
     }
+    if (sources.length === 0) { window.alert('No samples match the selected scope.'); return; }
+    start({ sources, classes, mode: 'merge', format, include_polygons: includePolygons, annotator: annotatorName.trim() });
   };
+
+  /** True when the chosen scope can actually write back to Tiled. */
+  const canMaskSync =
+    previewCount > 0 && !((scope === 'slice' || scope === 'current') && kind !== 'tiled');
+
+  /** Rasterizes the selected sources' masks and writes them into Tiled (no zip). */
+  const handleMaskSync = () => {
+    let sources;
+    try {
+      sources = buildSources();
+    } catch (e) {
+      window.alert(String(e));
+      return;
+    }
+    // Masks only write back to Tiled sources; the backend skips any local ones.
+    sources = sources.filter((s) => s.kind === 'tiled');
+    if (sources.length === 0) { window.alert('Masks can only be written to Tiled sources.'); return; }
+    startMaskSync({ sources, classes });
+  };
+
+  const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -154,7 +181,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-white">
             <DownloadSimple size={20} />
-            <span className="text-base font-semibold">Download COCO Dataset</span>
+            <span className="text-base font-semibold">Download Dataset</span>
           </div>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-white transition-colors">
             <X size={18} />
@@ -196,6 +223,57 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
           </div>
         </div>
 
+        {/* Annotator identity — stamped into the export so downloads are self-identifying. */}
+        {status === 'idle' && (
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400 uppercase tracking-wide">Annotator</label>
+            <input
+              type="text"
+              value={annotatorName}
+              onChange={(e) => setAnnotatorName(e.target.value)}
+              placeholder="Your name (recorded in the export)"
+              className="w-full rounded-md border border-slate-600 bg-slate-900/60 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+            />
+          </div>
+        )}
+
+        {/* Options */}
+        {status === 'idle' && (
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Format</p>
+            <div className="flex flex-col gap-1.5">
+              {([
+                ['coco_sam3', 'COCO (SAM3)', 'RLE masks + images, for SAM3 fine-tuning'],
+                ['lightly_dinov3', 'DINOv3 / Lightly', 'images/ + masks/ label PNGs (same filename) + classes.json'],
+              ] as const).map(([value, label, desc]) => (
+                <label key={value} className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="export-format"
+                    checked={format === value}
+                    onChange={() => setFormat(value)}
+                    className="mt-0.5 accent-sky-500"
+                  />
+                  <span>{label} <span className="text-slate-400">— {desc}</span></span>
+                </label>
+              ))}
+            </div>
+            {format === 'coco_sam3' && (
+              <label className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includePolygons}
+                  onChange={(e) => setIncludePolygons(e.target.checked)}
+                  className="mt-0.5 accent-sky-500"
+                />
+                <span>
+                  Include polygon copy in COCO <span className="text-slate-400">(slower; RLE masks are always exact — only needed for some external viewers)</span>
+                </span>
+              </label>
+            )}
+          </div>
+        )}
+
         {/* Preview count */}
         {status === 'idle' && (
           <p className="text-xs text-slate-400 text-right">
@@ -205,17 +283,50 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
           </p>
         )}
 
-        {/* Status messages */}
-        {status === 'done' && (
+        {/* Live progress: phase + bar + scrolling backend log */}
+        {(status === 'running' || status === 'done') && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs text-slate-300">
+              <span className="capitalize">{job.phase || 'working'}…</span>
+              {job.total > 0 && <span className="tabular-nums">{job.done}/{job.total} slices</span>}
+            </div>
+            <div className="h-1.5 w-full rounded bg-slate-700 overflow-hidden">
+              <div
+                className={`h-full transition-all ${status === 'done' ? 'bg-green-500' : 'bg-sky-500'}`}
+                style={{ width: status === 'done' ? '100%' : `${Math.max(5, pct)}%` }}
+              />
+            </div>
+            {job.log.length > 0 && (
+              <div className="max-h-28 overflow-y-auto rounded bg-slate-900/70 border border-slate-700 p-2 text-[11px] font-mono text-slate-400 leading-relaxed">
+                {job.log.slice(-12).map((line, i) => <div key={i}>{line}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+
+        {status === 'done' && maskResult && (
           <div className="flex items-start gap-2 text-sm text-green-300">
             <CheckCircle size={16} className="mt-0.5 shrink-0" />
-            <span>{message}</span>
+            <span className="min-w-0 break-words">
+              {maskResult.length === 0
+                ? 'No masks written (no Tiled sources or no annotated slices).'
+                : <>Masks merged into Tiled: {maskResult.map((w) => `${w.container} (${w.n_slices} slices total, ${w.updated ?? 0} updated)`).join(', ')}.</>}
+            </span>
+          </div>
+        )}
+        {status === 'done' && !maskResult && (
+          <div className="flex items-start gap-2 text-sm text-green-300">
+            <CheckCircle size={16} className="mt-0.5 shrink-0" />
+            <span className="min-w-0 break-words">
+              Saved to <span className="font-mono break-all">{String(job.result?.dataset_path ?? 'server')}</span> (Tiled).
+              {' '}Use <b>Download .zip</b> to save images + masks to your computer.
+            </span>
           </div>
         )}
         {status === 'error' && (
           <div className="flex items-start gap-2 text-sm text-red-400">
             <WarningCircle size={16} className="mt-0.5 shrink-0" />
-            <span>{message}</span>
+            <span className="min-w-0 break-words">{job.error ?? 'Export failed.'}</span>
           </div>
         )}
 
@@ -229,6 +340,30 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
             {status === 'done' ? 'Close' : 'Cancel'}
           </button>
           {status !== 'done' && (
+            <button
+              type="button"
+              onClick={handleMaskSync}
+              disabled={status === 'running' || !canMaskSync}
+              title={
+                canMaskSync
+                  ? 'Rasterize masks and write them into Tiled as stacked volumes (semantic + per-class) next to the dataset'
+                  : 'Only available for Tiled sources'
+              }
+              className="px-4 py-2 text-sm rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-900/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {status === 'running' ? 'Working…' : 'Push masks to Tiled'}
+            </button>
+          )}
+          {status === 'done' && downloadUrl ? (
+            <a
+              href={downloadUrl}
+              download
+              className="px-4 py-2 text-sm rounded-md bg-sky-600 text-white hover:bg-sky-500 transition-colors flex items-center gap-2"
+            >
+              <DownloadSimple size={15} />
+              Download .zip
+            </a>
+          ) : status !== 'done' && (
             <button
               type="button"
               onClick={handleExport}

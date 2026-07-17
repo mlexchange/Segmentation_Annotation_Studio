@@ -1,4 +1,4 @@
-"""Pydantic models for the SAM3 Annotation Studio API.
+"""Pydantic models for the Segmentation Annotation Studio API.
 
 Shapes
 ------
@@ -196,8 +196,18 @@ class ExportRequest(BaseModel):
     source: str = ""
     server_uri: str | None = None
     sources: list[ExportSourceItem] = Field(default_factory=list)
+    # Who produced this annotation. Stamped into the output folder name, COCO
+    # info, and manifest.json so downloads are self-identifying for external
+    # inter-annotator-agreement analysis.
+    annotator: str = ""
     mode: Literal["fail", "overwrite", "merge"] = "merge"
+    # Export target format: COCO-for-SAM3 (default) or DINOv3/Lightly semantic-seg
+    # (per-split images/ + masks/ with matching filename stems + classes.json).
+    format: Literal["coco_sam3", "lightly_dinov3"] = "coco_sam3"
     dry_run: bool = False
+    # Include the (costly) polygon copy in COCO segmentation_poly. RLE is always
+    # written and is exact; polygons are opt-in for external viewers.
+    include_polygons: bool = False
     render: RenderOpts = Field(default_factory=RenderOpts)
     classes: list[AnnotationClass] = Field(default_factory=list)
     slices: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
@@ -240,6 +250,46 @@ class SaveVersionRequest(BaseModel):
     thumbnail_base64: str | None = None
 
 
+class MeasureRequest(BaseModel):
+    """Request body for per-region intensity measurement.
+
+    Attributes:
+        slice_index: Zero-based slice to sample.
+        shapes: Serialised shape dicts; their union defines the measured region.
+    """
+
+    slice_index: int = 0
+    shapes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class GuideClass(BaseModel):
+    """One class entry in an annotation guide.
+
+    Attributes:
+        label: Human-readable class name (matches an annotation class label).
+        color: CSS colour string used for this class.
+        description: Free-text guidance on what the class is and how it looks.
+        exampleCrops: Base64 data-URL PNG crops illustrating the class.
+    """
+
+    label: str
+    color: str
+    description: str = ""
+    exampleCrops: list[str] = Field(default_factory=list)
+
+
+class GuidePayload(BaseModel):
+    """A project lead's annotation guide for a dataset.
+
+    Attributes:
+        classes: Ordered guide entries, one per class.
+        notes: Optional overall notes for the annotation task.
+    """
+
+    classes: list[GuideClass] = Field(default_factory=list)
+    notes: str = ""
+
+
 class ImageMeta(BaseModel):
     """Shape and dtype metadata for an opened image source.
 
@@ -250,6 +300,8 @@ class ImageMeta(BaseModel):
         dtype: NumPy dtype string (e.g. ``"float32"``).
         is_rgb: ``True`` if the array has a colour channel dimension.
         value_range: ``[min, max]`` of the first slice.
+        keywords: Dataset tags stored at ingest; each is pre-created as an
+            annotation class in the Annotate tab.
     """
 
     n_slices: int
@@ -258,3 +310,4 @@ class ImageMeta(BaseModel):
     dtype: str
     is_rgb: bool
     value_range: list[float]
+    keywords: list[str] = Field(default_factory=list)

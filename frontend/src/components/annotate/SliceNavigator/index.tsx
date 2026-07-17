@@ -5,7 +5,9 @@ import { CaretLeft, CaretRight, WarningCircle } from '@phosphor-icons/react';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { buildSourceKey } from '@/lib/sourceKey';
+import DebouncedSlider from '@/components/common/DebouncedSlider';
 
+/** Renders slice navigation controls bound to the dataset and annotation stores. */
 export default function SliceNavigator() {
   const { meta, currentSlice, source, kind, serverUri, setSlice } = useDatasetStore();
   const { byImage, negativeSlices, toggleNegativeSlice } = useAnnotationStore();
@@ -15,7 +17,7 @@ export default function SliceNavigator() {
     : null;
 
   if (!meta || !sourceKey) {
-    return <p className="text-xs text-gray-400">No dataset loaded.</p>;
+    return <p className="text-xs text-gray-500">No dataset loaded.</p>;
   }
 
   const n = meta.nSlices;
@@ -27,7 +29,9 @@ export default function SliceNavigator() {
 
   const isNegative = (negativeSlices[sourceKey] ?? []).includes(String(currentSlice));
 
+  /** Steps back one slice (clamped at 0); writes to the dataset store. */
   const prev = () => setSlice(Math.max(0, currentSlice - 1));
+  /** Steps forward one slice (clamped at the last slice); writes to the dataset store. */
   const next = () => setSlice(Math.min(n - 1, currentSlice + 1));
 
   return (
@@ -36,14 +40,13 @@ export default function SliceNavigator() {
         Slice {currentSlice + 1} / {n}
       </span>
 
-      <input
-        type="range"
+      <DebouncedSlider
         min={0}
         max={n - 1}
         value={currentSlice}
-        onChange={(e) => setSlice(Number(e.target.value))}
-        className="w-full"
-        aria-label="Slice index"
+        onChange={setSlice}
+        debounceMs={120}
+        ariaLabel="Slice index"
       />
 
       <div className="flex items-center gap-1">
