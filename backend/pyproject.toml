@@ -8,6 +8,9 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
+  # Required by FastAPI for multipart form data (the /api/ingest/upload route uses
+  # Form/UploadFile). Not pulled in transitively, so it must be declared explicitly.
+  "python-multipart>=0.0.9",
   "uvicorn[standard]>=0.30",
   # Client only — the app talks to an EXTERNAL Tiled (tiled.client / tiled.queries).
   # The Tiled *server* is not a runtime dependency and is intentionally not shipped
