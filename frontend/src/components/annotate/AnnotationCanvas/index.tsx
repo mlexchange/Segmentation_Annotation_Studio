@@ -11,7 +11,7 @@
  * committed to the Zustand store ONCE on mouseup, eliminating the per-frame
  * store updates + zundo history snapshots that caused cursor lag.
  */
-import { useRef, useState, useEffect, useCallback, useMemo, useId } from 'react';
+import { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo, useId } from 'react';
 import {
   Stage, Layer, Image as KonvaImage, Line, Rect, Ellipse, Group, Circle, Transformer,
   Shape as KonvaShape,
@@ -438,6 +438,13 @@ export default function AnnotationCanvas({
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
   const { byImage, addShape, addShapes, appendBrushStroke, updateShape, removeShapes, setShapes, setClassForShapes } = useAnnotationStore();
+  // In-progress polygon/lasso draft lives in the store so it rides the undo/redo timeline
+  // (each node = one step; the close reopens on undo). Previews stay local (below).
+  const draft = useAnnotationStore((s) => s.draft);
+  const addPolyNode = useAnnotationStore((s) => s.addPolyNode);
+  const addMagneticNode = useAnnotationStore((s) => s.addMagneticNode);
+  const clearDraft = useAnnotationStore((s) => s.clearDraft);
+  const commitDraftShapes = useAnnotationStore((s) => s.commitDraftShapes);
   const clipboard = useClipboardStore();
   const { tool, brushSize, fillOpacity, eraseAllClasses, selectScope, panReturnTool, selectedShapeIds, setSelectedShapeId, setSelectedShapeIds } = useToolStore();
   // While hold-Space panning, `tool` is 'pan' but we still want brush/eraser UI
@@ -464,8 +471,10 @@ export default function AnnotationCanvas({
   const [stageSize, setStageSize] = useState({ width: 800, height: 600 });
   const [transform, setTransform] = useState({ scaleX: 1, scaleY: 1, x: 0, y: 0 });
 
-  // Draft polygon vertices (click-vertex mode)
-  const [draftPoly, setDraftPoly] = useState<number[]>([]);
+  // Read aliases over the tracked store draft, gated to the current sample+slice so an
+  // undo that resurrects a draft from another slice/sample doesn't render here.
+  const draftMatchesContext = draft.sourceKey === sourceKey && draft.sliceKey === String(currentSlice);
+  const draftPoly = draftMatchesContext && draft.tool === 'polygon' ? draft.poly : [];
   // Whether the pointer is over the canvas — drives the brush/eraser cursor preview
   // visibility reactively (so it survives re-renders and tool switches, unlike a
   // purely imperative toggle).
@@ -495,14 +504,14 @@ export default function AnnotationCanvas({
   const [magicBoxDraft, setMagicBoxDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const magicDragStartRef = useRef<{ x: number; y: number } | null>(null);
 
-  // Magnetic lasso (livewire) state. Committed = locked path; preview = live
-  // least-cost path from the current seed to the cursor.
-  const [magneticCommitted, setMagneticCommitted] = useState<number[]>([]);
+  // Magnetic lasso (livewire). Committed path + seed live in the tracked store draft;
+  // the preview and dijkstra/cost caches are local (never on the undo timeline).
+  const magneticCommitted = draftMatchesContext && draft.tool === 'magnetic' ? draft.magnetic : [];
+  const magneticSeed = draftMatchesContext && draft.tool === 'magnetic' ? draft.magneticSeed : null;
   const [magneticPreview, setMagneticPreview] = useState<number[]>([]);
   const magneticCostRef = useRef<CostMap | null>(null);
   const magneticBuiltForRef = useRef<CanvasImageSource | null>(null);
   const magneticPrevRef = useRef<Int32Array | null>(null);
-  const magneticSeedRef = useRef<{ x: number; y: number } | null>(null);
   // True while a brush/eraser stroke is actively being drawn — suppresses the
   // (expensive) layer re-cache so we don't rebuild the shapes bitmap mid-stroke.
   const [isDrawing, setIsDrawing] = useState(false);
@@ -727,28 +736,33 @@ export default function AnnotationCanvas({
   /** Commit new shapes, clipping them against other classes when the toggle is on
    *  (neighbor classes act as a hard boundary), and merging with overlapping
    *  same-class shapes when that toggle is on. One undo step. */
-  const commitShapes = useCallback((newShapes: Shape[]) => {
-    if (!sourceKey || newShapes.length === 0) return;
-    const slice = useDatasetStore.getState().currentSlice;
-    const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(slice)] ?? [];
+  /** Pure: given new shapes + the slice's current shapes, return the FULL next slice array
+   *  after clip-to-other-classes and auto-merge-same-class. Used by both `commitShapes` and
+   *  the atomic polygon/lasso close so the whole result is one undo step. */
+  const computeCommittedSlice = useCallback((newShapes: Shape[], sliceShapes: Shape[]): Shape[] => {
     let toAdd = newShapes;
     if (clipToOtherClasses && meta && newShapes.some((s) => hasOtherClass(sliceShapes, s.classId))) {
       toAdd = clipShapesToOthers(newShapes, sliceShapes, meta.width, meta.height);
     }
-    // Auto-merge with overlapping same-class shapes (replaces those + the new shape
-    // with one unioned polygon). Runs after clipping so other-class bounds still hold.
+    // Auto-merge with overlapping same-class shapes (replaces those + the new shape with
+    // one unioned polygon). Runs after clipping so other-class bounds still hold.
     if (mergeOverlappingSameClass && meta && toAdd.length) {
       const { add, removeIds } = mergeNewWithSameClass(toAdd, sliceShapes, meta.width, meta.height);
       if (removeIds.length) {
-        // Remove the consumed originals + add the merged result in one undo step.
         const kept = sliceShapes.filter((s) => !removeIds.includes(s.id));
-        setShapes(sourceKey, slice, [...kept, ...add]);
-        return;
+        return [...kept, ...add];
       }
       toAdd = add;
     }
-    if (toAdd.length) addShapes(sourceKey, slice, toAdd);
-  }, [sourceKey, clipToOtherClasses, mergeOverlappingSameClass, meta, addShapes, setShapes]);
+    return [...sliceShapes, ...toAdd];
+  }, [clipToOtherClasses, mergeOverlappingSameClass, meta]);
+
+  const commitShapes = useCallback((newShapes: Shape[]) => {
+    if (!sourceKey || newShapes.length === 0) return;
+    const slice = useDatasetStore.getState().currentSlice;
+    const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(slice)] ?? [];
+    setShapes(sourceKey, slice, computeCommittedSlice(newShapes, sliceShapes));
+  }, [sourceKey, computeCommittedSlice, setShapes]);
 
   const activeColor =
     activeClassId !== null ? colorForClass(activeClassId) : '#4090ff';
@@ -778,13 +792,12 @@ export default function AnnotationCanvas({
     return cm;
   };
 
-  /** Clear the magnetic-lasso trace and its dijkstra/seed refs. */
+  /** Clear ONLY the local magnetic derived state (dijkstra + preview). The committed path
+   *  + seed live in the store draft, cleared separately via clearDraft()/commitDraftShapes()
+   *  so they stay on the undo timeline. */
   const resetMagnetic = useCallback(() => {
     magneticPrevRef.current = null;
-    magneticSeedRef.current = null;
-    setMagneticCommitted([]);
     setMagneticPreview([]);
-    magneticHistoryRef.current = [];
   }, []);
 
   /** Clear all magic-wand/SAM seeds, box, and preview state. */
@@ -947,21 +960,23 @@ export default function AnnotationCanvas({
     const prev = prevToolRef.current;
     prevToolRef.current = tool;
     if (tool === 'pan' || prev === 'pan') return; // entering/leaving pan keeps the draft
+    // Tracked clear: undo can reopen the abandoned draft (same slice/source context).
+    clearDraft();
     resetMagnetic();
     resetMagic();
-    setDraftPoly([]);
-    magneticHistoryRef.current = [];
-    lastClosedRef.current = null;
-  }, [tool, resetMagnetic, resetMagic]);
+  }, [tool, clearDraft, resetMagnetic, resetMagic]);
 
-  // A new image/slice always invalidates any in-progress draft.
+  // A new image/slice always invalidates any in-progress draft. currentSlice lives in a
+  // separate (untracked) store, so clear WITHOUT a history entry (pause) — otherwise undo
+  // would produce a half-reversible step it can't fully restore.
   useEffect(() => {
+    const temporal = useAnnotationStore.temporal.getState();
+    temporal.pause();
+    clearDraft();
+    temporal.resume();
     resetMagnetic();
     resetMagic();
-    setDraftPoly([]);
-    magneticHistoryRef.current = [];
-    lastClosedRef.current = null;
-  }, [currentSlice, sourceKey, resetMagnetic, resetMagic]);
+  }, [currentSlice, sourceKey, clearDraft, resetMagnetic, resetMagic]);
 
   // Keep the latest tool / preview / commit fn in refs so the single, stable Enter
   // handler always sees current values — no stale closure, no listener re-subscribe
@@ -973,22 +988,8 @@ export default function AnnotationCanvas({
   commitMagicRef.current = commitMagic;
   const toolRef = useRef(tool);
   toolRef.current = tool;
-  // Live mirrors + history for draft-aware Cmd/Ctrl+Z (see the capture-phase effect).
-  const draftPolyRef = useRef(draftPoly);
-  draftPolyRef.current = draftPoly;
-  const magneticCommittedRef = useRef(magneticCommitted);
-  magneticCommittedRef.current = magneticCommitted;
   const currentSliceRef = useRef(currentSlice);
   currentSliceRef.current = currentSlice;
-  // Magnetic per-click snapshots (committed path + seed) so Cmd+Z can pop a node.
-  const magneticHistoryRef = useRef<Array<{ committed: number[]; seed: { x: number; y: number } | null }>>([]);
-  // The polygon/lasso we JUST closed — lets one Cmd+Z reopen it to edit mode.
-  type MagneticSnap = { committed: number[]; seed: { x: number; y: number } | null };
-  const lastClosedRef = useRef<
-    | { tool: 'polygon'; sliceKey: string; points: number[] }
-    | { tool: 'magnetic'; sliceKey: string; committed: number[]; seed: { x: number; y: number } | null; history: MagneticSnap[] }
-    | null
-  >(null);
 
   // Escape cancels the entire in-progress shape (polygon vertices, magnetic
   // trace, magic selection, or rect/ellipse drag) without committing anything.
@@ -998,15 +999,13 @@ export default function AnnotationCanvas({
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if (e.key === 'Escape') {
-        setDraftPoly([]);
+        clearDraft();          // tracked: undo can reopen the abandoned draft
         setDragStart(null);
         setDragCurrent(null);
         setMarqueeStart(null);
         setMarqueeRect(null);
         resetMagnetic();
         resetMagic();
-        magneticHistoryRef.current = [];
-        lastClosedRef.current = null;
       } else if (
         e.key === 'Enter' &&
         (toolRef.current === 'magic' || toolRef.current === 'fill') &&
@@ -1018,68 +1017,30 @@ export default function AnnotationCanvas({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [resetMagnetic, resetMagic]);
+  }, [clearDraft, resetMagnetic, resetMagic]);
 
-  // Draft-aware Cmd/Ctrl+Z: while drafting a polygon/lasso — or right after
-  // accidentally closing one — undo the last NODE rather than the whole shape.
-  // Capture-phase + stopImmediatePropagation so it preempts the global undo in
-  // useKeybinds. Falls through (no preventDefault) to the normal undo otherwise.
-  useEffect(() => {
-    const onKeyCapture = (e: KeyboardEvent) => {
-      if (!((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey)) return;
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-
-      // (a) Polygon in progress → pop the last vertex.
-      if (toolRef.current === 'polygon' && draftPolyRef.current.length >= 2) {
-        e.preventDefault(); e.stopImmediatePropagation();
-        setDraftPoly((p) => p.slice(0, -2));
-        lastClosedRef.current = null;
-        return;
-      }
-      // (b) Magnetic in progress → pop the last committed node (restore seed/dijkstra).
-      if (toolRef.current === 'magnetic' &&
-          (magneticCommittedRef.current.length >= 2 || magneticHistoryRef.current.length)) {
-        e.preventDefault(); e.stopImmediatePropagation();
-        const snap = magneticHistoryRef.current.pop();
-        if (snap) {
-          setMagneticCommitted(snap.committed);
-          magneticSeedRef.current = snap.seed;
-          const cm = magneticCostRef.current;
-          magneticPrevRef.current = cm && snap.seed ? dijkstra(cm, imageToGrid(cm, snap.seed.x, snap.seed.y)) : null;
-          setMagneticPreview([]);
-        } else {
-          resetMagnetic();
-        }
-        lastClosedRef.current = null;
-        return;
-      }
-      // (c) Just-closed shape → reopen it to edit mode: undo the commit and restore
-      //     the in-progress draft. (Further Cmd+Z then pops more nodes.)
-      const lc = lastClosedRef.current;
-      if (lc && lc.tool === toolRef.current && lc.sliceKey === String(currentSliceRef.current)) {
-        e.preventDefault(); e.stopImmediatePropagation();
-        useAnnotationStore.temporal.getState().undo();
-        if (lc.tool === 'polygon') {
-          setDraftPoly(lc.points.slice(0, -2));
-        } else {
-          // Magnetic: restore the committed path + seed + least-cost map so the
-          // trace continues; the pre-close history lets further Cmd+Z pop nodes.
-          setMagneticCommitted(lc.committed);
-          magneticSeedRef.current = lc.seed;
-          magneticHistoryRef.current = lc.history;
-          const cm = magneticCostRef.current;
-          magneticPrevRef.current = cm && lc.seed ? dijkstra(cm, imageToGrid(cm, lc.seed.x, lc.seed.y)) : null;
-          setMagneticPreview([]);
-        }
-        lastClosedRef.current = null;
-        return;
-      }
-      // else: not a draft context — let the global undo run.
-    };
-    window.addEventListener('keydown', onKeyCapture, true); // capture phase
-    return () => window.removeEventListener('keydown', onKeyCapture, true);
-  }, [resetMagnetic]);
+  // Magnetic node-by-node undo/redo now falls out of the tracked store draft (each node
+  // is one undo step; closing/reopening is automatic). The only thing to reconcile is the
+  // DERIVED dijkstra map: whenever the committed magnetic seed changes from ANY cause —
+  // placing a node, or an undo/redo restoring an earlier draft — recompute it so tracing
+  // continues. useLayoutEffect so magneticPrevRef is ready before paint (no stale-trace flash).
+  useLayoutEffect(() => {
+    if (
+      draft.tool !== 'magnetic' ||
+      draft.sourceKey !== sourceKey ||
+      draft.sliceKey !== String(currentSlice) ||
+      !draft.magneticSeed
+    ) {
+      magneticPrevRef.current = null;
+      return;
+    }
+    const cm = ensureCostMap();
+    magneticPrevRef.current = cm
+      ? dijkstra(cm, imageToGrid(cm, draft.magneticSeed.x, draft.magneticSeed.y))
+      : null;
+    // ensureCostMap is a stable ref-reader; imageEl/displayBase cover its inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.magneticSeed, draft.tool, draft.sourceKey, draft.sliceKey, sourceKey, currentSlice, imageEl, displayBase]);
 
   /** Flush the buffered draft stroke to the Zustand store (one write per stroke). */
   const commitDraftStroke = () => {
@@ -1299,8 +1260,7 @@ export default function AnnotationCanvas({
     if (!pos) return;
 
     if (tool === 'polygon') {
-      setDraftPoly((prev) => [...prev, pos.x, pos.y]);
-      lastClosedRef.current = null; // a new vertex invalidates any reopen-on-close
+      addPolyNode(sourceKey, String(currentSlice), pos.x, pos.y);
     } else if (tool === 'magic') {
       // Seed the magic selection (the effect computes the preview).
       // SAM engine:
@@ -1336,20 +1296,13 @@ export default function AnnotationCanvas({
       }
     } else if (tool === 'magnetic') {
       const cm = ensureCostMap();
-      // Snapshot the pre-click state so Cmd+Z can pop this node (restore path+seed).
-      magneticHistoryRef.current.push({ committed: magneticCommitted, seed: magneticSeedRef.current });
-      lastClosedRef.current = null;
-      if (cm && magneticSeedRef.current && magneticPrevRef.current) {
-        // Lock in the least-cost path from the previous seed to this click.
-        const path = tracePath(cm, magneticPrevRef.current, imageToGrid(cm, pos.x, pos.y));
-        setMagneticCommitted((prev) => [...prev, ...path.slice(2)]);
-      } else {
-        // First click (or no edge map) — straight-segment fallback.
-        setMagneticCommitted((prev) => [...prev, pos.x, pos.y]);
-      }
-      // Re-seed at the click point.
-      magneticSeedRef.current = pos;
-      magneticPrevRef.current = cm ? dijkstra(cm, imageToGrid(cm, pos.x, pos.y)) : null;
+      // Lock in the least-cost path from the previous seed to this click (or a straight
+      // segment on the first click / no edge map). Each node is one tracked undo step;
+      // the dijkstra map for the new seed is recomputed by the layout-effect above.
+      const pathPoints = cm && magneticSeed && magneticPrevRef.current
+        ? tracePath(cm, magneticPrevRef.current, imageToGrid(cm, pos.x, pos.y)).slice(2)
+        : [pos.x, pos.y];
+      addMagneticNode(sourceKey, String(currentSlice), pathPoints, pos);
       setMagneticPreview([]);
     } else if (tool === 'fill') {
       // Paint bucket: a plain click seeds a single contiguous flood (within
@@ -1479,13 +1432,12 @@ export default function AnnotationCanvas({
     }
 
     // Magnetic lasso: live least-cost path from the seed to the cursor.
-    if (tool === 'magnetic' && magneticSeedRef.current) {
+    if (tool === 'magnetic' && magneticSeed) {
       const cm = magneticCostRef.current;
       if (cm && magneticPrevRef.current) {
         setMagneticPreview(tracePath(cm, magneticPrevRef.current, imageToGrid(cm, pos.x, pos.y)));
       } else {
-        const seed = magneticSeedRef.current;
-        setMagneticPreview([seed.x, seed.y, pos.x, pos.y]);
+        setMagneticPreview([magneticSeed.x, magneticSeed.y, pos.x, pos.y]);
       }
       return;
     }
@@ -1578,15 +1530,15 @@ export default function AnnotationCanvas({
     }
   };
 
-  /** Closes the in-progress polygon, or finishes & simplifies a magnetic trace, into a committed shape. */
+  /** Closes the in-progress polygon, or finishes & simplifies a magnetic trace, into a
+   *  committed shape. The commit + draft-clear happen in ONE store step (commitDraftShapes)
+   *  so undo reopens the shape to edit mode and redo re-closes it. */
   const handleStageDblClick = () => {
     if (isPreviewing) return;
     if (tool === 'polygon' && draftPoly.length >= 6 && sourceKey && activeClassId !== null) {
-      const id = uuidv4();
-      commitShapes([{ id, classId: activeClassId, kind: 'polygon', points: draftPoly }]);
-      // Remember the just-closed draft so one Cmd/Ctrl+Z can reopen it to edit mode.
-      lastClosedRef.current = { points: draftPoly, tool: 'polygon', sliceKey: String(currentSlice) };
-      setDraftPoly([]);
+      const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
+      const shape: Shape = { id: uuidv4(), classId: activeClassId, kind: 'polygon', points: draftPoly };
+      commitDraftShapes(sourceKey, currentSlice, computeCommittedSlice([shape], sliceShapes));
     } else if (tool === 'magnetic' && sourceKey && activeClassId !== null) {
       // Commit the final hovered segment, then close the traced polygon.
       let pts = magneticCommitted;
@@ -1596,19 +1548,14 @@ export default function AnnotationCanvas({
         pts = [...pts, ...tracePath(cm, magneticPrevRef.current, imageToGrid(cm, pos.x, pos.y)).slice(2)];
       }
       const simplified = simplifyPath(pts, 3);
-      let committed = false;
       if (simplified.length >= 6) {
-        commitShapes([{ id: uuidv4(), classId: activeClassId, kind: 'polygon', points: simplified }]);
-        committed = true;
+        const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
+        const shape: Shape = { id: uuidv4(), classId: activeClassId, kind: 'polygon', points: simplified };
+        commitDraftShapes(sourceKey, currentSlice, computeCommittedSlice([shape], sliceShapes));
+      } else {
+        clearDraft(); // trace too small to commit — discard (undo can restore it)
       }
-      // Snapshot the pre-close trace so one Cmd/Ctrl+Z can reopen it to edit mode.
-      const snapCommitted = magneticCommitted;
-      const snapSeed = magneticSeedRef.current;
-      const snapHistory = [...magneticHistoryRef.current];
       resetMagnetic();
-      lastClosedRef.current = committed
-        ? { tool: 'magnetic', sliceKey: String(currentSlice), committed: snapCommitted, seed: snapSeed, history: snapHistory }
-        : null;
     }
   };
 
@@ -2522,8 +2469,9 @@ export default function AnnotationCanvas({
           )}
 
           {/* Magnetic lasso: committed path (solid) + live edge-traced preview (dashed).
-              Kept visible while panning (tool flips to 'pan') so the trace survives. */}
-          {(tool === 'magnetic' || tool === 'pan') && magneticCommitted.length >= 2 && (
+              The committed path is context-gated in the store draft, so it stays visible
+              while panning and after an undo/redo restores it — regardless of current tool. */}
+          {magneticCommitted.length >= 2 && (
             <Line
               points={magneticCommitted}
               stroke={activeColor}
@@ -2546,10 +2494,10 @@ export default function AnnotationCanvas({
               perfectDrawEnabled={false}
             />
           )}
-          {(tool === 'magnetic' || tool === 'pan') && magneticSeedRef.current && (
+          {magneticSeed && (
             <Circle
-              x={magneticSeedRef.current.x}
-              y={magneticSeedRef.current.y}
+              x={magneticSeed.x}
+              y={magneticSeed.y}
               radius={4 / transform.scaleX}
               fill={activeColor}
               listening={false}

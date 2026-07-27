@@ -92,9 +92,12 @@ export function useOpenInAnnotate() {
 
       const sourceKey = buildSourceKey('tiled', tiledPath, serverUri);
       const hadClasses = await applyDraft(sourceKey, setClasses, mergeSourceDraft);
-      // No saved classes yet → pre-create one class per ingest keyword tag.
-      if (!hadClasses && Array.isArray(meta.keywords) && meta.keywords.length > 0) {
-        setClasses(classesFromKeywords(meta.keywords));
+      // Classes are per-sample. When the draft carried none, always reset to THIS
+      // sample's own set — keyword-seeded if available, else empty — so a previously
+      // opened sample's classes never linger (they would otherwise autosave into this
+      // sample's draft and cross-pollinate).
+      if (!hadClasses) {
+        setClasses(Array.isArray(meta.keywords) ? classesFromKeywords(meta.keywords) : []);
       }
       navigate('/annotate');
     },
@@ -121,8 +124,10 @@ export function useOpenInAnnotate() {
 
       const sourceKey = buildSourceKey('local', relPath);
       const hadClasses = await applyDraft(sourceKey, setClasses, mergeSourceDraft);
-      if (!hadClasses && Array.isArray(meta.keywords) && meta.keywords.length > 0) {
-        setClasses(classesFromKeywords(meta.keywords));
+      // Reset to this sample's own classes (empty if none) so a previously opened
+      // sample's classes never linger. See openTiledArray for the full rationale.
+      if (!hadClasses) {
+        setClasses(Array.isArray(meta.keywords) ? classesFromKeywords(meta.keywords) : []);
       }
       navigate('/annotate');
     },

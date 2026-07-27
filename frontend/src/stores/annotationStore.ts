@@ -6,6 +6,15 @@ import { create } from 'zustand';
 import { temporal } from 'zundo';
 import { v4 as uuidv4 } from 'uuid';
 
+// Called after every tracked edit (a real change to byImage — never on undo/redo, per
+// zundo's design). editHistory registers here to keep its class-delete journal in
+// lockstep with the temporal stack. Default is a no-op until registered.
+let onTrackedEdit: () => void = () => {};
+/** Register a callback fired on each tracked edit (see editHistory.ts). */
+export function setEditListener(fn: () => void) {
+  onTrackedEdit = fn;
+}
+
 // ---- Shape types ----
 
 export interface BrushStroke {
@@ -60,6 +69,20 @@ export interface BrushShape extends BaseShape {
 export type Shape = PolygonShape | RectShape | EllipseShape | BrushShape;
 export type Split = 'train' | 'valid' | 'test';
 
+/** The in-progress polygon/lasso being drawn. Tracked by zundo so each placed node is
+ *  one undo step and closing/reopening a shape falls out of undo/redo automatically. */
+export interface DraftState {
+  tool: 'polygon' | 'magnetic' | null;
+  sourceKey: string | null;
+  sliceKey: string | null;
+  poly: number[];                         // polygon vertices [x,y,...]
+  magnetic: number[];                     // committed magnetic-lasso path [x,y,...]
+  magneticSeed: { x: number; y: number } | null;
+}
+const EMPTY_DRAFT: DraftState = {
+  tool: null, sourceKey: null, sliceKey: null, poly: [], magnetic: [], magneticSeed: null,
+};
+
 /** Deep-clone a shape with a fresh id (used when copying across slices). */
 function cloneShapeWithNewId(shape: Shape): Shape {
   return { ...structuredClone(shape), id: uuidv4() };
@@ -69,6 +92,8 @@ export interface AnnotationState {
   byImage: Record<string, Record<string, Shape[]>>;
   splitBySlice: Record<string, Record<string, Split | 'auto'>>;
   negativeSlices: Record<string, string[]>;
+  /** In-progress polygon/lasso draft — tracked for node-by-node undo/redo. */
+  draft: DraftState;
 
   addShape: (sourceKey: string, sliceIdx: number, shape: Shape) => void;
   /** Append several shapes in one update (one undo step) — used by magic-wand. */
@@ -88,6 +113,10 @@ export interface AnnotationState {
   copySliceShapes: (sourceKey: string, fromSlice: number, toSlices: number[], classId?: number | null) => void;
   /** Remove every shape with *classId* across all loaded samples (all slices). */
   removeShapesByClassId: (classId: number) => void;
+  /** Remove every shape with *classId* within a single sample (*sourceKey*), across
+   *  its slices. Scoped so deleting a class never touches other samples' annotations.
+   *  Tracked by zundo, so Ctrl/Cmd+Z restores the removed regions. */
+  removeShapesByClassIdInSource: (sourceKey: string, classId: number) => void;
   /** Clone every shape of *fromClassId* into *toClassId*, across ALL slices of
    *  *sourceKey* (fresh ids), in one undo step. Used to duplicate a class. */
   duplicateClassShapes: (sourceKey: string, fromClassId: number, toClassId: number) => void;
@@ -102,6 +131,20 @@ export interface AnnotationState {
   /** Merges a single sample's annotation data into the store without clearing other samples. */
   mergeSourceDraft: (sourceKey: string, slices: Record<string, Shape[]>, splitBySlice: Record<string, string>, negativeSlices: string[]) => void;
   reset: () => void;
+  /** No-op content change to byImage that still creates one temporal (undo) entry.
+   *  Used to put a zero-region class deletion onto the undo timeline. */
+  touchHistory: () => void;
+
+  // ---- In-progress draft (polygon/lasso) — each is one tracked undo step ----
+  /** Append a polygon vertex (starts a fresh draft if the context changed). */
+  addPolyNode: (sourceKey: string, sliceKey: string, x: number, y: number) => void;
+  /** Append a magnetic-lasso node: the canvas passes the already-traced path points. */
+  addMagneticNode: (sourceKey: string, sliceKey: string, pathPoints: number[], seed: { x: number; y: number }) => void;
+  /** Discard the in-progress draft (Escape / tool switch). */
+  clearDraft: () => void;
+  /** Atomic close: write the committed slice AND clear the draft in one undo step, so
+   *  undo reopens the shape to edit mode and redo re-closes it. */
+  commitDraftShapes: (sourceKey: string, sliceIdx: number, nextSliceShapes: Shape[]) => void;
 }
 
 export const useAnnotationStore = create<AnnotationState>()(
@@ -110,6 +153,7 @@ export const useAnnotationStore = create<AnnotationState>()(
       byImage: {},
       splitBySlice: {},
       negativeSlices: {},
+      draft: EMPTY_DRAFT,
 
       /** Appends one shape to the given (sourceKey, slice); one undo step. */
       addShape: (sourceKey, sliceIdx, shape) =>
@@ -260,6 +304,28 @@ export const useAnnotationStore = create<AnnotationState>()(
           return { byImage: nextByImage };
         }),
 
+      /** Removes every shape of *classId* within one sample (*sourceKey*), pruning
+       *  emptied slices and the source itself; other samples are left untouched. */
+      removeShapesByClassIdInSource: (sourceKey, classId) =>
+        set((s) => {
+          const slices = s.byImage[sourceKey];
+          if (!slices) return {};
+          const nextSlices: Record<string, Shape[]> = {};
+          for (const [sliceKey, shapes] of Object.entries(slices)) {
+            const filtered = shapes.filter((sh) => sh.classId !== classId);
+            if (filtered.length > 0) {
+              nextSlices[sliceKey] = filtered;
+            }
+          }
+          const nextByImage = { ...s.byImage };
+          if (Object.keys(nextSlices).length > 0) {
+            nextByImage[sourceKey] = nextSlices;
+          } else {
+            delete nextByImage[sourceKey];
+          }
+          return { byImage: nextByImage };
+        }),
+
       /** Clone every shape of *fromClassId* into *toClassId* across all slices of
        *  *sourceKey* (fresh ids), merged with existing shapes. One undo step. */
       duplicateClassShapes: (sourceKey, fromClassId, toClassId) =>
@@ -368,8 +434,45 @@ export const useAnnotationStore = create<AnnotationState>()(
         })),
 
       /** Clears all shapes, splits, and negative-slice flags. */
-      reset: () => set({ byImage: {}, splitBySlice: {}, negativeSlices: {} }),
+      reset: () => set({ byImage: {}, splitBySlice: {}, negativeSlices: {}, draft: EMPTY_DRAFT }),
+
+      /** Shallow-clone byImage so a temporal entry is recorded without any real change. */
+      touchHistory: () => set((s) => ({ byImage: { ...s.byImage } })),
+
+      // ---- In-progress draft ----
+      addPolyNode: (sourceKey, sliceKey, x, y) =>
+        set((s) => {
+          const same = s.draft.tool === 'polygon' && s.draft.sourceKey === sourceKey && s.draft.sliceKey === sliceKey;
+          const poly = same ? [...s.draft.poly, x, y] : [x, y];
+          return { draft: { ...EMPTY_DRAFT, tool: 'polygon', sourceKey, sliceKey, poly } };
+        }),
+
+      addMagneticNode: (sourceKey, sliceKey, pathPoints, seed) =>
+        set((s) => {
+          const same = s.draft.tool === 'magnetic' && s.draft.sourceKey === sourceKey && s.draft.sliceKey === sliceKey;
+          const magnetic = same ? [...s.draft.magnetic, ...pathPoints] : [...pathPoints];
+          return { draft: { ...EMPTY_DRAFT, tool: 'magnetic', sourceKey, sliceKey, magnetic, magneticSeed: seed } };
+        }),
+
+      clearDraft: () => set({ draft: EMPTY_DRAFT }),
+
+      /** Commit the finished shape and clear the draft in ONE tracked set — so undo of
+       *  this step reopens the draft (shape removed) and redo re-closes it. */
+      commitDraftShapes: (sourceKey, sliceIdx, nextSliceShapes) =>
+        set((s) => ({
+          byImage: {
+            ...s.byImage,
+            [sourceKey]: { ...(s.byImage[sourceKey] ?? {}), [String(sliceIdx)]: nextSliceShapes },
+          },
+          draft: EMPTY_DRAFT,
+        })),
     }),
-    { limit: 200, partialize: (s) => ({ byImage: s.byImage }) }
+    {
+      limit: 200,
+      partialize: (s) => ({ byImage: s.byImage, draft: s.draft }),
+      // Notify the class-delete journal on each tracked edit. zundo calls onSave only
+      // for real edits (undo/redo bypass it), keeping the journal in lockstep.
+      onSave: () => onTrackedEdit(),
+    }
   )
 );

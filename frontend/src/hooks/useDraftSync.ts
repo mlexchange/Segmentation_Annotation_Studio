@@ -8,10 +8,21 @@ import { useClassStore } from '@/stores/classStore';
 
 const DEBOUNCE_MS = 1500;
 
+/** PUT the draft payload for a sourceKey. Fire-and-forget; a fetch already in flight
+ *  completes even if the component unmounts, so a flush-on-leave isn't dropped. */
+function putDraft(sourceKey: string, payload: unknown) {
+  return fetch(`${API_BASE}/api/annotations/draft?source_key=${encodeURIComponent(sourceKey)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).catch((err) => console.warn('Autosave failed:', err));
+}
+
 /**
  * Autosaves the current annotation stores for `sourceKey` to the draft endpoint,
- * debounced 1.5s on change, and flushes via sendBeacon on page unload. No-op when
- * sourceKey is null.
+ * debounced 1.5s on change. Also flushes immediately when the sample changes or the
+ * component unmounts (so a quick edit-then-navigate isn't lost to a cancelled debounce)
+ * and via sendBeacon on page unload. No-op when sourceKey is null.
  */
 export function useDraftSync(sourceKey: string | null) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -20,47 +31,65 @@ export function useDraftSync(sourceKey: string | null) {
   const negativeSlices = useAnnotationStore((s) => s.negativeSlices);
   const classes = useClassStore((s) => s.classes);
 
+  // Mirror the latest state in a ref so the flush-on-leave effect (keyed only on
+  // sourceKey) can read current data without re-subscribing — otherwise its cleanup
+  // would fire on every edit, not just when the sample actually changes.
+  const latestRef = useRef({ byImage, splitBySlice, negativeSlices, classes });
+  latestRef.current = { byImage, splitBySlice, negativeSlices, classes };
+
+  const buildPayload = (sk: string) => {
+    const state = latestRef.current;
+    return {
+      classes: state.classes,
+      slices: state.byImage[sk] ?? {},
+      split_by_slice: state.splitBySlice[sk] ?? {},
+      negative_slices: state.negativeSlices[sk] ?? [],
+    };
+  };
+
+  // Debounced autosave: re-arm on any change, save 1.5s after the last one.
   useEffect(() => {
     if (!sourceKey) return;
-
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
-      const payload = {
-        classes,
-        slices: byImage[sourceKey] ?? {},
-        split_by_slice: splitBySlice[sourceKey] ?? {},
-        negative_slices: negativeSlices[sourceKey] ?? [],
-      };
-      fetch(`${API_BASE}/api/annotations/draft?source_key=${encodeURIComponent(sourceKey)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      }).catch((err) => console.warn('Autosave failed:', err));
+      putDraft(sourceKey, buildPayload(sourceKey));
+      timerRef.current = null;
     }, DEBOUNCE_MS);
-
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
+    // buildPayload reads via ref; re-arm only on data/sourceKey change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceKey, byImage, splitBySlice, negativeSlices, classes]);
 
-  // Flush on page unload
+  // Flush any pending save when the sample changes or the component unmounts. Without
+  // this, navigating away within the debounce window silently drops the last edits
+  // (e.g. deleting classes then returning to Browse before the 1.5s timer fires).
+  useEffect(() => {
+    if (!sourceKey) return;
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      putDraft(sourceKey, buildPayload(sourceKey));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceKey]);
+
+  // Flush on full page unload (browser close/refresh — no React unmount fires).
   useEffect(() => {
     if (!sourceKey) return;
     const flush = () => {
-      const payload = {
-        classes,
-        slices: byImage[sourceKey] ?? {},
-        split_by_slice: splitBySlice[sourceKey] ?? {},
-        negative_slices: negativeSlices[sourceKey] ?? [],
-      };
       navigator.sendBeacon(
         `${API_BASE}/api/annotations/draft?source_key=${encodeURIComponent(sourceKey)}`,
-        JSON.stringify(payload)
+        JSON.stringify(buildPayload(sourceKey))
       );
     };
     window.addEventListener('beforeunload', flush);
     return () => window.removeEventListener('beforeunload', flush);
-  }, [sourceKey, byImage, splitBySlice, negativeSlices, classes]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceKey]);
 }
 
 /** Load a draft from the server for sourceKey. Returns null if none exists. */

@@ -11,19 +11,22 @@ import { useToolStore } from '@/stores/toolStore';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useReferenceGuideStore, type GuideClass } from '@/stores/referenceGuideStore';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { markClassDelete } from '@/hooks/editHistory';
 import { getClassPalette } from '@/lib/classColors';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { cn } from '@/lib/utils';
 import { Copy } from '@phosphor-icons/react';
 
-/** Counts all shapes assigned to a class across every image/slice in the annotation store. */
-function countShapesForClass(classId: number): number {
-  const { byImage } = useAnnotationStore.getState();
+/** Counts shapes assigned to a class within a single sample (*sourceKey*), across its
+ *  slices. Scoped to the current sample so the delete prompt never counts (or deletes)
+ *  annotations belonging to other samples that happen to reuse the same classId. */
+function countShapesForClass(classId: number, sourceKey: string | null): number {
+  if (!sourceKey) return 0;
+  const slices = useAnnotationStore.getState().byImage[sourceKey];
+  if (!slices) return 0;
   let total = 0;
-  for (const slices of Object.values(byImage)) {
-    for (const shapes of Object.values(slices)) {
-      total += shapes.filter((sh) => sh.classId === classId).length;
-    }
+  for (const shapes of Object.values(slices)) {
+    total += shapes.filter((sh) => sh.classId === classId).length;
   }
   return total;
 }
@@ -32,7 +35,9 @@ interface ClassRowProps {
   cls: AnnotationClass;
   isActive: boolean;
   onActivate: () => void;
-  onClassDeleted: (deletedClassId: number) => void;
+  /** Delete this class (with confirmation + undo) — handled by the parent so the
+   *  undo affordance can outlive this row. */
+  onDelete: () => void;
   /** Duplicate this class + all its shapes into a new class. */
   onDuplicate: () => void;
   /** Matching guide entry (description + example crops), if the guide defines this class. */
@@ -42,10 +47,8 @@ interface ClassRowProps {
 }
 
 /** Renders a single class row with inline rename, visibility toggle, and delete. */
-function ClassRow({ cls, isActive, onActivate, onClassDeleted, onDuplicate, guide, hotkey }: ClassRowProps) {
-  const { updateClass, deleteClass, toggleVisibility } = useClassStore();
-  const removeShapesByClassId = useAnnotationStore((s) => s.removeShapesByClassId);
-  const setSelectedShapeId = useToolStore((s) => s.setSelectedShapeId);
+function ClassRow({ cls, isActive, onActivate, onDelete, onDuplicate, guide, hotkey }: ClassRowProps) {
+  const { updateClass, toggleVisibility } = useClassStore();
   const [editing, setEditing] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
   const [labelInput, setLabelInput] = useState(cls.label);
@@ -67,28 +70,6 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, onDuplicate, guid
   const cancelEditing = () => {
     setLabelInput(cls.label);
     setEditing(false);
-  };
-
-  /** Confirms with the user, then removes the class and all of its shapes from the stores. */
-  const handleDelete = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const shapeCount = countShapesForClass(cls.classId);
-    const annotationNote =
-      shapeCount === 0
-        ? 'This class has no annotations.'
-        : shapeCount === 1
-          ? 'This will permanently delete 1 annotation.'
-          : `This will permanently delete ${shapeCount} annotations.`;
-
-    const confirmed = window.confirm(
-      `Do you really want to delete "${cls.label}" and its annotations?\n\n${annotationNote}`
-    );
-    if (!confirmed) return;
-
-    removeShapesByClassId(cls.classId);
-    deleteClass(cls.classId);
-    setSelectedShapeId(null);
-    onClassDeleted(cls.classId);
   };
 
   return (
@@ -184,7 +165,7 @@ function ClassRow({ cls, isActive, onActivate, onClassDeleted, onDuplicate, guid
         <button
           aria-label="Delete class and its annotations"
           className="shrink-0 p-0.5 hover:text-red-500"
-          onClick={handleDelete}
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
         >
           <Trash size={14} />
         </button>
@@ -222,8 +203,11 @@ const DEFAULT_SUGGESTED_CLASSES = ['air', 'sample', 'void', 'pore', 'background'
 
 /** Renders the class list, add form, and quick-add suggestion chips. */
 export default function ClassManager({ activeClassId, onActivate, onClassDeleted }: ClassManagerProps) {
-  const { classes, addClass } = useClassStore();
+  const { classes, addClass, deleteClass } = useClassStore();
   const duplicateClassShapes = useAnnotationStore((s) => s.duplicateClassShapes);
+  const removeShapesByClassIdInSource = useAnnotationStore((s) => s.removeShapesByClassIdInSource);
+  const touchHistory = useAnnotationStore((s) => s.touchHistory);
+  const setSelectedShapeId = useToolStore((s) => s.setSelectedShapeId);
   const { source, kind, serverUri } = useDatasetStore();
   const sourceKey = source && kind ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri) : null;
   const guideEntries = useReferenceGuideStore((s) => s.entries);
@@ -244,14 +228,34 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
     guideEntries.filter((g) => g.label.trim()).map((g) => [g.label.trim().toLowerCase(), g]),
   );
 
-  /** Notifies the parent of a deletion and re-activates the first remaining class if the active one was removed. */
-  const handleClassDeleted = (deletedClassId: number) => {
-    onClassDeleted?.(deletedClassId);
-    if (activeClassId === deletedClassId) {
+  /** Confirms, then removes the class and its regions (scoped to the current sample) and
+   *  re-activates the first remaining class. Registered for undo so Ctrl/Cmd+Z restores
+   *  the class entry along with its regions (see editHistory). */
+  const handleDeleteClass = (cls: AnnotationClass) => {
+    const shapeCount = countShapesForClass(cls.classId, sourceKey);
+    const note =
+      shapeCount === 0
+        ? 'This class has no annotations in this sample.'
+        : shapeCount === 1
+          ? 'This will delete 1 annotation in this sample.'
+          : `This will delete ${shapeCount} annotations in this sample.`;
+    if (!window.confirm(`Delete "${cls.label}"?\n\n${note}\n\nYou can undo with Ctrl/Cmd+Z.`)) return;
+
+    const index = classes.findIndex((c) => c.classId === cls.classId);
+    if (sourceKey) {
+      // Put the deletion on the undo timeline (see editHistory). Removing regions is a
+      // tracked edit; a region-less class still needs one entry, so we touch history.
+      markClassDelete(sourceKey, cls, index < 0 ? classes.length : index);
+      if (shapeCount > 0) removeShapesByClassIdInSource(sourceKey, cls.classId);
+      else touchHistory();
+    }
+    deleteClass(cls.classId);
+    setSelectedShapeId(null);
+
+    onClassDeleted?.(cls.classId);
+    if (activeClassId === cls.classId) {
       const remaining = useClassStore.getState().classes;
-      if (remaining.length > 0) {
-        onActivate(remaining[0].classId);
-      }
+      if (remaining.length > 0) onActivate(remaining[0].classId);
     }
   };
 
@@ -392,7 +396,7 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
             cls={cls}
             isActive={cls.classId === activeClassId}
             onActivate={() => onActivate(cls.classId)}
-            onClassDeleted={handleClassDeleted}
+            onDelete={() => handleDeleteClass(cls)}
             onDuplicate={() => handleDuplicate(cls)}
             guide={guideByLabel.get(cls.label.trim().toLowerCase())}
             hotkey={idx < 9 ? idx + 1 : undefined}
