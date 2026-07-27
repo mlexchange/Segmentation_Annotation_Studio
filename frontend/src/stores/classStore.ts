@@ -18,6 +18,7 @@ interface ClassStore {
   addClass: (label: string, color: string) => number;
   updateClass: (classId: number, updates: Partial<Omit<AnnotationClass, 'classId'>>) => void;
   deleteClass: (classId: number) => void;
+  insertClass: (cls: AnnotationClass, index: number) => void;
   toggleVisibility: (classId: number) => void;
   setClasses: (classes: AnnotationClass[]) => void;
   remapColors: (palette: string[]) => void;
@@ -43,6 +44,15 @@ export const useClassStore = create<ClassStore>((set, get) => ({
   /** Removes the class with the given id (does not touch existing shapes). */
   deleteClass: (classId) =>
     set((s) => ({ classes: s.classes.filter((c) => c.classId !== classId) })),
+  /** Re-inserts a previously-removed class at `index`, preserving its original classId
+   *  (used to undo a delete). No-op if a class with that id already exists. */
+  insertClass: (cls, index) =>
+    set((s) => {
+      if (s.classes.some((c) => c.classId === cls.classId)) return s;
+      const next = [...s.classes];
+      next.splice(Math.max(0, Math.min(index, next.length)), 0, cls);
+      return { classes: next };
+    }),
   /** Flips the class's isVisible flag (controls whether its shapes render). */
   toggleVisibility: (classId) =>
     set((s) => ({

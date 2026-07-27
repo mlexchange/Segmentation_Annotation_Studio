@@ -9,10 +9,9 @@
  * Other:   1-9=class  n=new brush instance  Del/Back=delete  Esc=cancel
  */
 import { useEffect, useRef } from 'react';
-import { useStore } from 'zustand';
+import * as editHistory from '@/hooks/editHistory';
 import { useToolStore, type Tool } from '@/stores/toolStore';
 import { useDatasetStore } from '@/stores/datasetStore';
-import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
 
 // Each tool's key is a letter in its label (shown underlined in the Toolbar).
@@ -43,7 +42,6 @@ export function useKeybinds(
   const { setTool, requestFit } = useToolStore();
   const { meta, currentSlice, setSlice } = useDatasetStore();
   const { classes } = useClassStore();
-  const temporalStore = useStore(useAnnotationStore.temporal);
 
   // Tracks the tool to revert to after a hold-Space pan ends.
   const prevToolRef = useRef<Tool | null>(null);
@@ -79,12 +77,12 @@ export function useKeybinds(
       // Undo / redo
       if ((e.ctrlKey || e.metaKey) && key.toLowerCase() === 'z' && !e.shiftKey) {
         e.preventDefault();
-        temporalStore.undo();
+        editHistory.undo();
         return;
       }
       if ((e.ctrlKey || e.metaKey) && ((key.toLowerCase() === 'z' && e.shiftKey) || key.toLowerCase() === 'y')) {
         e.preventDefault();
-        temporalStore.redo();
+        editHistory.redo();
         return;
       }
 
@@ -142,5 +140,5 @@ export function useKeybinds(
       window.removeEventListener('keydown', handler);
       window.removeEventListener('keyup', upHandler);
     };
-  }, [setTool, requestFit, meta, currentSlice, setSlice, classes, onActivateClass, onNewBrushInstance, onDeleteSelected, onCancelDraft, temporalStore]);
+  }, [setTool, requestFit, meta, currentSlice, setSlice, classes, onActivateClass, onNewBrushInstance, onDeleteSelected, onCancelDraft]);
 }

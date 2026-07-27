@@ -9,6 +9,7 @@ import { useAnnotationStore } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
 import { useClassStore } from '@/stores/classStore';
 import { useDraftSync } from '@/hooks/useDraftSync';
+import { clearHistory } from '@/hooks/editHistory';
 import { useGuideLoad } from '@/hooks/useGuideSync';
 import { useSave, type VersionPayload } from '@/hooks/useSave';
 import { buildSourceKey } from '@/lib/sourceKey';
@@ -87,6 +88,8 @@ export default function AnnotatePage() {
 
   // Crash-recovery autosave (local draft only, no Tiled sync)
   useDraftSync(sourceKey);
+  // Undo/redo is per-sample: reset the region history + class-delete journal on switch.
+  useEffect(() => { clearHistory(); }, [sourceKey]);
   // Load the dataset's annotation guide (read-only) for class suggestions/examples.
   useGuideLoad(sourceKey);
 

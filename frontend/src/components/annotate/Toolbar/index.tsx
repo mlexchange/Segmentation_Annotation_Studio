@@ -7,6 +7,7 @@ import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, Pa
 import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
+import * as editHistory from '@/hooks/editHistory';
 import { cn } from '@/lib/utils';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import { useSam } from '@/hooks/useSam';
@@ -95,7 +96,8 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     selectScope, setSelectScope,
   } = useToolStore();
   const sam = useSam(tool === 'magic' && magicEngine === 'sam');
-  const { undo, redo } = useStore(useAnnotationStore.temporal);
+  // Undo/redo route through editHistory so a class deletion replays alongside its region
+  // change; canUndo/canRedo still reflect the (1:1) zundo stack.
   const canUndo = useStore(useAnnotationStore.temporal, (s) => s.pastStates.length > 0);
   const canRedo = useStore(useAnnotationStore.temporal, (s) => s.futureStates.length > 0);
 
@@ -118,7 +120,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
       <div className="flex gap-1">
         <button
           type="button"
-          onClick={() => undo()}
+          onClick={() => editHistory.undo()}
           disabled={!canUndo}
           title="Undo (Ctrl/⌘+Z)"
           aria-label="Undo"
@@ -134,7 +136,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
         </button>
         <button
           type="button"
-          onClick={() => redo()}
+          onClick={() => editHistory.redo()}
           disabled={!canRedo}
           title="Redo (Ctrl+Shift+Z)"
           aria-label="Redo"
