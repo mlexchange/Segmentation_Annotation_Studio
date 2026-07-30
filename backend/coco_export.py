@@ -433,13 +433,27 @@ def write_lightly_split(
     return {"n_images": n, "n_annotations": 0, "path": str(img_dir)}
 
 
+# Lightly/DINOv3 uses train/val only: the app's 'valid' AND 'test' both fold into 'val'.
+LIGHTLY_SPLIT_DIRS = {"train": "train", "valid": "val", "test": "val"}
+
+
+def fold_lightly_splits(merged_splits: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map the app's train/valid/test splits onto Lightly's train/val directories,
+    merging the image lists of any splits that map to the same directory (valid+test
+    → val). Returns ``{dir_name: {"images": [...]}}``."""
+    folded: dict[str, dict[str, Any]] = {}
+    for split_name, split_data in merged_splits.items():
+        dir_name = LIGHTLY_SPLIT_DIRS.get(split_name, split_name)
+        folded.setdefault(dir_name, {"images": []})["images"].extend(split_data.get("images", []))
+    return folded
+
+
 def lightly_classes_map(categories: list[dict[str, Any]]) -> dict[str, str]:
-    """Build the Lightly ``classes`` mapping (index → name), 0 = background.
-    Category ids start at 1 and are contiguous (see build_export_plan)."""
-    out: dict[str, str] = {"0": "background"}
-    for c in categories:
-        out[str(int(c["id"]))] = str(c["name"])
-    return out
+    """Build the Lightly/DINOv3 ``classes`` mapping (index → name), 0-indexed and
+    contiguous with NO background class. Internal category ids are 1-based (see
+    build_export_plan), so shift by -1; unannotated pixels use 255 (ignore) instead
+    of a background class."""
+    return {str(int(c["id"]) - 1): str(c["name"]) for c in categories}
 
 
 def build_export_plan(
@@ -451,6 +465,7 @@ def build_export_plan(
     sample_global_stats_fn: Any,
     progress_cb: Any = None,
     include_polygons: bool = False,
+    lightly: bool = False,
 ) -> dict[str, Any]:
     """Build the full export plan (rasterize all shapes, render PNGs).
 
@@ -516,9 +531,10 @@ def build_export_plan(
         file_name = f"{source_stem}_{slice_idx:04d}.png"
         anns: list[dict[str, Any]] = []
         skipped = 0
-        # Semantic label map (class index per pixel, 0 = bg) + per-class binary
-        # masks, built from the same rasterization used for the COCO annotations.
-        label = np.zeros((h, w), dtype=np.uint8)
+        # Semantic label map + per-class binary masks, from the same rasterization
+        # used for the COCO annotations. COCO: 0 = background, classes 1..N. Lightly/
+        # DINOv3: unannotated = 255 (ignore), classes 0-indexed (cat_id - 1).
+        label = np.full((h, w), 255, dtype=np.uint8) if lightly else np.zeros((h, w), dtype=np.uint8)
         class_acc: dict[str, np.ndarray] = {}
         for shape in payload.slices.get(slice_key, []):
             shape_dict = shape if isinstance(shape, dict) else shape.model_dump()
@@ -541,7 +557,8 @@ def build_export_plan(
             ann["_image_file_name"] = file_name
             anns.append(ann)
             # Paint label map (last shape wins on overlap) + accumulate per class.
-            label[mask] = cat_id
+            # Lightly is 0-indexed (cat_id - 1); COCO keeps the 1-based id.
+            label[mask] = (cat_id - 1) if lightly else cat_id
             cname = cat_id_to_name.get(cat_id, str(cat_id))
             if cname not in class_acc:
                 class_acc[cname] = np.zeros((h, w), dtype=bool)

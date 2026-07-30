@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { File, PencilSimple, PencilLine, CaretRight, Stack } from '@phosphor-icons/react';
 import StarRating from './StarRating';
 import { useRatingStore, type StarRating as StarRatingValue } from '@/stores/ratingStore';
 import { useAnnotatedSourceKeys } from '@/hooks/useAnnotatedSourceKeys';
-import { buildSourceKey } from '@/lib/sourceKey';
+import { buildSourceKey, isAnnotatedPath } from '@/lib/sourceKey';
 import type { AnnotationFilter } from '@/types/annotationFilter';
 import type { BrowseItem } from './hooks/useBrowseData';
 
@@ -40,7 +40,7 @@ export default function ItemsColumn({
 
   const filtered = items.filter((item) => {
     const sk = buildSourceKey('tiled', item.path, serverUri);
-    const isAnnotated = itemIsAnnotated(item, sk, annotatedKeys);
+    const isAnnotated = itemIsAnnotated(item, serverUri, annotatedKeys);
 
     if (annotationFilter === 'annotated' && !isAnnotated) return false;
     if (annotationFilter === 'unannotated' && isAnnotated) return false;
@@ -124,13 +124,20 @@ interface ItemRowProps {
   serverUri: string;
 }
 
-/** True if annotated in-session, in drafts, or synced to Tiled metadata. */
+/**
+ * True if annotated in-session, in drafts, or synced to Tiled metadata.
+ *
+ * The draft lookup is path-tolerant (see `isAnnotatedPath`): a volume counts as
+ * annotated when one of its arrays was annotated under its own key, which is
+ * what "Annotate first image" produces — otherwise the dataset row looks
+ * untouched.
+ */
 function itemIsAnnotated(
   item: BrowseItem,
-  sourceKey: string,
+  serverUri: string,
   annotatedKeys: Set<string>,
 ): boolean {
-  if (annotatedKeys.has(sourceKey)) return true;
+  if (isAnnotatedPath(annotatedKeys, item.path, serverUri)) return true;
   const flag = item.metadata?.studio_annotated;
   return flag === 'yes' || flag === true;
 }
@@ -143,15 +150,26 @@ function ItemRow({ item, isSelected, isExpanded, onSelect, onOpenInAnnotate, ser
   const setRating = useRatingStore((s) => s.setRating);
   const annotatedKeys = useAnnotatedSourceKeys();
 
-  const isAnnotated = itemIsAnnotated(item, sourceKey, annotatedKeys);
+  const isAnnotated = itemIsAnnotated(item, serverUri, annotatedKeys);
   const sliceCount = item.n_slices ?? 1;
   const isVolume = sliceCount > 1;
 
   const background = isSelected || isExpanded ? 'bg-blue-700' : 'bg-transparent hover:bg-slate-700';
   const lit = isSelected || isExpanded;
 
+  // Keep the active row on screen. Matters when the selection is made for the
+  // user (arriving from ingest with a focus path) rather than by clicking;
+  // 'nearest' makes it a no-op for a row that is already visible.
+  const rowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (isSelected || isExpanded) rowRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [isSelected, isExpanded]);
+
   return (
-    <div className={`flex items-center transition-colors border-b border-slate-800 ${background}`}>
+    <div
+      ref={rowRef}
+      className={`flex items-center transition-colors border-b border-slate-800 ${background}`}
+    >
       {/* Selectable area is a role="button" div, not a <button>, because it
           contains StarRating's own buttons (button-in-button is invalid DOM). */}
       <div

@@ -115,17 +115,37 @@ export default function ConnectPage() {
 
   const canConnect = mode === 'tiled' ? !!selectedServerUri : !!grantedRoot && !!selectedFolder;
 
-  /** Set the Tiled connection (optional browse container) and, by default, navigate to Browse. */
-  const connectTiled = (containerPath: string | null, gotoBrowse = true) => {
+  /**
+   * Set the Tiled connection (optional browse container) and, by default, navigate to Browse.
+   *
+   * @param focusPath Sample to auto-select on arrival, when browsing from the root.
+   */
+  const connectTiled = (
+    containerPath: string | null,
+    gotoBrowse = true,
+    focusPath: string | null = null,
+  ) => {
     setConnection({
       kind: 'tiled',
       serverUri: selectedServerUri,
       browseContainerPath: containerPath,
+      browseFocusPath: focusPath,
       label: servers.find((s) => s.uri === selectedServerUri)?.name ?? selectedServerUri,
       sampleCount: 0,
     });
     if (gotoBrowse) navigate('/browse');
   };
+
+  /**
+   * Open an ingested dataset in Browse.
+   *
+   * Deliberately browses from the ROOT, not the dataset container: scoped into
+   * the container each row would be a single array slice, whose source key does
+   * not match the volume-level key annotations are stored under — so a dataset
+   * with existing annotations would look untouched. From the root the dataset is
+   * one drillable sample; `focusPath` selects it so the user still lands on it.
+   */
+  const browseIngested = (containerPath: string) => connectTiled(null, true, containerPath);
 
   // Jump straight from ingest to the Annotate tab for the first uploaded sample.
   const annotateIngested = (containerPath: string, firstKey: string) => {
@@ -349,7 +369,7 @@ export default function ConnectPage() {
             {selectedServerUri ? (
               <IngestDropzone
                 serverUri={selectedServerUri}
-                onBrowse={(containerPath) => connectTiled(containerPath)}
+                onBrowse={browseIngested}
                 onAnnotate={annotateIngested}
               />
             ) : (

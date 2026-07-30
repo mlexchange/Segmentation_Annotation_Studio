@@ -262,6 +262,25 @@ class MeasureRequest(BaseModel):
     shapes: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class IngestPreflightRequest(BaseModel):
+    """Request body for the pre-upload duplicate check.
+
+    Sent as a POST body rather than query params because a dropped folder can
+    hold hundreds of filenames — as a query string that exceeds the HTTP
+    header size limit and the request is rejected with 431 before routing.
+
+    Attributes:
+        container_path: Target container, e.g. ``browse/myset``.
+        names: Original filenames about to be uploaded (may be empty to only
+            ask for a suggested free container name).
+        server_uri: Target Tiled server URI; ``None`` uses the default server.
+    """
+
+    container_path: str
+    names: list[str] = Field(default_factory=list)
+    server_uri: str | None = None
+
+
 class GuideClass(BaseModel):
     """One class entry in an annotation guide.
 
