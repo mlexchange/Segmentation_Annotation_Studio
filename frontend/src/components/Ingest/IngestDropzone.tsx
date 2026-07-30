@@ -8,6 +8,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { UploadSimple, Warning, CheckCircle, CaretRight, CaretDown } from '@phosphor-icons/react';
 import { API_BASE } from '@/config';
+import ConflictDialog, { type IngestConflict } from './ConflictDialog';
+import { summarizeIngestErrors, type IngestError } from './ingestErrors';
 
 const SUPPORTED_EXTS = ['tif', 'tiff', 'npy', 'png', 'jpg', 'jpeg'];
 
@@ -16,9 +18,29 @@ interface JobStatus {
   total: number;
   done: number;
   failed: number;
-  errors: string[];
+  /** Duplicates left untouched because the user chose "skip". */
+  skipped: number;
+  errors: IngestError[];
   container_path: string;
 }
+
+/** Response of GET /api/ingest/preflight — what already exists at the destination. */
+interface Preflight {
+  container_exists: boolean;
+  existing_count: number;
+  conflicts: IngestConflict[];
+  suggested_container_path: string;
+}
+
+/** An upload held back while the user resolves a collision in ConflictDialog. */
+interface PendingUpload {
+  files: File[];
+  target: string;
+  preflight: Preflight;
+}
+
+/** How the backend should treat node keys that already exist. */
+type OnConflict = 'fail' | 'replace' | 'skip';
 
 interface IngestDropzoneProps {
   serverUri: string;
@@ -95,8 +117,17 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  // True while the pre-flight duplicate check is in flight (before any upload).
+  const [checking, setChecking] = useState(false);
   // Node key of the first ingested sample (for "Open in Annotate").
   const [firstKey, setFirstKey] = useState<string | null>(null);
+  // Set when duplicates are found; renders the ConflictDialog.
+  const [pending, setPending] = useState<PendingUpload | null>(null);
+  // Files of the in-flight/just-finished batch, kept so the post-upload conflict
+  // backstop can re-upload them without the user re-dropping the folder.
+  const [lastBatch, setLastBatch] = useState<{ files: File[]; target: string } | null>(null);
+  // Indices of error groups whose filenames are expanded.
+  const [expandedErrors, setExpandedErrors] = useState<Set<number>>(new Set());
   const pollRef = useRef<number | null>(null);
 
   /** Clear the active status-polling interval, if any. */
@@ -130,10 +161,78 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
   );
 
   /**
-   * Filter to supported files, derive a destination container name, POST the upload,
-   * then start polling the resulting job. Side-effects: sets status/error/firstKey state.
+   * Ask the server which of *names* already exist in *target*.
+   *
+   * POST, not GET: a dropped folder can hold hundreds of filenames, and as query
+   * params those blow past the HTTP header size limit (431) before the request is
+   * ever routed. Pass an empty *names* to only ask for a free container name.
    */
-  const startUpload = useCallback(
+  const requestPreflight = useCallback(
+    async (target: string, names: string[]): Promise<Preflight> => {
+      const res = await fetch(`${API_BASE}/api/ingest/preflight`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ container_path: target, names, server_uri: serverUri }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    [serverUri],
+  );
+
+  /**
+   * POST the files to the ingest endpoint and start polling the resulting job.
+   *
+   * @param onConflict How the backend should treat keys that already exist —
+   *   only ever anything but 'fail' after the user chose in ConflictDialog.
+   */
+  const doUpload = useCallback(
+    async (files: File[], target: string, onConflict: OnConflict) => {
+      setPending(null);
+      setError(null);
+      setStatus(null);
+      setExpandedErrors(new Set());
+      setLastBatch({ files, target });
+      setUploading(true);
+      try {
+        const fd = new FormData();
+        fd.append('container_path', target);
+        fd.append('on_conflict', onConflict);
+        if (description.trim()) fd.append('description', description.trim());
+        for (const f of files) fd.append('files', f, f.name);
+
+        const res = await fetch(
+          `${API_BASE}/api/ingest/upload?server_uri=${encodeURIComponent(serverUri)}`,
+          { method: 'POST', body: fd },
+        );
+        if (!res.ok) throw new Error(await res.text());
+        const { job_id } = await res.json();
+        setJobId(job_id);
+        setStatus({
+          state: 'running',
+          total: files.length,
+          done: 0,
+          failed: 0,
+          skipped: 0,
+          errors: [],
+          container_path: target,
+        });
+        poll(job_id);
+      } catch (e) {
+        setError(`Could not start the upload: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [description, serverUri, poll],
+  );
+
+  /**
+   * Filter to supported files, derive a destination container name, then ask the
+   * server whether any of these samples already exist there. Clean → upload
+   * straight away; duplicates → hand off to ConflictDialog so the user decides.
+   */
+  const prepareUpload = useCallback(
     async (files: File[], suggestedName: string) => {
       const supported = files.filter((f) => isSupported(f.name));
       if (supported.length === 0) {
@@ -154,33 +253,62 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
 
       // Remember the first sample (by name) so we can jump straight to Annotate.
       setFirstKey(fileStem(sortedNames[0]));
-
       setError(null);
-      setStatus(null);
-      setUploading(true);
-      try {
-        const fd = new FormData();
-        fd.append('container_path', target);
-        if (description.trim()) fd.append('description', description.trim());
-        for (const f of supported) fd.append('files', f, f.name);
 
-        const res = await fetch(
-          `${API_BASE}/api/ingest/upload?server_uri=${encodeURIComponent(serverUri)}`,
-          { method: 'POST', body: fd },
-        );
-        if (!res.ok) throw new Error(await res.text());
-        const { job_id } = await res.json();
-        setJobId(job_id);
-        setStatus({ state: 'running', total: supported.length, done: 0, failed: 0, errors: [], container_path: target });
-        poll(job_id);
+      setChecking(true);
+      try {
+        const pre = await requestPreflight(target, supported.map((f) => f.name));
+        if (pre.conflicts.length > 0) {
+          setPending({ files: supported, target, preflight: pre });
+          return;
+        }
       } catch (e) {
-        setError(String(e));
+        // Pre-flight is an optimization; never block the upload on it. If it did
+        // fail, the post-upload backstop below still offers the same choices.
+        console.warn('ingest pre-flight failed, uploading anyway', e);
       } finally {
-        setUploading(false);
+        setChecking(false);
       }
+      await doUpload(supported, target, 'fail');
     },
-    [containerPath, description, serverUri, poll],
+    [containerPath, requestPreflight, doUpload],
   );
+
+  /**
+   * Backstop for when pre-flight didn't run (or couldn't): if a finished job
+   * reports conflicts, offer the same four choices after the fact, re-using the
+   * files we still hold so the user never has to re-drop the folder.
+   */
+  useEffect(() => {
+    if (!status || (status.state !== 'done' && status.state !== 'error')) return;
+    const conflicts = status.errors.filter((e) => e?.kind === 'conflict');
+    if (conflicts.length === 0) {
+      setLastBatch(null);
+      return;
+    }
+    if (!lastBatch || lastBatch.target !== status.container_path) return;
+
+    let cancelled = false;
+    (async () => {
+      // Only for existing_count / a free name suggestion; conflicts are known.
+      const pre = await requestPreflight(lastBatch.target, []).catch(() => null);
+      if (cancelled) return;
+      setPending({
+        files: lastBatch.files,
+        target: lastBatch.target,
+        preflight: {
+          container_exists: true,
+          existing_count: pre?.existing_count ?? conflicts.length,
+          conflicts: conflicts.map((e) => ({ filename: e.filename, key: fileStem(e.filename) })),
+          suggested_container_path: pre?.suggested_container_path ?? `${lastBatch.target}_2`,
+        },
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // `pending` is deliberately not a dependency — setting it here must not retrigger.
+  }, [status, lastBatch, requestPreflight]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dirInputRef = useRef<HTMLInputElement | null>(null);
@@ -192,9 +320,9 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
       e.stopPropagation();
       setDragging(false);
       const { files, folderName } = await collectFromDrop(e.dataTransfer);
-      await startUpload(files, folderName);
+      await prepareUpload(files, folderName);
     },
-    [startUpload],
+    [prepareUpload],
   );
 
   /** File/folder input change handler: start the upload from the chosen files. */
@@ -202,14 +330,26 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = Array.from(e.target.files ?? []);
       const folderName = files[0]?.webkitRelativePath?.split('/')[0] ?? '';
-      startUpload(files, folderName);
+      prepareUpload(files, folderName);
     },
-    [startUpload],
+    [prepareUpload],
   );
 
+  /** Toggle the filename list of one error group. */
+  const toggleErrorGroup = useCallback((index: number) => {
+    setExpandedErrors((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(index)) next.add(index);
+      return next;
+    });
+  }, []);
+
+  /** Pre-flight and upload both lock the dropzone. */
+  const busy = uploading || checking;
+  const errorGroups = status ? summarizeIngestErrors(status.errors) : [];
   const done = status?.state === 'done';
   const failedFatally = status?.state === 'error';
-  const processed = status ? status.done + status.failed : 0;
+  const processed = status ? status.done + status.failed + status.skipped : 0;
   const pct = status && status.total ? Math.round((processed / status.total) * 100) : 0;
 
   return (
@@ -222,7 +362,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
           type="text"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          disabled={uploading}
+          disabled={busy}
           placeholder="e.g. air, sample, void, pore"
           className="mt-1 w-full border border-white/20 rounded-md px-2 py-1.5 text-sm bg-white/10 text-white focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-50"
         />
@@ -235,7 +375,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
       <div
         role="button"
         tabIndex={0}
-        onClick={() => !uploading && fileInputRef.current?.click()}
+        onClick={() => !busy && fileInputRef.current?.click()}
         onDragEnter={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -263,7 +403,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
           multiple
           accept=".tif,.tiff,.png,.jpg,.jpeg,.npy"
           onChange={onPick}
-          disabled={uploading}
+          disabled={busy}
           className="hidden"
         />
         <input
@@ -272,15 +412,19 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
           // @ts-expect-error — non-standard but widely supported for folder selection
           webkitdirectory=""
           onChange={onPick}
-          disabled={uploading}
+          disabled={busy}
           className="hidden"
         />
         <div className="flex flex-col items-center gap-2">
           <UploadSimple size={28} className="text-sky-300 pointer-events-none" />
           <p className="text-sm text-sky-100 font-medium pointer-events-none">
-            {uploading ? 'Uploading…' : 'Drag an image file or folder of images here'}
+            {checking
+              ? 'Checking the destination…'
+              : uploading
+                ? 'Uploading…'
+                : 'Drag an image file or folder of images here'}
           </p>
-          {!uploading && (
+          {!busy && (
             <p className="text-xs text-sky-300/90 flex items-center justify-center gap-1 flex-wrap">
               or
               <button
@@ -342,29 +486,59 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
             {done ? (
               <span className="flex items-center gap-1 text-green-300">
                 <CheckCircle size={13} /> Ingested {status.done} of {status.total}
+                {status.skipped > 0 && (
+                  <span className="text-sky-300"> · {status.skipped} already present</span>
+                )}
                 {status.failed > 0 && <span className="text-amber-300"> · {status.failed} failed</span>}
               </span>
             ) : failedFatally ? (
-              <span className="text-red-300">Ingest failed</span>
+              // Nothing landed — never dress this up with a success checkmark.
+              <span className="flex items-center gap-1 text-red-300">
+                <Warning size={13} /> Nothing was ingested
+                {status.failed > 0 && <span> · {status.failed} of {status.total} failed</span>}
+              </span>
             ) : (
               <span>
                 {processed} / {status.total} processed…
               </span>
             )}
           </p>
-          {status.errors.length > 0 && (
-            <ul className="text-[11px] text-red-300/80 font-mono max-h-20 overflow-y-auto">
-              {status.errors.slice(0, 5).map((er, i) => (
-                <li key={i}>{er}</li>
+          {/* One row per reason: 690 identical failures read as a single line. */}
+          {errorGroups.length > 0 && (
+            <ul className="text-[11px] text-red-300/90 space-y-1">
+              {errorGroups.map((group, i) => (
+                <li key={`${group.kind}-${i}`}>
+                  <div className="flex items-start gap-1">
+                    <span className="flex-1">{group.summary}</span>
+                    {group.filenames.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => toggleErrorGroup(i)}
+                        className="flex shrink-0 items-center gap-0.5 text-red-300/70 hover:text-red-200 transition-colors"
+                      >
+                        {expandedErrors.has(i) ? <CaretDown size={10} /> : <CaretRight size={10} />}
+                        {expandedErrors.has(i) ? 'hide' : 'show'} filenames
+                      </button>
+                    )}
+                  </div>
+                  {expandedErrors.has(i) && (
+                    <ul className="mt-0.5 max-h-24 overflow-y-auto pl-2 font-mono text-red-300/70">
+                      {group.filenames.map((name) => (
+                        <li key={name}>{name}</li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
               ))}
             </ul>
           )}
-          {done && status.done > 0 && (onBrowse || onAnnotate) && (
+          {/* Skipped duplicates are still in the dataset, so browsing makes sense. */}
+          {done && status.done + status.skipped > 0 && (onBrowse || onAnnotate) && (
             <div className="mt-1 flex gap-2">
               {onBrowse && (
                 <button
                   type="button"
-                  onClick={() => onBrowse(status.container_path, status.done)}
+                  onClick={() => onBrowse(status.container_path, status.done + status.skipped)}
                   className="flex-1 bg-sky-600 text-white rounded-md py-2 text-sm font-medium hover:bg-sky-700 transition-colors"
                 >
                   Browse this dataset
@@ -388,6 +562,28 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
         <p className="flex items-center gap-1.5 text-xs text-red-400">
           <Warning size={13} /> {error}
         </p>
+      )}
+
+      {pending && (
+        <ConflictDialog
+          containerPath={pending.target}
+          totalFiles={pending.files.length}
+          conflicts={pending.preflight.conflicts}
+          existingCount={pending.preflight.existing_count}
+          suggestedContainerPath={pending.preflight.suggested_container_path}
+          onReplace={() => doUpload(pending.files, pending.target, 'replace')}
+          onSkip={() => doUpload(pending.files, pending.target, 'skip')}
+          onNewDataset={() => {
+            const next = pending.preflight.suggested_container_path;
+            setContainerPath(next);
+            doUpload(pending.files, next, 'fail');
+          }}
+          onBrowseExisting={() => {
+            setPending(null);
+            onBrowse?.(pending.target, pending.preflight.existing_count);
+          }}
+          onCancel={() => setPending(null)}
+        />
       )}
     </div>
   );

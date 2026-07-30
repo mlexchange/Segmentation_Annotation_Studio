@@ -67,6 +67,7 @@ from schemas import (
     ExportSourceItem,
     GuidePayload,
     ImageMeta,
+    IngestPreflightRequest,
     MeasureRequest,
     SaveVersionRequest,
 )
@@ -1161,11 +1162,33 @@ async def import_coco(dataset_dir: str = Query(...)) -> dict:
         raise HTTPException(500, f"Import failed: {exc}") from exc
 
 
+@app.post("/api/ingest/preflight")
+async def ingest_preflight(req: IngestPreflightRequest) -> dict:
+    """Report which of ``req.names`` already exist in ``req.container_path``.
+
+    Called before the upload so the user can resolve collisions (replace / skip /
+    new dataset / browse the existing one) instead of uploading files that would
+    each fail with a 409. POST (not GET) because a dropped folder easily carries
+    hundreds of filenames — see :class:`schemas.IngestPreflightRequest`.
+
+    Raises:
+        HTTPException: 502 if the Tiled server could not be read.
+    """
+    try:
+        return await asyncio.to_thread(
+            ingest_mod.preflight, req.server_uri, req.container_path, req.names
+        )
+    except Exception as exc:
+        logger.warning("ingest preflight failed for %s: %s", req.container_path, exc)
+        raise HTTPException(502, "Could not check the destination on the Tiled server") from exc
+
+
 @app.post("/api/ingest/upload")
 async def ingest_upload(
     server_uri: Optional[str] = Query(None, description="Target Tiled server URI"),
     container_path: str = Form(..., description="Target container, e.g. 'browse/myset'"),
     description: str = Form("", description="Optional keyword(s) stored on every ingested node"),
+    on_conflict: str = Form("fail", description="'fail', 'replace' or 'skip' for existing keys"),
     files: list[UploadFile] = File(..., description="Image files to copy into Tiled"),
 ) -> dict:
     """Stream uploaded files to temp storage and start a background ingest job.
@@ -1173,6 +1196,11 @@ async def ingest_upload(
     Each supported image becomes its own browsable node in *container_path* on
     the connected Tiled server. Returns a ``job_id`` to poll for progress.
     """
+    if on_conflict not in ingest_mod.ON_CONFLICT_MODES:
+        raise HTTPException(
+            400, f"on_conflict must be one of {sorted(ingest_mod.ON_CONFLICT_MODES)}"
+        )
+
     tmp_dir = Path(tempfile.mkdtemp(prefix="ingest_"))
     saved: list[tuple[str, Path]] = []
     for index, upload in enumerate(files):
@@ -1195,7 +1223,7 @@ async def ingest_upload(
     jid = ingest_mod.new_job(len(saved), server_uri, container_path)
     threading.Thread(
         target=ingest_mod.run_ingest_job,
-        args=(jid, server_uri, container_path, saved, description),
+        args=(jid, server_uri, container_path, saved, description, on_conflict),
         daemon=True,
     ).start()
     return {"job_id": jid, "total": len(saved), "container_path": container_path}

@@ -46,8 +46,16 @@ IMAGE_EXTS: frozenset[str] = frozenset({".tif", ".tiff", ".npy", ".png", ".jpg",
 # the frame index.
 _FRAME_RE = re.compile(r"(\d+)$")
 _MIN_PAD = 5
+# Leading HTTP status in a Tiled ClientError message ("409: <path> <url>").
+_STATUS_RE = re.compile(r"^\s*(\d{3}):")
+_URL_RE = re.compile(r"https?://\S+")
+# Trailing "_N" on a container name, so suggestions bump instead of stacking.
+_SUFFIX_RE = re.compile(r"^(.*?)_(\d+)$")
 
-# job_id -> {state, total, done, failed, errors[], container_path, server_uri}
+# What to do when a target node key already exists (see ``run_ingest_job``).
+ON_CONFLICT_MODES: frozenset[str] = frozenset({"fail", "replace", "skip"})
+
+# job_id -> {state, total, done, failed, skipped, errors[], container_path, server_uri}
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
 
@@ -61,6 +69,7 @@ def new_job(total: int, server_uri: str | None, container_path: str) -> str:
             "total": total,
             "done": 0,
             "failed": 0,
+            "skipped": 0,
             "errors": [],
             "container_path": container_path,
             "server_uri": server_uri,
@@ -81,13 +90,21 @@ def _update(jid: str, **kw: Any) -> None:
             _jobs[jid].update(kw)
 
 
-def _bump(jid: str, *, done: int = 0, failed: int = 0, error: str | None = None) -> None:
+def _bump(
+    jid: str,
+    *,
+    done: int = 0,
+    failed: int = 0,
+    skipped: int = 0,
+    error: dict[str, str] | None = None,
+) -> None:
     with _jobs_lock:
         job = _jobs.get(jid)
         if not job:
             return
         job["done"] += done
         job["failed"] += failed
+        job["skipped"] += skipped
         if error:
             job["errors"].append(error)
 
@@ -108,14 +125,122 @@ def _read_array(path: Path) -> np.ndarray:
 
 
 def _ensure_container(client: Any, parts: list[str]) -> Any:
-    """Navigate to ``client[parts...]``, creating containers as needed."""
+    """Navigate to ``client[parts...]``, creating containers as needed.
+
+    Only a genuine ``KeyError`` means "missing" — catching every exception here
+    would send a transient transport blip down the ``create_container`` path,
+    which then collides with the container that does in fact exist.
+    """
     node = client
     for key in parts:
         try:
             node = node[key]
-        except Exception:  # noqa: BLE001 — KeyError or transport error → create
+        except KeyError:
             node = node.create_container(key=key, metadata={})
     return node
+
+
+def _walk(client: Any, parts: list[str]) -> Any | None:
+    """Return the node at ``parts``, or ``None`` if any segment is missing."""
+    node = client
+    for key in parts:
+        try:
+            node = node[key]
+        except KeyError:
+            return None
+    return node
+
+
+def _child_keys(node: Any) -> set[str]:
+    """Return a node's child keys; empty for leaves (arrays have no children)."""
+    if node is None:
+        return set()
+    try:
+        return set(node.keys())
+    except Exception:  # noqa: BLE001 — leaf/array node
+        return set()
+
+
+def _classify_error(exc: BaseException) -> dict[str, str]:
+    """Map an ingest exception to a ``{kind, message}`` pair for the UI.
+
+    ``kind`` is a stable token the frontend turns into human copy. The message
+    is a short fallback with any server URL stripped — Tiled's ``ClientError``
+    text is ``"<status>: <colliding path> <internal API url>"``, which must not
+    reach the browser. The full raw text is logged by the caller instead.
+
+    Args:
+        exc: The exception raised while ingesting one file.
+
+    Returns:
+        ``{"kind": ..., "message": ...}`` with kind in ``conflict``,
+        ``unreadable``, ``unreachable``, ``auth`` or ``unknown``.
+    """
+    raw = str(exc) or type(exc).__name__
+    name = type(exc).__name__
+    match = _STATUS_RE.match(raw)
+    status = match.group(1) if match else None
+
+    if status == "409" or "Collision" in raw or "Conflict" in name:
+        return {"kind": "conflict", "message": "a sample with this name already exists"}
+    if status in ("401", "403"):
+        return {"kind": "auth", "message": "not authorized to write to this server"}
+    if "Connect" in name or "Timeout" in name or "Connection" in raw:
+        return {"kind": "unreachable", "message": "could not reach the Tiled server"}
+    if isinstance(exc, (ValueError, OSError)):
+        return {"kind": "unreadable", "message": "file could not be read as an image"}
+    return {"kind": "unknown", "message": _URL_RE.sub("", raw).strip()[:200]}
+
+
+def _suggest_container_path(client: Any, parts: list[str]) -> str:
+    """Return ``parts`` with a ``_N`` suffix that is unused among its siblings.
+
+    An existing numeric suffix is bumped rather than appended to, so repeated
+    suggestions give ``myset_2``, ``myset_3`` — never ``myset_2_2``.
+    """
+    if not parts:
+        return ""
+    siblings = _child_keys(_walk(client, parts[:-1]))
+    match = _SUFFIX_RE.match(parts[-1])
+    stem, index = (match.group(1), int(match.group(2)) + 1) if match else (parts[-1], 2)
+    while f"{stem}_{index}" in siblings:
+        index += 1
+    return "/".join([*parts[:-1], f"{stem}_{index}"])
+
+
+def preflight(
+    server_uri: str | None, container_path: str, filenames: list[str]
+) -> dict[str, Any]:
+    """Report which uploads would collide with nodes already in the container.
+
+    Called before any bytes are uploaded so the user can choose how to resolve
+    the collision (replace / skip / new dataset / just browse the existing one)
+    instead of watching a large upload fail with a 409 per file.
+
+    Args:
+        server_uri: Connected Tiled server URI.
+        container_path: Slash-separated target container (e.g. ``browse/testset``).
+        filenames: Original filenames the user is about to upload.
+
+    Returns:
+        ``{container_exists, existing_count, conflicts, suggested_container_path}``
+        where each conflict is ``{"filename", "key"}``.
+    """
+    api_key = api_key_for_uri(server_uri)
+    client = get_tiled_client(server_uri, api_key)
+    parts = [p for p in container_path.strip("/").split("/") if p]
+    node = _walk(client, parts)
+    existing = _child_keys(node)
+    return {
+        "container_exists": node is not None,
+        "existing_count": len(existing),
+        "conflicts": [
+            {"filename": name, "key": Path(name).stem}
+            for name in filenames
+            if Path(name).stem in existing
+        ],
+        "suggested_container_path": _suggest_container_path(client, parts),
+    }
 
 
 def _size_str(arr: np.ndarray) -> str:
@@ -173,6 +298,7 @@ def run_ingest_job(
     container_path: str,
     temp_files: list[tuple[str, Path]],
     description: str = "",
+    on_conflict: str = "fail",
 ) -> None:
     """Copy each temp file into the target Tiled container.
 
@@ -183,9 +309,15 @@ def run_ingest_job(
         temp_files: list of ``(original_filename, temp_path)``.
         description: Optional user-supplied keyword(s) stored on every node so the
             batch is identifiable/filterable in Browse (empty string → omitted).
+        on_conflict: What to do when the node key already exists — ``"fail"``
+            (record a ``conflict`` error), ``"replace"`` (delete then rewrite) or
+            ``"skip"`` (leave the existing node, count it as skipped). The user
+            picks this in the conflict dialog after :func:`preflight`.
     """
     description = (description or "").strip()
     keywords = parse_keywords(description)
+    if on_conflict not in ON_CONFLICT_MODES:
+        on_conflict = "fail"
     _update(jid, state="running")
     try:
         api_key = api_key_for_uri(server_uri)
@@ -213,10 +345,22 @@ def run_ingest_job(
         except Exception as exc:  # noqa: BLE001 — best-effort; per-array meta still set
             logger.warning("could not set container metadata on %s: %s", container_path, exc)
 
+        # Only needed to resolve collisions; a container we just created is empty.
+        existing_keys = _child_keys(target) if on_conflict != "fail" else set()
+
         for idx, (orig_name, tmp) in enumerate(temp_files):
             try:
-                arr = _read_array(tmp)
                 stem = Path(orig_name).stem
+                if stem and stem in existing_keys:
+                    if on_conflict == "skip":
+                        _bump(jid, skipped=1)
+                        continue
+                    # "replace": drop the existing child so write_array can't
+                    # collide. Must be delete_contents(key) — Container.delete()
+                    # deletes the container ITSELF. external_only=False because
+                    # we wrote these arrays into Tiled's own storage.
+                    target.delete_contents(stem, recursive=True, external_only=False)
+                arr = _read_array(tmp)
                 meta = {
                     "image_number": _image_number(stem, width, idx),
                     "size": _size_str(arr),
@@ -236,17 +380,22 @@ def run_ingest_job(
                 target.write_array(arr, key=stem, metadata=meta, dims=dims)
                 _bump(jid, done=1)
             except Exception as exc:  # noqa: BLE001 — isolate per-file failures
+                # Log the raw text (URLs and all); send only classified copy out.
                 logger.warning("ingest %s failed: %s", orig_name, exc)
-                _bump(jid, failed=1, error=f"{orig_name}: {exc}")
+                _bump(jid, failed=1, error={"filename": orig_name, **_classify_error(exc)})
             finally:
                 try:
                     tmp.unlink(missing_ok=True)
                 except Exception:  # noqa: BLE001
                     pass
-        _update(jid, state="done")
+        # A batch where nothing landed is a failure, not a success — reporting
+        # "done" there is what made the UI show a green "Ingested 0 of 3".
+        job = get_job(jid) or {}
+        wholly_failed = job.get("done", 0) == 0 and job.get("failed", 0) > 0
+        _update(jid, state="error" if wholly_failed else "done")
     except Exception as exc:  # noqa: BLE001 — fatal (e.g. cannot reach server)
         logger.error("ingest job %s fatal: %s", jid, exc)
-        _bump(jid, error=str(exc))
+        _bump(jid, error={"filename": "", **_classify_error(exc)})
         _update(jid, state="error")
     finally:
         for _, tmp in temp_files:

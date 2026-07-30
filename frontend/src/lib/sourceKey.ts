@@ -17,3 +17,36 @@ export function buildSourceKey(
 ): string {
   return kind === 'tiled' ? `tiled:${serverUri ?? ''}:${path}` : `local:${path}`;
 }
+
+/**
+ * True if *path* itself, or anything below it, has annotations.
+ *
+ * One image can legitimately be keyed two ways: as a whole volume
+ * (`browse/ds`, annotated slice-by-slice — what Browse opens from the browse
+ * root) or as a standalone array (`browse/ds/img_0001` — what "Annotate first
+ * image" and slice-level entry points use). An exact-match lookup therefore
+ * leaves a dataset looking untouched when it was annotated through the other
+ * entry point, so a container also counts as annotated when a descendant is.
+ *
+ * Deliberately NOT the reverse: a single slice must not be badged just because
+ * some other slice of its volume was annotated — that would light up every
+ * frame of a 690-image stack on the strength of one.
+ *
+ * @param annotatedKeys Source keys known to have annotations.
+ * @param path Tiled path of the row being rendered.
+ * @param serverUri Server the row belongs to (part of the key).
+ */
+export function isAnnotatedPath(
+  annotatedKeys: Set<string>,
+  path: string,
+  serverUri?: string | null,
+): boolean {
+  const self = buildSourceKey('tiled', path, serverUri);
+  if (annotatedKeys.has(self)) return true;
+
+  const childPrefix = `${self}/`;
+  for (const key of annotatedKeys) {
+    if (key.startsWith(childPrefix)) return true;
+  }
+  return false;
+}

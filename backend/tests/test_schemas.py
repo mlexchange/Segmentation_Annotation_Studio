@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from schemas import BrushShape, BrushStroke, EllipseShape, PolygonShape, RectShape, RenderOpts
+from schemas import (
+    BrushShape,
+    BrushStroke,
+    EllipseShape,
+    IngestPreflightRequest,
+    PolygonShape,
+    RectShape,
+    RenderOpts,
+)
 
 
 def test_polygon_shape_roundtrip() -> None:
@@ -52,3 +60,18 @@ def test_brush_stroke_erase_mode() -> None:
     """BrushStroke should accept 'erase' mode."""
     stroke = BrushStroke(points=[5.0, 5.0], radius=3.0, mode="erase")
     assert stroke.mode == "erase"
+
+
+def test_ingest_preflight_request_carries_a_whole_folder() -> None:
+    """A folder's worth of filenames must fit — as query params it 431'd."""
+    names = [f"20260221_135217_petiole22_{i:05d}.tiff" for i in range(690)]
+    req = IngestPreflightRequest(container_path="browse/ds", names=names, server_uri=None)
+    assert len(req.names) == 690
+    assert req.names[0].endswith("_00000.tiff")
+
+
+def test_ingest_preflight_request_names_default_to_empty() -> None:
+    """Omitting names is allowed — used to only ask for a free container name."""
+    req = IngestPreflightRequest(container_path="browse/ds")
+    assert req.names == []
+    assert req.server_uri is None

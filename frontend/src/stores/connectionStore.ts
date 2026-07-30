@@ -12,6 +12,13 @@ export interface ConnectionState {
   serverUri: string | null;
   /** Tiled container to browse (e.g. "browse/myset"); null = auto-discover */
   browseContainerPath: string | null;
+  /**
+   * Full path of a sample to auto-select on arriving in Browse (e.g.
+   * "browse/myset"). Set when jumping in from ingest so the user lands on the
+   * dataset they just touched, while Browse still lists from the root — where a
+   * sample is the whole volume and its annotations resolve.
+   */
+  browseFocusPath: string | null;
   /** Granted absolute browse root (local mode) */
   localRoot: string | null;
   /** Chosen subfolder relative to localRoot (local mode) */
@@ -24,6 +31,7 @@ export interface ConnectionState {
     kind: 'tiled' | 'local';
     serverUri?: string | null;
     browseContainerPath?: string | null;
+    browseFocusPath?: string | null;
     localRoot?: string | null;
     localRel?: string | null;
     label: string;
@@ -36,6 +44,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   kind: null,
   serverUri: null,
   browseContainerPath: null,
+  browseFocusPath: null,
   localRoot: null,
   localRel: null,
   label: null,
@@ -46,12 +55,22 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
     kind,
     serverUri = null,
     browseContainerPath = null,
+    browseFocusPath = null,
     localRoot = null,
     localRel = null,
     label,
     sampleCount,
   }) =>
-    set({ kind, serverUri, browseContainerPath, localRoot, localRel, label, sampleCount }),
+    set({
+      kind,
+      serverUri,
+      browseContainerPath,
+      browseFocusPath,
+      localRoot,
+      localRel,
+      label,
+      sampleCount,
+    }),
 
   /** Resets all connection fields to null (disconnect). */
   clearConnection: () =>
@@ -59,6 +78,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
       kind: null,
       serverUri: null,
       browseContainerPath: null,
+      browseFocusPath: null,
       localRoot: null,
       localRel: null,
       label: null,

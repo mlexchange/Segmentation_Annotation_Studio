@@ -13,6 +13,8 @@ import { ANNOTATION_FILTER_OPTIONS, type AnnotationFilter } from '@/types/annota
 interface ColumnBrowserProps {
   serverUri: string;
   containerPath?: string | null;
+  /** Path of a sample to auto-select on arrival (e.g. jumping in from ingest). */
+  focusPath?: string | null;
   servers: ServerInfo[];
   selectedServerUri: string;
   onServerChange: (uri: string) => void;
@@ -61,6 +63,7 @@ function formatColumnValue(field: string, value: string): string {
 export default function ColumnBrowser({
   serverUri,
   containerPath,
+  focusPath,
   servers,
   selectedServerUri,
   onServerChange,
@@ -179,6 +182,22 @@ export default function ColumnBrowser({
     },
     [actions, state.expandedSample],
   );
+
+  /**
+   * Select the sample the caller pointed us at, once the full sample list has
+   * loaded. Lets "Browse this dataset" land on a specific dataset while Browse
+   * still lists from the root — where a sample is the whole volume and its
+   * annotations resolve. Runs at most once per focusPath.
+   */
+  const focusedPath = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusPath || focusedPath.current === focusPath) return;
+    if (!state.showingAll || state.itemsLoading) return;
+    focusedPath.current = focusPath;
+    const match = state.items.find((it) => it.path === focusPath);
+    // Not in this listing (different container, or filtered out) — leave as-is.
+    if (match) handleSelectItem(match);
+  }, [focusPath, state.showingAll, state.itemsLoading, state.items, handleSelectItem]);
 
   const activeFilters = useMemo(() => {
     const out: Record<string, string> = {};
