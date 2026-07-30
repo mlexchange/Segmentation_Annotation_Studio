@@ -55,6 +55,7 @@ from browse_helpers import (
 from cache import TTLCache
 from coco_export import (
     build_export_plan,
+    fold_lightly_splits,
     lightly_classes_map,
     shape_to_mask,
     write_coco_split,
@@ -982,6 +983,7 @@ def _run_export_job(
                 sample_global_stats_fn=images_mod._sample_global_stats,
                 progress_cb=_cb,
                 include_polygons=payload.include_polygons,
+                lightly=lightly,
             )
             skipped_total += plan["skipped_zero_area"]
             if not merged_categories:
@@ -1011,6 +1013,10 @@ def _run_export_job(
                 (c.model_dump() if hasattr(c, "model_dump") else dict(c)) for c in payload.classes
             ],
         }
+        if lightly:
+            # Document the DINOv3/Lightly convention: masks are 0-indexed class ids
+            # with unannotated pixels set to this ignore index.
+            manifest["ignore_index"] = 255
 
         # Write files AND build the download .zip in one pass. ZIP_STORED: the
         # PNGs are already compressed, so re-deflating them is wasted CPU.
@@ -1028,14 +1034,14 @@ def _run_export_job(
             zf.writestr("manifest.json", manifest_json)
 
             if lightly:
-                # DINOv3 / Lightly: classes.json (index→name, 0=bg) at the dataset
-                # root; each split as images/ + masks/ with matching stems.
+                # DINOv3 / Lightly: classes.json (index→name, 0-indexed, no background)
+                # at the dataset root; each split as images/ + masks/ with matching
+                # stems. Unannotated pixels are 255 (the ignore index).
                 classes_json = json.dumps(lightly_classes_map(merged_categories), indent=2)
                 (out_root / "classes.json").write_text(classes_json)
                 zf.writestr("classes.json", classes_json.encode("utf-8"))
-                for split_name, split_data in merged_splits.items():
-                    # Lightly convention: 'valid' → 'val'; 'train'/'test' unchanged.
-                    dir_name = "val" if split_name == "valid" else split_name
+                # Lightly uses train/val only: 'valid' AND 'test' fold into 'val'.
+                for dir_name, split_data in fold_lightly_splits(merged_splits).items():
                     export_jobs.log(jid, f"Writing split '{dir_name}' ({len(split_data['images'])} images + masks)…")
                     written[dir_name] = write_lightly_split(
                         out_root / dir_name,
