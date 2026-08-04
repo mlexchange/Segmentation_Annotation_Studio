@@ -17,6 +17,7 @@ it at the same time.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from typing import Any
 
@@ -32,6 +33,14 @@ _MAX_PROBE = 64
 # Keep this fraction of the largest working size, so normal variation between
 # slices (and whatever else the machine picks up later) doesn't OOM a long run.
 _SAFETY_FACTOR = 0.8
+# How often to check for a cancel request while an attempt is still running.
+# A single real training step for a large backbone at a large batch size can
+# take far longer than the whole rest of the probe combined — without this,
+# "cancel" only ever took effect between attempts, so a stuck/slow attempt at,
+# say, batch 16 on a 7B-parameter model made cancel look broken: the request
+# was recorded immediately (see `cancel_requested`) but nothing visibly
+# happened until that one attempt finally finished, however long that took.
+_ATTEMPT_POLL_SECONDS = 1.0
 
 
 def schema_batch_cap(hyperparams: Any, default: int = _MAX_PROBE) -> int:
@@ -150,6 +159,46 @@ def _try_batch(
         torch.mps.synchronize()  # errors surface lazily otherwise
 
 
+def _run_attempt_cancellable(
+    executor: concurrent.futures.ThreadPoolExecutor,
+    jid: str,
+    batch_size: int,
+    *,
+    image_size: int,
+    forward_fn: Any,
+    trainable: list[Any],
+    device: str,
+) -> str:
+    """Run one :func:`_try_batch` call on *executor*, polling for cancellation
+    every :data:`_ATTEMPT_POLL_SECONDS` while it's in flight.
+
+    Returns ``"ok"``, ``"oom"``, or ``"cancelled"``. A real torch op can't be
+    safely interrupted mid-flight (there's no signal that unwinds a native
+    MPS/CUDA kernel), so ``"cancelled"`` does NOT mean the attempt has
+    actually stopped — it may still be running on *executor*'s thread. The
+    caller must not submit another attempt, or let the caller's caller
+    release the device lock, until that thread is confirmed done (see
+    ``executor.shutdown(wait=True)`` in :func:`run_probe_job`) — two attempts
+    racing on the same device, or a second job starting while this one is
+    still quietly using it, would corrupt or OOM both.
+    """
+    future = executor.submit(
+        _try_batch, batch_size, image_size=image_size, forward_fn=forward_fn, trainable=trainable, device=device
+    )
+    while True:
+        try:
+            future.result(timeout=_ATTEMPT_POLL_SECONDS)
+            return "ok"
+        except concurrent.futures.TimeoutError:
+            if export_jobs.cancel_requested(jid):
+                return "cancelled"
+            continue
+        except Exception as exc:  # noqa: BLE001
+            if _is_oom(exc):
+                return "oom"
+            raise
+
+
 def run_probe_job(jid: str, request: BatchProbeRequest) -> None:
     """Background worker: find the largest batch size that completes a real step."""
     if not train_common.ML_LOCK.acquire(blocking=False):
@@ -187,92 +236,111 @@ def run_probe_job(jid: str, request: BatchProbeRequest) -> None:
         largest_ok = 0
         first_failure: int | None = None
         cancelled = False
+        in_flight_at_cancel: int | None = None
         size = 1
-        while size <= cap:
-            if export_jobs.cancel_requested(jid):
-                cancelled = True
-                break
-            try:
-                _try_batch(
-                    size,
-                    image_size=image_size,
-                    forward_fn=forward_fn,
-                    trainable=trainable,
+        # A dedicated single-worker executor, not a bare thread, because of what
+        # happens on a "cancelled" outcome below: the in-flight attempt is NOT
+        # actually stopped (no signal safely unwinds a native MPS/CUDA kernel
+        # mid-flight), just no longer waited on eagerly. The `with` block's
+        # implicit `shutdown(wait=True)` on exit — whether via `return`, `raise`,
+        # or falling off the end below — is what guarantees that attempt has
+        # really finished before this function can return and let the caller
+        # release ML_LOCK. Every report to `export_jobs` happens BEFORE that,
+        # i.e. still inside this block: the whole point is that the user sees
+        # "cancelled" within `_ATTEMPT_POLL_SECONDS`, not whenever that last
+        # attempt happens to actually finish. `capability.busy` staying true for
+        # a bit after the job itself reports done is that drain, made visible —
+        # real, not a bug.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            while size <= cap:
+                if export_jobs.cancel_requested(jid):
+                    cancelled = True
+                    break
+                outcome = _run_attempt_cancellable(
+                    executor, jid, size, image_size=image_size, forward_fn=forward_fn, trainable=trainable,
                     device=device,
                 )
-            except Exception as exc:  # noqa: BLE001
-                if not _is_oom(exc):
-                    raise
-                first_failure = size
-                _log(f"batch {size}: out of memory")
+                if outcome == "cancelled":
+                    cancelled = True
+                    in_flight_at_cancel = size
+                    break
+                if outcome == "oom":
+                    first_failure = size
+                    _log(f"batch {size}: out of memory")
+                    export_jobs.bump(jid, 1)
+                    _release(device)
+                    break
+                used = _device_memory_gib(device)
+                _log(f"batch {size}: ok" + (f" ({used[0]:.1f} GiB in use)" if used else ""))
+                largest_ok = size
                 export_jobs.bump(jid, 1)
                 _release(device)
-                break
-            used = _device_memory_gib(device)
-            _log(f"batch {size}: ok" + (f" ({used[0]:.1f} GiB in use)" if used else ""))
-            largest_ok = size
-            export_jobs.bump(jid, 1)
-            _release(device)
-            size *= 2
+                size *= 2
 
-        # Cancelling before any size completed is a deliberate stop, not the
-        # device genuinely refusing batch 1 — those must not read the same. A
-        # real "batch 1 doesn't fit" still raises, since there is no batch size
-        # to suggest.
-        if largest_ok == 0 and cancelled:
-            note = "Cancelled before any batch size could be measured."
+            still_finishing = (
+                f" (batch {in_flight_at_cancel} may still finish in the background momentarily)"
+                if in_flight_at_cancel is not None
+                else ""
+            )
+
+            # Cancelling before any size completed is a deliberate stop, not the
+            # device genuinely refusing batch 1 — those must not read the same. A
+            # real "batch 1 doesn't fit" still raises, since there is no batch
+            # size to suggest.
+            if largest_ok == 0 and cancelled:
+                note = f"Cancelled before any batch size could be measured.{still_finishing}"
+                _log(note)
+                export_jobs.update(
+                    jid,
+                    state="done",
+                    phase="done",
+                    result={
+                        "suggested_batch_size": None,
+                        "largest_ok": 0,
+                        "first_failure": first_failure,
+                        "image_size": image_size,
+                        "device": device,
+                        "probe_cap": cap,
+                        "cancelled": True,
+                        "note": note,
+                    },
+                )
+                return
+            if largest_ok == 0:
+                raise RuntimeError(
+                    f"Even batch size 1 ran out of memory at {image_size}px. "
+                    "Reduce the patch size, or pick a smaller model."
+                )
+
+            suggested = _suggest(largest_ok, cap)
+            if cancelled:
+                note = (
+                    f"Cancelled after batch {largest_ok} — this measurement is partial. "
+                    f"Suggesting {suggested} to leave headroom.{still_finishing}"
+                )
+            else:
+                note = (
+                    f"Largest that ran: {largest_ok}"
+                    + (f"; {first_failure} ran out of memory" if first_failure else f"; stopped at the {cap} cap")
+                    + f". Suggesting {suggested} to leave headroom."
+                )
             _log(note)
+
             export_jobs.update(
                 jid,
                 state="done",
                 phase="done",
                 result={
-                    "suggested_batch_size": None,
-                    "largest_ok": 0,
+                    "suggested_batch_size": suggested,
+                    "largest_ok": largest_ok,
                     "first_failure": first_failure,
                     "image_size": image_size,
                     "device": device,
                     "probe_cap": cap,
-                    "cancelled": True,
+                    "cancelled": cancelled,
                     "note": note,
                 },
             )
-            return
-        if largest_ok == 0:
-            raise RuntimeError(
-                f"Even batch size 1 ran out of memory at {image_size}px. "
-                "Reduce the patch size, or pick a smaller model."
-            )
-
-        suggested = _suggest(largest_ok, cap)
-        if cancelled:
-            note = (
-                f"Cancelled after batch {largest_ok} — this measurement is partial. "
-                f"Suggesting {suggested} to leave headroom."
-            )
-        else:
-            note = (
-                f"Largest that ran: {largest_ok}"
-                + (f"; {first_failure} ran out of memory" if first_failure else f"; stopped at the {cap} cap")
-                + f". Suggesting {suggested} to leave headroom."
-            )
-        _log(note)
-
-        export_jobs.update(
-            jid,
-            state="done",
-            phase="done",
-            result={
-                "suggested_batch_size": suggested,
-                "largest_ok": largest_ok,
-                "first_failure": first_failure,
-                "image_size": image_size,
-                "device": device,
-                "probe_cap": cap,
-                "cancelled": cancelled,
-                "note": note,
-            },
-        )
     except Exception as exc:  # noqa: BLE001 — reported as a job error, never a crash
         logger.error("Batch-size probe %s failed: %s", jid, exc)
         export_jobs.update(jid, state="error", phase="error", error=str(exc))

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowsClockwise, Brain, PencilSimple, Plus, Stack } from '@phosphor-icons/react';
+import { ArrowsClockwise, Brain, Cube, PencilSimple, Plus, Stack } from '@phosphor-icons/react';
 import BrowseColumn from './BrowseColumn';
 import BrowseDetailPanel from './BrowseDetailPanel';
 import ItemsColumn from './ItemsColumn';
@@ -61,6 +61,12 @@ function formatColumnValue(field: string, value: string): string {
  *  sample (see backend/tiled_annotation_sync.py's STUDIO_ANNOTATED = "yes"|"no"). */
 function isItemAnnotated(item: BrowseItem | null): boolean {
   return item?.metadata?.studio_annotated === 'yes';
+}
+
+/** True if there's more than one slice to volume-render — a single-slice "volume"
+ *  in the 3D tab is just a floating plane, not worth its own action. */
+function isVolumeItem(item: BrowseItem | null): boolean {
+  return (item?.n_slices ?? 1) > 1;
 }
 
 /**
@@ -176,7 +182,7 @@ export default function ColumnBrowser({
    *  openStatus. A slice of the drilled-in volume opens the whole volume at that slice index,
    *  so its annotations share the volume's sourceKey rather than a standalone single-array key. */
   const openSample = useCallback(
-    async (item: BrowseItem, destination: '/annotate' | '/train') => {
+    async (item: BrowseItem, destination: '/annotate' | '/train' | '/volume') => {
       setOpenStatus(`Opening ${item.sample}…`);
       try {
         const sliceIdx = state.expandedSample
@@ -195,6 +201,7 @@ export default function ColumnBrowser({
   );
   const handleOpenInAnnotate = useCallback((item: BrowseItem) => openSample(item, '/annotate'), [openSample]);
   const handleOpenInTrain = useCallback((item: BrowseItem) => openSample(item, '/train'), [openSample]);
+  const handleOpenIn3D = useCallback((item: BrowseItem) => openSample(item, '/volume'), [openSample]);
 
   /** Sample-row click: drill multi-slice volumes into a Slices column; select
    *  single images into the detail panel (collapsing any open drill-in). */
@@ -255,6 +262,7 @@ export default function ColumnBrowser({
         selectedItem={state.selectedItem}
         onOpenInAnnotate={handleOpenInAnnotate}
         onOpenInTrain={handleOpenInTrain}
+        onOpenIn3D={handleOpenIn3D}
         onRefresh={actions.refresh}
         onAddColumn={handleAddColumn}
         onShowAll={actions.showAll}
@@ -397,6 +405,7 @@ export default function ColumnBrowser({
               serverUri={serverUri}
               onOpenInAnnotate={handleOpenInAnnotate}
               onOpenInTrain={handleOpenInTrain}
+              onOpenIn3D={handleOpenIn3D}
             />
           </>
         )}
@@ -415,6 +424,7 @@ interface ToolbarProps {
   selectedItem: BrowseItem | null;
   onOpenInAnnotate: (item: BrowseItem) => void;
   onOpenInTrain: (item: BrowseItem) => void;
+  onOpenIn3D: (item: BrowseItem) => void;
   onRefresh: () => void;
   onAddColumn: () => void;
   onShowAll: () => void;
@@ -434,6 +444,7 @@ function Toolbar({
   selectedItem,
   onOpenInAnnotate,
   onOpenInTrain,
+  onOpenIn3D,
   onRefresh,
   onAddColumn,
   onShowAll,
@@ -511,6 +522,18 @@ function Toolbar({
           </button>
         )}
 
+        {selectedItem && isVolumeItem(selectedItem) && (
+          <button
+            type="button"
+            onClick={() => onOpenIn3D(selectedItem)}
+            title="View this volume in the 3D tab"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors bg-teal-700 text-white border border-teal-600 hover:bg-teal-600"
+          >
+            <Cube size={13} />
+            Open in 3D
+          </button>
+        )}
+
         <button
           type="button"
           onClick={onRefresh}
@@ -555,10 +578,11 @@ interface DetailPanelSlotProps {
   serverUri: string;
   onOpenInAnnotate: (item: BrowseItem) => void;
   onOpenInTrain: (item: BrowseItem) => void;
+  onOpenIn3D: (item: BrowseItem) => void;
 }
 
 /** Fixed-width container that hosts the BrowseDetailPanel for the selected sample. */
-function DetailPanelSlot({ item, width, onClose, serverUri, onOpenInAnnotate, onOpenInTrain }: DetailPanelSlotProps) {
+function DetailPanelSlot({ item, width, onClose, serverUri, onOpenInAnnotate, onOpenInTrain, onOpenIn3D }: DetailPanelSlotProps) {
   if (!item) return null; // nothing selected → render no panel
   return (
     <div
@@ -572,6 +596,7 @@ function DetailPanelSlot({ item, width, onClose, serverUri, onOpenInAnnotate, on
         serverUri={serverUri}
         onOpenInAnnotate={() => onOpenInAnnotate(item)}
         onOpenInTrain={isItemAnnotated(item) ? () => onOpenInTrain(item) : undefined}
+        onOpenIn3D={isVolumeItem(item) ? () => onOpenIn3D(item) : undefined}
       />
     </div>
   );

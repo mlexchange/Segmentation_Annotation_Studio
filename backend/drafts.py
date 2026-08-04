@@ -183,6 +183,25 @@ def list_drafts() -> list[dict[str, Any]]:
     return results
 
 
+def delete_draft(source_key: str) -> bool:
+    """Permanently remove the draft and every saved version for *source_key*.
+
+    Used when the data it was annotating no longer exists (e.g. after a Tiled
+    reset) — a draft's source_key is just a path, so leaving it behind means
+    it silently reattaches to whatever new data happens to land at that same
+    path later. Returns True if there was anything to delete.
+    """
+    import shutil
+
+    with _source_lock(source_key):
+        path = _draft_path(source_key)
+        versions_dir = _versions_dir(source_key)
+        existed = path.exists() or versions_dir.exists()
+        path.unlink(missing_ok=True)
+        shutil.rmtree(versions_dir, ignore_errors=True)
+        return existed
+
+
 # ---------------------------------------------------------------------------
 # Version history (explicit user saves)
 # ---------------------------------------------------------------------------

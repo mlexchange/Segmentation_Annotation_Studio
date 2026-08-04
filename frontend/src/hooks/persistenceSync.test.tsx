@@ -96,6 +96,70 @@ describe('draft persistence', () => {
     expect(putCalls()[0][1]).toEqual(expect.objectContaining({ method: 'PUT', keepalive: true }));
     unmount();
   });
+
+  // Regression: TrainPage's "Import as annotations" writes shapes into the
+  // store for the CURRENTLY OPEN sample, but only AnnotatePage used to mount
+  // useDraftSync. Returning to Annotate afterward established a "clean"
+  // baseline that already included the import (the fingerprint was captured
+  // AFTER the import landed), so autosave never fired and the import was lost
+  // on reload or clobbered by re-opening the sample from Browse. Fixed by
+  // mounting useDraftSync in TrainPage too — these tests simulate exactly
+  // that cross-page sequence without needing either page component.
+  it('autosaves an import made from a second mount of the hook (e.g. Train after Annotate)', async () => {
+    vi.mocked(fetch).mockResolvedValue(response(404));
+    await loadDraft('cross-page-sample');
+    vi.mocked(fetch).mockClear();
+    vi.mocked(fetch).mockResolvedValue(response(204));
+
+    // First mount (e.g. AnnotatePage): nothing happens here, just establishes
+    // and then abandons a hook instance, like navigating away unedited.
+    const first = renderHook(() => useDraftSync('cross-page-sample'));
+    first.unmount();
+    expect(putCalls()).toHaveLength(0);
+
+    // Second mount of the SAME sourceKey (e.g. TrainPage, after "Import as
+    // annotations"). The draft-load revision is module-level state and is
+    // still ready from the loadDraft() call above, so this mount's baseline
+    // is captured immediately and the import below is correctly seen as dirty.
+    const second = renderHook(() => useDraftSync('cross-page-sample'));
+    act(() => {
+      useAnnotationStore.getState().addShapes('cross-page-sample', 0, [
+        { id: 'pred_1', classId: 1, kind: 'polygon', points: [0, 0, 10, 0, 10, 10] },
+      ]);
+    });
+    // Separate act() calls: the debounce-scheduling effect only runs once React
+    // commits the store update above, so advancing fake timers in the SAME act()
+    // callback (before that effect has flushed) advances a clock with no timer
+    // pending yet — the effect then schedules a fresh 1500ms timer AFTER the
+    // advance, which never fires within this test. Splitting them, matching
+    // every other test in this file, gives the effect a commit point first.
+    act(() => vi.advanceTimersByTime(1_500));
+    await act(async () => Promise.resolve());
+
+    expect(putCalls()).toHaveLength(1);
+    const body = JSON.parse(putCalls()[0][1]!.body as string);
+    expect(body.slices['0']).toEqual([expect.objectContaining({ id: 'pred_1', classId: 1 })]);
+    second.unmount();
+  });
+
+  it('flushes an import on unmount even before the debounce fires (leaving the tab quickly)', async () => {
+    vi.mocked(fetch).mockResolvedValue(response(404));
+    await loadDraft('quick-nav-sample');
+    vi.mocked(fetch).mockClear();
+    vi.mocked(fetch).mockResolvedValue(response(204));
+
+    const { unmount } = renderHook(() => useDraftSync('quick-nav-sample'));
+    act(() => {
+      useAnnotationStore.getState().addShapes('quick-nav-sample', 0, [
+        { id: 'pred_1', classId: 1, kind: 'polygon', points: [0, 0, 10, 0, 10, 10] },
+      ]);
+    });
+    // No advanceTimersByTime: unmount happens before the 1500ms debounce
+    // would have fired on its own — the cleanup-flush effect must still save.
+    unmount();
+
+    expect(putCalls()).toHaveLength(1);
+  });
 });
 
 describe('guide persistence', () => {

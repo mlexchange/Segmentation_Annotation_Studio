@@ -25,6 +25,8 @@ of columns you read left to right. The toolbar controls:
 | **All samples** | Show every dataset regardless of filters. |
 | **Add column** | Add a metadata facet column to filter by. |
 | **Open in Annotate** | Open the currently selected sample. |
+| **Open in Train** | Open an already-annotated sample in the Train tab (fine-tune or run inference). |
+| **Open in 3D** | Open a multi-slice volume in the 3D tab (volume-rendered raw stack + segmentation overlay). |
 
 The columns flow: **facet filters → Samples → (Slices, for volumes) → detail panel**.
 

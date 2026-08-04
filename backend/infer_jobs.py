@@ -83,6 +83,12 @@ def _mask_to_polygons_padded(component: np.ndarray) -> list[list[float]]:
     return [[v - 1 for v in flat] for flat in polygons]
 
 
+def _enclosed_area(ring: np.ndarray) -> float:
+    """Shoelace area enclosed by a closed (n, 2) ring, ignoring winding."""
+    x, y = ring[:, 0], ring[:, 1]
+    return float(abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2.0)
+
+
 def _vectorize_label_map(
     label_map: np.ndarray,
     run_classes: list[dict[str, Any]],
@@ -92,7 +98,20 @@ def _vectorize_label_map(
     slice_idx: int,
 ) -> list[dict[str, Any]]:
     """Connected-component-vectorize a semantic label map (0=bg, 1..n=class) into
-    polygon shape dicts, one per component per class."""
+    polygon shape dicts, one per component per class.
+
+    Holes matter here, not just cosmetically. A label map assigns each pixel to
+    exactly one class, so a component that surrounds another class (a background
+    region between grains, a ring around a bore) traces an outer contour *and*
+    one contour per enclosed region. Emitting those inner contours as separate
+    solid same-class polygons — as this used to — double-claims those pixels and
+    makes the outer polygon paint straight over whichever class actually sits
+    there: shapes are drawn in list order, so a later class's filled outer
+    contour hides the earlier ones entirely (the label-map preview PNG never
+    showed this, since it colours one class per pixel by construction).
+    Encoding them as real ``holes`` keeps every pixel claimed exactly once, so
+    the imported annotations match the preview regardless of draw order.
+    """
     from skimage import measure
 
     shapes: list[dict[str, Any]] = []
@@ -106,21 +125,31 @@ def _vectorize_label_map(
             if region.area < min_area:
                 continue
             component = labeled == region.label
+            rings: list[np.ndarray] = []
             for flat_points in _mask_to_polygons_padded(component):
                 coords = np.asarray(flat_points, dtype=np.float64).reshape(-1, 2)
                 if simplify_tol > 0:
                     coords = measure.approximate_polygon(coords, tolerance=simplify_tol)
                 if len(coords) < 3:
                     continue
-                counter += 1
-                shapes.append(
-                    {
-                        "id": f"pred_{run_id[:8]}_{slice_idx}_{counter}",
-                        "classId": cls["classId"],
-                        "kind": "polygon",
-                        "points": [round(float(v), 2) for v in coords.ravel().tolist()],
-                    }
-                )
+                rings.append(coords)
+            if not rings:
+                continue
+            # A connected region has a single outer boundary, so the widest ring
+            # is it and everything else it traced is enclosed by it.
+            rings.sort(key=_enclosed_area, reverse=True)
+            counter += 1
+            shape: dict[str, Any] = {
+                "id": f"pred_{run_id[:8]}_{slice_idx}_{counter}",
+                "classId": cls["classId"],
+                "kind": "polygon",
+                "points": [round(float(v), 2) for v in rings[0].ravel().tolist()],
+            }
+            if len(rings) > 1:
+                shape["holes"] = [
+                    [round(float(v), 2) for v in ring.ravel().tolist()] for ring in rings[1:]
+                ]
+            shapes.append(shape)
     return shapes
 
 

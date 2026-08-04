@@ -79,9 +79,11 @@ export function useOpenInAnnotate() {
    *  Pass `initialSlice` to jump to a slice of a volume (keeps one sourceKey for
    *  the whole stack, so per-slice annotations stay unified). Pass `destination`
    *  to land on the Train tab instead of Annotate (e.g. "Open in Train" for an
-   *  already-annotated sample). */
+   *  already-annotated sample), or on the 3D tab (e.g. "Open in 3D" for a
+   *  multi-slice volume) — nothing here branches on it, it's only used at the
+   *  final `navigate()`. */
   const openTiledArray = useCallback(
-    async (tiledPath: string, serverUri: string, initialSlice = 0, destination: '/annotate' | '/train' = '/annotate') => {
+    async (tiledPath: string, serverUri: string, initialSlice = 0, destination: '/annotate' | '/train' | '/volume' = '/annotate') => {
       const params = new URLSearchParams({ source: tiledPath, kind: 'tiled' });
       if (serverUri) params.set('server_uri', serverUri);
 
@@ -115,9 +117,9 @@ export function useOpenInAnnotate() {
   );
 
   /** Open a local file by relative path: fetch meta, set the dataset, apply its draft, then navigate.
-   *  Pass `destination` to land on the Train tab instead of Annotate. */
+   *  Pass `destination` to land on the Train or 3D tab instead of Annotate. */
   const openLocalFile = useCallback(
-    async (relPath: string, destination: '/annotate' | '/train' = '/annotate') => {
+    async (relPath: string, destination: '/annotate' | '/train' | '/volume' = '/annotate') => {
       const params = new URLSearchParams({ source: relPath, kind: 'local' });
 
       const res = await fetch(`${API_BASE}/api/image/meta?${params}`);

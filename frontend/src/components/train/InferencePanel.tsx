@@ -33,6 +33,12 @@ export default function InferencePanel({
   const [rangeEnd, setRangeEnd] = useState(Math.max(0, nSlices - 1));
   const [previewSlice, setPreviewSlice] = useState<number | null>(null);
   const [opacity, setOpacity] = useState(0.7);
+  // Set right after "Import as annotations" is clicked; cleared on a new run
+  // so a stale count from a previous job never lingers. There was previously
+  // no feedback at all here — the shapes DID land in the store, but nothing
+  // told the user it worked (see TrainPage's useDraftSync mount for the
+  // matching fix that makes the import actually persist, not just appear).
+  const [importedCount, setImportedCount] = useState<number | null>(null);
 
   // Fixed keys: same reasoning as TrainPage's jobs — once started, an infer job
   // is bound to its own job_id independent of anything selected afterward.
@@ -56,6 +62,7 @@ export default function InferencePanel({
   const handleRunInference = () => {
     if (!selectedRunId || !source) return;
     reset();
+    setImportedCount(null);
     void startJob('/api/train/infer', {
       run_id: selectedRunId,
       kind: isTiledSource ? 'tiled' : 'local',
@@ -65,24 +72,47 @@ export default function InferencePanel({
     });
   };
 
+  const handleCancelInference = () => {
+    if (job.jobId) void fetch(`${API_BASE}/api/train/cancel/${job.jobId}`, { method: 'POST' });
+  };
+
   const previewSlices: number[] = Array.isArray(job.result?.preview_slices)
     ? (job.result!.preview_slices as number[])
     : [];
   const activePreviewSlice = previewSlice ?? previewSlices[0] ?? null;
-  const previewUrl = job.status === 'done' && activePreviewSlice != null && selectedRunId
+  // Keyed on the job, deliberately NOT on selectedRunId: the overlay is cached
+  // server-side against this job_id (which run produced it is already baked in),
+  // and selectedRunId is page-local state that resets to null when the Train tab
+  // remounts — requiring it here made a finished job's overlay vanish on the way
+  // back to the tab, leaving just the bare base image under a "done" progress bar.
+  const previewUrl = job.status === 'done' && activePreviewSlice != null && job.jobId
     ? `${API_BASE}/api/train/infer/preview/${job.jobId}/${activePreviewSlice}`
     : null;
 
   const totalShapes = typeof job.result?.n_shapes === 'number' ? job.result.n_shapes : 0;
 
+  // Gates the "start a new job" controls only. Progress/results for a job
+  // already running or finished must stay visible on their own — e.g. after
+  // navigating away and back, TrainPage's selectedRunId resets to null before
+  // the run list settles, but a stack-wide inference started earlier keeps
+  // running server-side and this hook already reattached to it (see
+  // useExportJob's persistKey). Gating the whole section on selectedRunId
+  // used to hide that reattached job behind "select a run", making a
+  // still-running (or already-finished) job look like it vanished.
+  const canStartNewJob = hasOpenSample && !!selectedRunId;
+  const hasJob = job.status !== 'idle';
+
   return (
     <div className="space-y-3">
       <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Inference</p>
-      {!hasOpenSample ? (
+      {!hasOpenSample && !hasJob && (
         <p className="text-xs text-slate-400">Open a sample in Browse/Annotate to run inference on it.</p>
-      ) : !selectedRunId ? (
+      )}
+      {hasOpenSample && !selectedRunId && !hasJob && (
         <p className="text-xs text-slate-400">Select a saved run above to enable inference.</p>
-      ) : (
+      )}
+
+      {canStartNewJob && (
         <>
           <div className="flex flex-col gap-1.5">
             {([
@@ -119,12 +149,29 @@ export default function InferencePanel({
           >
             {job.status === 'running' ? 'Predicting…' : 'Run inference'}
           </button>
+        </>
+      )}
 
-          <JobProgressBar job={job} unit="slices" />
+      {hasJob && (
+        <>
+          <div className="flex items-start gap-2">
+            <div className="flex-1"><JobProgressBar job={job} unit="slices" /></div>
+            {job.status === 'running' && (
+              <button
+                type="button" onClick={handleCancelInference}
+                className="shrink-0 px-3 py-1.5 text-xs rounded-md border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
 
           {job.status === 'done' && (
             <div className="space-y-2 rounded-lg border border-slate-700 bg-slate-900/40 p-2">
-              <p className="text-xs text-slate-300">{totalShapes} predicted region{totalShapes !== 1 ? 's' : ''}.</p>
+              <p className="text-xs text-slate-300">
+                {totalShapes} predicted region{totalShapes !== 1 ? 's' : ''}
+                {job.result?.cancelled === true ? ' (cancelled — partial result)' : ''}.
+              </p>
               {previewSlices.length > 0 && baseImageUrl && (
                 <>
                   <div className="relative w-full overflow-hidden rounded border border-slate-700 bg-black">
@@ -154,29 +201,45 @@ export default function InferencePanel({
                   )}
                 </>
               )}
-              <div className="flex flex-wrap gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const classes = Array.isArray(job.result?.classes) ? (job.result!.classes as RunClass[]) : [];
-                    const slices = (job.result?.slices ?? {}) as Record<string, unknown>;
-                    onImportPredictions(classes, slices);
-                  }}
-                  className="px-3 py-1.5 text-xs rounded-md bg-sky-600 text-white hover:bg-sky-500 transition-colors"
-                >
-                  Import as annotations
-                </button>
-                {isTiledSource && (
+              {hasOpenSample && (
+                <div className="flex flex-wrap gap-2 pt-1">
                   <button
                     type="button"
-                    disabled={writeJob.status === 'running'}
-                    onClick={() => job.jobId && void startWriteJob(`/api/train/infer/write-tiled/${job.jobId}`, {})}
-                    className="px-3 py-1.5 text-xs rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-900/30 transition-colors disabled:opacity-50"
+                    onClick={() => {
+                      const classes = Array.isArray(job.result?.classes) ? (job.result!.classes as RunClass[]) : [];
+                      const slices = (job.result?.slices ?? {}) as Record<string, unknown>;
+                      onImportPredictions(classes, slices);
+                      setImportedCount(totalShapes);
+                    }}
+                    className="px-3 py-1.5 text-xs rounded-md bg-sky-600 text-white hover:bg-sky-500 transition-colors"
                   >
-                    {writeJob.status === 'running' ? 'Writing…' : 'Write masks to Tiled'}
+                    Import as annotations
                   </button>
-                )}
-              </div>
+                  {isTiledSource && (
+                    <button
+                      type="button"
+                      disabled={writeJob.status === 'running'}
+                      onClick={() => job.jobId && void startWriteJob(`/api/train/infer/write-tiled/${job.jobId}`, {})}
+                      className="px-3 py-1.5 text-xs rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-900/30 transition-colors disabled:opacity-50"
+                    >
+                      {writeJob.status === 'running' ? 'Writing…' : 'Write masks to Tiled'}
+                    </button>
+                  )}
+                </div>
+              )}
+              {importedCount !== null && (
+                <p className="text-xs text-emerald-400">
+                  Imported {importedCount} region{importedCount === 1 ? '' : 's'} as annotations — they're on the
+                  Annotate tab and autosaved.
+                </p>
+              )}
+              {writeJob.status === 'done' && (
+                <p className="text-xs text-emerald-400">
+                  Masks saved to Tiled
+                  {typeof writeJob.result?.n_slices === 'number' ? ` (${writeJob.result.n_slices} slices)` : ''} —
+                  load them in Annotate anytime with "Load saved masks".
+                </p>
+              )}
               <JobProgressBar job={writeJob} unit="steps" />
             </div>
           )}

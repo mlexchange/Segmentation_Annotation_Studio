@@ -6,7 +6,7 @@ import HubAppLayout from '@/components/HubAppLayout';
 import { useHubSelectedTabs } from '@/hooks/useHubSelectedTabs';
 import { DOCS_URL, FEEDBACK_FORM_URL, FEEDBACK_ENTRY_ID } from '@/config';
 import { buildFeedbackContext, buildFeedbackUrl } from '@/lib/feedbackContext';
-import { PlugsConnected, PencilSimple, MagnifyingGlass, BookOpen, Brain } from '@phosphor-icons/react';
+import { PlugsConnected, PencilSimple, MagnifyingGlass, BookOpen, Brain, Cube } from '@phosphor-icons/react';
 // Lazy-loaded pages: keeps the heavy Annotate stack (konva, polygon-clipping,
 // magicwand, canvas) out of the initial /connect bundle — each page is its own chunk.
 const ConnectPage = lazy(() => import('./pages/ConnectPage'));
@@ -14,6 +14,7 @@ const AnnotatePage = lazy(() => import('./pages/AnnotatePage'));
 const BrowsePage = lazy(() => import('./pages/BrowsePage'));
 const ReferencePage = lazy(() => import('./pages/ReferencePage'));
 const TrainPage = lazy(() => import('./pages/TrainPage'));
+const VolumePage = lazy(() => import('./pages/VolumePage'));
 import CustomizePages from '@/components/CustomizePages';
 import IframeModal from '@/components/IframeModal';
 import FeedbackConsentModal from '@/components/FeedbackConsentModal';
@@ -43,6 +44,13 @@ const allRoutes: RouteItem[] = [
     label: 'Annotate',
     icon: <PencilSimple size={32} />,
     element: <AnnotatePage />,
+    isBackgroundTransparent: true,
+  },
+  {
+    path: '/volume',
+    label: '3D',
+    icon: <Cube size={32} />,
+    element: <VolumePage />,
     isBackgroundTransparent: true,
   },
   {

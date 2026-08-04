@@ -8,6 +8,9 @@ wasn't actually measured.
 
 from __future__ import annotations
 
+import threading
+import time
+
 import batch_probe
 import export_jobs
 import train_common
@@ -119,3 +122,125 @@ def test_reaching_the_cap_without_cancelling_is_not_reported_as_cancelled(monkey
     assert job["state"] == "done"
     assert job["result"]["cancelled"] is False
     assert "cap" in job["result"]["note"]
+
+
+# ---------------------------------------------------------------------------
+# Cancelling an attempt that's still in flight (not just between attempts)
+#
+# Real regression: a single real training step for a large backbone at a large
+# batch size can run far longer than the rest of the probe combined. Before
+# _run_attempt_cancellable existed, `cancel_requested` was only ever checked
+# BETWEEN attempts, so requesting cancellation while one was still running had
+# no visible effect until that attempt finally finished — however long that
+# took (in practice: user reports "cancel does nothing", repeated clicks, a
+# probe stuck for many minutes on a 7B/Huge+ backbone).
+# ---------------------------------------------------------------------------
+
+
+def _slow_try_batch(release_event: threading.Event, hold_seconds: float = 5.0):
+    """A `_try_batch` stand-in that blocks until `release_event` is set (or
+    `hold_seconds` elapses, as a backstop so a failing test doesn't hang)."""
+
+    def _fn(size, **kwargs):
+        release_event.wait(timeout=hold_seconds)
+
+    return _fn
+
+
+def test_cancelling_a_genuinely_in_flight_attempt_is_noticed_within_the_poll_interval(monkeypatch) -> None:
+    """The actual fix: a concurrent observer (the frontend's poller) must see
+    "done" quickly — it must NOT have to wait for the slow attempt itself to
+    return, which is exactly the old behaviour this replaces."""
+    monkeypatch.setattr(batch_probe, "_ATTEMPT_POLL_SECONDS", 0.02)
+    release = threading.Event()
+    _install_fakes(monkeypatch, _slow_try_batch(release, hold_seconds=5.0))
+    jid = export_jobs.new_job("test")
+
+    job_thread = threading.Thread(target=batch_probe.run_probe_job, args=(jid, _request()))
+    started = time.monotonic()
+    job_thread.start()
+    time.sleep(0.06)  # a few poll intervals in — batch 1 is "still running"
+    export_jobs.update(jid, cancel_requested=True)
+
+    deadline = time.monotonic() + 2.0
+    while export_jobs.get_job(jid)["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    noticed_elapsed = time.monotonic() - started
+
+    try:
+        job = export_jobs.get_job(jid)
+        assert job["state"] == "done"
+        assert job["result"]["cancelled"] is True
+        assert job["result"]["largest_ok"] == 0
+        # Well under the 5s the held attempt would otherwise take to return —
+        # that gap is exactly what the old "check only between attempts"
+        # behaviour cost the user.
+        assert noticed_elapsed < 2.0
+    finally:
+        release.set()
+        job_thread.join(timeout=5.0)
+
+
+def test_the_note_says_the_in_flight_attempt_may_still_finish_in_the_background(monkeypatch) -> None:
+    """capability.busy can stay true for a moment after this job reports
+    done — that's the drained-before-lock-release guarantee, not a bug — so
+    the note has to say so rather than implying the device is free right away."""
+    monkeypatch.setattr(batch_probe, "_ATTEMPT_POLL_SECONDS", 0.02)
+    release = threading.Event()
+    _install_fakes(monkeypatch, _slow_try_batch(release, hold_seconds=5.0))
+    jid = export_jobs.new_job("test")
+
+    job_thread = threading.Thread(target=batch_probe.run_probe_job, args=(jid, _request()))
+    job_thread.start()
+    time.sleep(0.06)
+    export_jobs.update(jid, cancel_requested=True)
+
+    deadline = time.monotonic() + 2.0
+    while export_jobs.get_job(jid)["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    try:
+        note = export_jobs.get_job(jid)["result"]["note"]
+        assert "batch 1" in note
+        assert "background" in note
+    finally:
+        release.set()
+        job_thread.join(timeout=5.0)
+
+
+def test_ml_lock_is_not_released_until_the_in_flight_attempt_actually_finishes(monkeypatch) -> None:
+    """The safety half of the fix: releasing the lock while the cancelled
+    attempt still quietly holds the device would let a second job start and
+    corrupt or OOM both. run_probe_job must not return (and so must not let
+    its caller release ML_LOCK) until that attempt is confirmed done."""
+    monkeypatch.setattr(batch_probe, "_ATTEMPT_POLL_SECONDS", 0.02)
+    release = threading.Event()
+    _install_fakes(monkeypatch, _slow_try_batch(release, hold_seconds=5.0))
+    jid = export_jobs.new_job("test")
+    lock_state_when_job_returned = {}
+
+    def _run():
+        batch_probe.run_probe_job(jid, _request())
+        # By the time run_probe_job returns, the held attempt must have
+        # actually finished — the fake only finishes when `release` is set,
+        # so if the lock is already free here, it was released too early.
+        lock_state_when_job_returned["release_was_set_first"] = release.is_set()
+
+    runner = threading.Thread(target=_run)
+    runner.start()
+    time.sleep(0.06)
+    export_jobs.update(jid, cancel_requested=True)
+
+    deadline = time.monotonic() + 2.0
+    while export_jobs.get_job(jid)["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    # The job already reports done/cancelled here, but the attempt is still
+    # deliberately held — ML_LOCK must reflect that, not the report.
+    still_locked_while_attempt_lingers = train_common.ML_LOCK.locked()
+
+    release.set()
+    runner.join(timeout=5.0)
+
+    assert export_jobs.get_job(jid)["state"] == "done"
+    assert still_locked_while_attempt_lingers is True
+    assert lock_state_when_job_returned["release_was_set_first"] is True

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Image as ImageIcon, PencilSimple, Brain } from '@phosphor-icons/react';
+import { X, Image as ImageIcon, PencilSimple, Brain, Cube } from '@phosphor-icons/react';
 import { API_BASE } from '@/config';
 import type { BrowseItem } from './hooks/useBrowseData';
 
@@ -11,6 +11,9 @@ interface BrowseDetailPanelProps {
   /** Omitted (or the caller passes undefined) when this sample has no saved
    *  annotation yet — there is nothing to fine-tune on. */
   onOpenInTrain?: () => void;
+  /** Omitted when this sample is a single slice — a 1-slice "volume" in the
+   *  3D tab is just a floating plane, not worth its own action. */
+  onOpenIn3D?: () => void;
   /** Panel width in px; the preview image scales with it. */
   width?: number;
 }
@@ -64,6 +67,7 @@ export default function BrowseDetailPanel({
   serverUri,
   onOpenInAnnotate,
   onOpenInTrain,
+  onOpenIn3D,
   width = 340,
 }: BrowseDetailPanelProps) {
   const meta = item.metadata;
@@ -200,7 +204,7 @@ export default function BrowseDetailPanel({
         ))}
       </div>
 
-      {(onOpenInAnnotate || onOpenInTrain) && (
+      {(onOpenInAnnotate || onOpenInTrain || onOpenIn3D) && (
         <div className="shrink-0 flex flex-col gap-2 px-4 py-3 border-t" style={{ borderColor: '#334155' }}>
           {onOpenInAnnotate && (
             <button
@@ -221,6 +225,17 @@ export default function BrowseDetailPanel({
             >
               <Brain size={16} />
               Open in Train
+            </button>
+          )}
+          {onOpenIn3D && (
+            <button
+              type="button"
+              onClick={onOpenIn3D}
+              title="View this volume in the 3D tab"
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-md text-sm font-medium bg-teal-600 text-white hover:bg-teal-500 transition-colors"
+            >
+              <Cube size={16} />
+              Open in 3D
             </button>
           )}
         </div>

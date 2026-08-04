@@ -7,14 +7,16 @@
  */
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Plus, Trash, Images, DownloadSimple, Sparkle, CircleDashed, Export, UploadSimple, WarningCircle } from '@phosphor-icons/react';
+import { Plus, Trash, Images, DownloadSimple, Sparkle, CircleDashed, Export, UploadSimple, WarningCircle, Warning } from '@phosphor-icons/react';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useClassStore } from '@/stores/classStore';
+import { useConnectionStore } from '@/stores/connectionStore';
 import { useReferenceGuideStore, type GuideClass } from '@/stores/referenceGuideStore';
 import { useGuideSync, generateGuide } from '@/hooks/useGuideSync';
 import { useSave } from '@/hooks/useSave';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { getClassPalette } from '@/lib/classColors';
+import ResetTiledModal from '@/components/ResetTiledModal';
 
 /** Reads a File as a base64 data URL. */
 function fileToDataUrl(file: File): Promise<string> {
@@ -127,6 +129,15 @@ export default function ReferencePage() {
   const [genSource, setGenSource] = useState<string>('');
   const [generating, setGenerating] = useState(false);
 
+  const connectedServerUri = useConnectionStore((s) => s.serverUri);
+  const [showResetModal, setShowResetModal] = useState(false);
+
+  /** The just-deleted server may still be "open" as the current sample —
+   *  clear it so nothing on screen keeps pointing at data that's now gone. */
+  const handleTiledReset = () => {
+    useDatasetStore.getState().reset();
+  };
+
   /** Generate example crops per class from the current annotation or a saved version. */
   const handleGenerate = async () => {
     if (!sourceKey) { alert('Open a sample first — the guide is generated from its annotation.'); return; }
@@ -208,15 +219,37 @@ export default function ReferencePage() {
 
   if (!meta || !sourceKey) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 text-sky-200">
-        <p>No sample loaded. Pick a sample to author its annotation guide.</p>
-        <button
-          type="button"
-          onClick={() => navigate('/browse')}
-          className="rounded-md bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-700"
-        >
-          Go to Browse
-        </button>
+      <div className="flex h-full flex-col items-center justify-center gap-6 text-sky-200">
+        <div className="flex flex-col items-center gap-4">
+          <p>No sample loaded. Pick a sample to author its annotation guide.</p>
+          <button
+            type="button"
+            onClick={() => navigate('/browse')}
+            className="rounded-md bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-700"
+          >
+            Go to Browse
+          </button>
+        </div>
+
+        <div className="flex flex-col items-center gap-1.5 rounded-lg border border-red-900/40 bg-red-950/30 px-4 py-3">
+          <span className="text-xs font-semibold uppercase tracking-wide text-red-300">Danger zone</span>
+          <button
+            type="button"
+            onClick={() => setShowResetModal(true)}
+            className="flex items-center gap-1.5 rounded-md border border-red-800 px-3 py-1.5 text-xs font-medium text-red-300 transition-colors hover:bg-red-900/40"
+          >
+            <Warning size={13} />
+            Reset Tiled server…
+          </button>
+        </div>
+
+        {showResetModal && (
+          <ResetTiledModal
+            serverUri={connectedServerUri}
+            onClose={() => setShowResetModal(false)}
+            onReset={handleTiledReset}
+          />
+        )}
       </div>
     );
   }
@@ -349,6 +382,29 @@ export default function ReferencePage() {
           <GuideEntryRow key={i} index={i} entry={entry} />
         ))}
       </div>
+
+      <div className="flex flex-col items-start gap-1.5 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+        <span className="text-xs font-semibold uppercase tracking-wide text-red-700">Danger zone</span>
+        <button
+          type="button"
+          onClick={() => setShowResetModal(true)}
+          className="flex items-center gap-1.5 rounded-md border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-100"
+        >
+          <Warning size={13} />
+          Reset Tiled server…
+        </button>
+        <p className="text-[11px] text-red-700/80">
+          Permanently deletes every sample on the connected Tiled server. Saved runs and drafts are unaffected.
+        </p>
+      </div>
+
+      {showResetModal && (
+        <ResetTiledModal
+          serverUri={connectedServerUri}
+          onClose={() => setShowResetModal(false)}
+          onReset={handleTiledReset}
+        />
+      )}
     </div>
   );
 }

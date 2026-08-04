@@ -83,6 +83,64 @@ def test_vectorize_label_map_handles_multiple_classes_and_components() -> None:
     assert class_ids == [5, 9]
 
 
+def test_a_class_enclosing_another_encodes_it_as_a_hole_not_a_solid_polygon() -> None:
+    """Regression: a class that surrounds another (background between grains)
+    traces an outer contour plus one per enclosed region. Emitting those inner
+    contours as separate solid same-class polygons made the enclosing class
+    paint straight over the enclosed one in Annotate — grains predicted as
+    'Sand' rendered in the background class's colour, while the label-map
+    preview PNG in the Train tab showed them correctly. Observed live on a
+    3-class run (Sand/Air/Glass) over a 38-slice volume."""
+    label = np.zeros((60, 60), dtype=np.uint8)
+    label[10:50, 10:50] = 2  # channel 1 (classId 9) surrounds…
+    label[20:30, 20:30] = 1  # …channel 0 (classId 5)
+
+    shapes = infer_jobs._vectorize_label_map(label, _classes(), min_area=10, simplify_tol=0.0, run_id="r", slice_idx=0)
+
+    assert len(shapes) == 2, "one shape per region, not one per traced contour"
+    enclosed = next(s for s in shapes if s["classId"] == 5)
+    surrounding = next(s for s in shapes if s["classId"] == 9)
+    assert enclosed.get("holes", []) == [], "the inner square encloses nothing"
+    assert len(surrounding["holes"]) == 1, "the hole must be a hole, not a second polygon"
+    # The outer ring is the wide one; the hole is the inner square it surrounds.
+    assert max(surrounding["points"][0::2]) - min(surrounding["points"][0::2]) > 30
+    assert max(surrounding["holes"][0][0::2]) - min(surrounding["holes"][0][0::2]) < 20
+
+
+def test_vectorized_shapes_repaint_the_label_map_the_preview_shows() -> None:
+    """The end-to-end property that makes the two views agree: painting every
+    shape in list order (what the canvas and the rasterizer both do) must
+    reproduce the label map the preview PNG is colourised from, so imported
+    annotations look like the preview rather than a differently-stacked
+    approximation of it."""
+    import coco_export
+
+    h = w = 120
+    yy, xx = np.mgrid[0:h, 0:w]
+
+    def disc(r: int, cy: int = 60, cx: int = 60) -> np.ndarray:
+        return (yy - cy) ** 2 + (xx - cx) ** 2 <= r * r
+
+    label = np.zeros((h, w), dtype=np.uint8)
+    label[disc(55)] = 2          # channel 1 disc, surrounding…
+    label[disc(12, 40, 40)] = 1  # …two enclosed channel-0 blobs
+    label[disc(12, 80, 80)] = 1
+
+    # The preview PNG colourises the label map by channel; shapes carry the run's
+    # own classIds, so compare against the label map translated the same way.
+    expected = np.zeros((h, w), dtype=np.uint8)
+    for channel, cls in enumerate(_classes()):
+        expected[label == channel + 1] = cls["classId"]
+
+    shapes = infer_jobs._vectorize_label_map(label, _classes(), min_area=10, simplify_tol=0.0, run_id="r", slice_idx=0)
+
+    painted = np.zeros((h, w), dtype=np.uint8)
+    for shape in shapes:
+        painted[coco_export.shape_to_mask(shape, h, w)] = shape["classId"]
+
+    assert np.array_equal(painted, expected)
+
+
 def test_hex_to_rgb_parses_standard_and_short_hex() -> None:
     assert infer_jobs._hex_to_rgb("#ff0000") == (255, 0, 0)
     assert infer_jobs._hex_to_rgb("#0f0") == (0, 255, 0)

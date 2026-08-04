@@ -820,3 +820,27 @@ class InferRequest(StrictModel):
         if len(value) != len(set(value)):
             raise ValueError("slice_indices must be unique")
         return value
+
+
+class MasksFromTiledRequest(StrictModel):
+    """Request body to read a previously-written ``<stem>__masks`` container
+    back into vectorized shapes for the Annotate canvas (see
+    ``tiled_mask_sync.run_masks_readback_job``).
+
+    Attributes:
+        kind: Always ``"tiled"`` — masks are only ever written for Tiled
+            sources (see ``tiled_mask_sync``'s module docstring), so a local
+            source has nothing to read back.
+        source: Tiled path whose ``<stem>__masks`` sibling to read.
+        server_uri: Tiled server URI.
+        min_area: Minimum connected-component pixel area kept per region.
+        simplify_tol: Polygon simplification tolerance (pixels).
+    """
+
+    kind: Literal["tiled"]
+    source: Annotated[str, Field(min_length=1, max_length=4_096)]
+    server_uri: Annotated[str, Field(max_length=2_048)] | None = None
+    # Same defaults as InferRequest, so masks loaded back match what "Import
+    # as annotations" would have produced from the same underlying label maps.
+    min_area: Annotated[int, Field(ge=0, le=1_000_000)] = 64
+    simplify_tol: Annotated[float, Field(ge=0, le=50, allow_inf_nan=False)] = 1.5

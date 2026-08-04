@@ -199,6 +199,35 @@ def merge_mask_volumes(existing: dict[str, Any] | None, new: dict[str, Any]) -> 
     }
 
 
+def _resolve_masks_parent(client: Any, source: str) -> tuple[Any, str]:
+    """Walk to ``source``'s parent container and the path its ``<stem>__masks``
+    sibling would have. Shared by ``write_masks_to_tiled`` (which also needs
+    the parent itself, to create the container on a first write) and
+    ``_masks_container`` (which doesn't) — so every caller derives the exact
+    same location from a source string, never a slightly different one.
+    """
+    parts = [p for p in source.strip("/").split("/") if p]
+    stem = parts[-1]
+    parent: Any = client
+    for part in parts[:-1]:
+        parent = parent[part]
+    return parent, "/".join(parts[:-1] + [f"{stem}__masks"])
+
+
+def _masks_container(client: Any, source: str) -> tuple[Any | None, str]:
+    """Resolve the ``<stem>__masks`` sibling container next to ``source``.
+
+    Returns ``(container, path)`` if it exists, or ``(None, path)`` if it
+    doesn't — ``path`` is always returned so callers can report it either way.
+    """
+    parent, path = _resolve_masks_parent(client, source)
+    container_key = path.rsplit("/", 1)[-1]
+    try:
+        return parent[container_key], path
+    except KeyError:
+        return None, path
+
+
 def _read_existing_masks(container: Any) -> dict[str, Any] | None:
     """Read prior masks, failing closed if any expected data is unreadable."""
     try:
@@ -272,14 +301,8 @@ def write_masks_to_tiled(
     each slice is explicit. Returns ``{path, n_slices, updated, n_classes}``.
     """
     client = get_tiled_client(server_uri)
-
-    parts = [p for p in source.strip("/").split("/") if p]
-    stem = parts[-1]
-    parent: Any = client
-    for part in parts[:-1]:
-        parent = parent[part]
-
-    container_key = f"{stem}__masks"
+    parent, path = _resolve_masks_parent(client, source)
+    container_key = path.rsplit("/", 1)[-1]
     try:
         container: Any = parent[container_key]
     except KeyError:
@@ -338,7 +361,6 @@ def write_masks_to_tiled(
                 logger.exception("could not remove partial new mask container %s", container_key)
         raise write_exc
 
-    path = "/".join(parts[:-1] + [container_key])
     logger.info(
         "tiled_mask_sync: merged masks into %s (%d total, %d updated)",
         path, len(merged["slice_indices"]), len(merged["updated_indices"]),
@@ -349,6 +371,183 @@ def write_masks_to_tiled(
         "updated": len(merged["updated_indices"]),
         "n_classes": len(merged["class_vols"]),
     }
+
+
+def read_masks_summary(source: str, server_uri: str | None) -> dict[str, Any]:
+    """Metadata-only probe for whether ``<stem>__masks`` exists for ``source``.
+
+    Powers the "Load saved masks" panel's disabled/enabled state without
+    launching a job destined to fail on a sample with nothing saved. Never
+    reads the ``semantic`` array itself — container metadata only.
+
+    Returns ``{"available": False}`` (optionally with an ``"error"`` string if
+    the check itself failed unexpectedly — a probe must never raise) or
+    ``{"available": True, "path", "n_slices", "slice_indices", "updated_at",
+    "classes"}``.
+    """
+    try:
+        client = get_tiled_client(server_uri)
+        container, path = _masks_container(client, source)
+        if container is None:
+            return {"available": False}
+        meta = dict(container.metadata)
+        legend = meta.get("legend") or meta.get("classes") or []
+        slice_indices = [int(i) for i in (meta.get("slice_indices") or [])]
+        return {
+            "available": True,
+            "path": path,
+            "n_slices": int(meta.get("n_slices") or len(slice_indices)),
+            "slice_indices": slice_indices,
+            "updated_at": meta.get("updated_at"),
+            "classes": legend,
+        }
+    except Exception as exc:  # noqa: BLE001 - a probe must never crash the caller
+        logger.warning("read_masks_summary failed for %s: %s", source, exc)
+        return {"available": False, "error": str(exc)}
+
+
+def _legend_lut(legend: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], np.ndarray]:
+    """Build the ``run_classes`` list ``infer_jobs._vectorize_label_map``
+    expects, plus a 256-entry lookup table remapping a stored semantic pixel
+    value to that list's positional convention.
+
+    ``_vectorize_label_map`` matches classes POSITIONALLY — ``label_map == i +
+    1`` for the i-th entry of ``run_classes`` — but the semantic volume stores
+    each pixel's LEGEND id, which is only contiguous-from-1 by the convention
+    ``_category_maps``/``merge_mask_volumes`` currently happen to follow, not
+    by any enforced invariant. Routing every stored frame through this LUT
+    before vectorizing makes read-back correct even if that ever changes
+    (e.g. a class removed from the middle of the legend across several
+    merges), for the cost of one array-index lookup per frame.
+    """
+    ordered = sorted(legend, key=lambda e: int(e["id"]))
+    run_classes = [
+        {"classId": int(e["id"]), "label": e["name"], "color": e.get("color")}
+        for e in ordered
+    ]
+    lut = np.zeros(256, dtype=np.uint8)
+    for position, entry in enumerate(ordered):
+        stored_id = int(entry["id"])
+        if 0 <= stored_id < 256:
+            lut[stored_id] = position + 1
+    return run_classes, lut
+
+
+def run_masks_readback_job(jid: str, request: Any) -> None:
+    """Background worker: vectorize a saved ``<stem>__masks`` semantic volume
+    back into shape dicts, in the SAME result shape ``infer_jobs.run_infer_job``
+    produces (``classes``/``slices``/``n_shapes``), so the frontend's existing
+    "Import as annotations" machinery works completely unchanged regardless of
+    whether the shapes came from a live model run or a previously-saved mask.
+
+    No ``train_common.ML_LOCK`` — this is pure I/O + skimage, not a model
+    forward pass, and must not contend with (or wait behind) an actual
+    training/inference job for the device.
+
+    Reads the semantic volume PER FRAME (``sem_node[pos]``), never the whole
+    volume at once: a 38x3232x3232 uint8 semantic volume is ~397MB whole vs
+    ~10MB for a single frame — the same principle ``volumes.py``'s strided
+    reads follow for the raw 3-D volume endpoint.
+    """
+    # Lazy, mirroring infer_jobs.run_write_tiled_job's own lazy import of this
+    # module — avoids a module-level import cycle between the two.
+    from infer_jobs import _vectorize_label_map
+
+    try:
+        export_jobs.update(jid, state="running", phase="reading")
+        client = get_tiled_client(request.server_uri)
+        container, path = _masks_container(client, request.source)
+        if container is None:
+            export_jobs.update(
+                jid, state="error", phase="error",
+                error="No saved masks found for this sample.",
+            )
+            return
+
+        meta = dict(container.metadata)
+        legend = meta.get("legend") or meta.get("classes") or []
+        if not legend:
+            export_jobs.update(
+                jid, state="error", phase="error",
+                error="Saved masks have no class legend — cannot map classes.",
+            )
+            return
+
+        slice_indices = [int(i) for i in (meta.get("slice_indices") or [])]
+        if not slice_indices:
+            export_jobs.update(
+                jid, state="error", phase="error",
+                error="Saved masks have no recorded slices.",
+            )
+            return
+
+        try:
+            sem_node = container["semantic"]
+        except KeyError:
+            export_jobs.update(
+                jid, state="error", phase="error",
+                error="Saved masks are missing the semantic volume.",
+            )
+            return
+
+        sem_shape = tuple(int(d) for d in sem_node.shape)
+        if sem_shape[0] != len(slice_indices):
+            export_jobs.update(
+                jid, state="error", phase="error",
+                error="Saved masks are inconsistent — re-write them from the Train tab.",
+            )
+            return
+
+        run_classes, lut = _legend_lut(legend)
+        # Only feeds the emitted shapes' id prefix (infer_jobs.py's own
+        # convention); the frontend re-uuids everything on import regardless.
+        run_id = f"stored{abs(hash(path)) % 10**8:08d}"
+
+        export_jobs.set_total(jid, len(slice_indices))
+        export_jobs.update(jid, phase="vectorizing")
+
+        slices_result: dict[str, list[dict[str, Any]]] = {}
+        errors: list[dict[str, Any]] = []
+        n_shapes = 0
+        cancelled = False
+
+        for pos, real_idx in enumerate(slice_indices):
+            if export_jobs.cancel_requested(jid):
+                cancelled = True
+                break
+            try:
+                frame = lut[np.asarray(sem_node[pos])]
+                shapes = _vectorize_label_map(
+                    frame, run_classes, request.min_area, request.simplify_tol, run_id, real_idx,
+                )
+                slices_result[str(real_idx)] = shapes
+                n_shapes += len(shapes)
+                export_jobs.log(jid, f"slice {real_idx}: {len(shapes)} region(s)")
+            except Exception as exc:  # noqa: BLE001 - one bad frame must not abort the rest
+                logger.warning("masks readback: skipping unreadable slice %d: %s", real_idx, exc)
+                errors.append({"slice": real_idx, "error": str(exc)})
+            export_jobs.bump(jid, 1)
+
+        if not slices_result and errors:
+            export_jobs.update(
+                jid, state="error", phase="error",
+                error="Could not read any saved mask slice.",
+            )
+            return
+
+        result = {
+            "classes": run_classes,
+            "slices": slices_result,
+            "n_shapes": n_shapes,
+            "cancelled": cancelled,
+            "errors": errors,
+            "path": path,
+        }
+        export_jobs.update(jid, state="done", phase="done", result=result)
+        export_jobs.log(jid, "Masks readback cancelled; partial results kept." if cancelled else "Masks loaded.")
+    except Exception as exc:  # noqa: BLE001 - reported as a job error, never a crash
+        logger.error("Masks readback job %s failed: %s", jid, exc)
+        export_jobs.update(jid, state="error", phase="error", error=str(exc))
 
 
 def run_mask_sync_job(jid: str, source_items: list[Any], payload: Any) -> None:

@@ -41,6 +41,7 @@ import images as images_mod
 import ingest as ingest_mod
 import local_fs
 import tiled_clients as tiled_clients_mod
+import volumes as volumes_mod
 from browse_helpers import (
     _SINGLE_VALUE_FACET_RAW_KEYS,
     FieldMapping,
@@ -68,6 +69,7 @@ from schemas import (
     ImageMeta,
     InferRequest,
     IngestPreflightRequest,
+    MasksFromTiledRequest,
     MeasureRequest,
     SaveVersionRequest,
     TrainRequest,
@@ -107,6 +109,9 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT"],
     allow_headers=["*"],
+    # X-Volume-Meta carries /api/image/volume's dims JSON; browsers hide any
+    # response header from JS that isn't explicitly exposed, CORS or not.
+    expose_headers=["X-Volume-Meta"],
 )
 
 # Compress text responses (SPA JS/CSS, JSON). Matters for the production path where
@@ -158,6 +163,9 @@ _FIELD_MAPPING_TTL = float(os.getenv("BROWSE_FIELD_MAPPING_TTL_SECONDS", "300"))
 _column_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=256)
 _items_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=128)
 _field_mapping_cache: TTLCache = TTLCache(ttl_seconds=_FIELD_MAPPING_TTL, max_entries=32)
+# Each entry is up to 384**3 = ~56.6 MB (see volumes.build_volume); 4 entries
+# bounds worst-case memory to ~230 MB.
+_volume_cache: TTLCache = TTLCache(ttl_seconds=300.0, max_entries=4)
 
 
 def _require_tiled_server(server_uri: str | None) -> str:
@@ -461,6 +469,95 @@ async def browse_thumbnail(
     )
 
 
+def _drafts_for_server(configured_uri: str) -> list[dict]:
+    """Local drafts whose source_key belongs to *configured_uri* — the exact
+    prefix ``buildSourceKey('tiled', path, serverUri)`` produces client-side,
+    so this only ever matches drafts for THIS Tiled server, never a local-file
+    draft or one for a different configured server."""
+    import drafts as drafts_mod
+
+    prefix = f"tiled:{configured_uri}:"
+    return [d for d in drafts_mod.list_drafts() if (d.get("source_key") or "").startswith(prefix)]
+
+
+@app.get("/api/browse/reset-tiled/preview")
+async def browse_reset_tiled_preview(server_uri: Optional[str] = None) -> dict:
+    """Local annotation drafts/versions a reset would also clear (with
+    ``clear_drafts=True``) — feeds the confirmation dialog's live count, so
+    the user sees the real number before committing rather than after."""
+    import drafts as drafts_mod
+
+    configured_uri = _require_tiled_server(server_uri)
+
+    def _count() -> tuple[int, int]:
+        matching = _drafts_for_server(configured_uri)
+        version_count = sum(len(drafts_mod.list_versions(d["source_key"])) for d in matching)
+        return len(matching), version_count
+
+    draft_count, version_count = await asyncio.to_thread(_count)
+    return {"draft_count": draft_count, "version_count": version_count}
+
+
+@app.post("/api/browse/reset-tiled")
+async def browse_reset_tiled(server_uri: Optional[str] = None, clear_drafts: bool = Query(True)) -> dict:
+    """Permanently delete every top-level container on this Tiled server.
+
+    A deliberately blunt "empty the catalog" — everything ingested/browsable
+    lives under the root, so wiping every root key is the same end state as
+    dropping and recreating the catalog, without needing to stop the Tiled
+    process or touch its database file directly. Never touches saved
+    training runs (always kept — those live entirely outside Tiled and
+    aren't reproducible from it).
+
+    ``clear_drafts`` (default True) additionally removes local annotation
+    drafts/versions for this server: a draft is keyed by path, not by what's
+    actually in Tiled, so leaving one behind after wiping the data it
+    describes means it silently reattaches — full annotation overlays and
+    all — to whatever unrelated data happens to land at that same path next.
+    Set it to False to keep old annotations around for reference even though
+    the Tiled data they were made on is gone.
+
+    Irreversible: there is no undo once this returns. The frontend is
+    responsible for the "are you sure" step; this endpoint does exactly what
+    it's asked the moment it's called.
+    """
+    configured_uri = _require_tiled_server(server_uri)
+
+    def _reset() -> tuple[list[str], list[dict[str, str]]]:
+        client = get_tiled_client(configured_uri)
+        deleted: list[str] = []
+        errors: list[dict[str, str]] = []
+        for key in list(client.keys()):
+            try:
+                client.delete_contents(key, recursive=True, external_only=False)
+                deleted.append(key)
+            except Exception as exc:  # noqa: BLE001 — one bad key must not abort the rest
+                logger.warning("reset-tiled: could not delete %r: %s", key, exc)
+                errors.append({"key": key, "message": str(exc)})
+        return deleted, errors
+
+    def _reset_drafts() -> int:
+        import drafts as drafts_mod
+
+        return sum(1 for d in _drafts_for_server(configured_uri) if drafts_mod.delete_draft(d["source_key"]))
+
+    try:
+        deleted, errors = await asyncio.to_thread(_reset)
+        drafts_deleted = await asyncio.to_thread(_reset_drafts) if clear_drafts else 0
+    except Exception as exc:
+        logger.error("reset-tiled failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Failed to reset the Tiled server") from exc
+
+    # Every cached listing/mapping was built from data that may no longer
+    # exist — same invalidation ingest and save-version already do after
+    # their own writes.
+    _field_mapping_cache.clear()
+    _column_cache.clear()
+    _items_cache.clear()
+
+    return {"deleted_keys": deleted, "errors": errors, "drafts_deleted": drafts_deleted}
+
+
 @app.get("/api/local/list")
 async def local_list(
     rel: str = Query("", description="Relative path under the granted root"),
@@ -699,6 +796,67 @@ async def image_slice(
         content=png,
         media_type="image/png",
         headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@app.get("/api/image/volume")
+async def image_volume(
+    source: str = Query(...),
+    kind: str = Query(...),
+    server_uri: Optional[str] = None,
+    root: Optional[str] = Query(None, description="Server-configured root (kind=local)"),
+    max_dim: int = Query(256, ge=32, le=384),
+    norm: str = Query("global"),
+    scale: str = Query("linear"),
+    vmin_pct: float = Query(1.0),
+    vmax_pct: float = Query(99.0),
+) -> Response:
+    """Return a downsampled uint8 intensity volume for the 3D tab.
+
+    Body is raw C-order ``(nz, ny, nx)`` bytes (``application/octet-stream``);
+    dimensions and any skipped slices are carried in the ``X-Volume-Meta``
+    JSON response header rather than the body, so the frontend can validate
+    ``byteLength == nz*ny*nx`` before touching the buffer. See
+    ``volumes.volume_dims`` for the exact grid-size contract the frontend's
+    label-volume rasterizer mirrors.
+    """
+    if kind == "tiled":
+        server_uri = _require_tiled_server(server_uri)
+
+    opts = {"norm": norm, "scale": scale, "vmin_pct": vmin_pct, "vmax_pct": vmax_pct}
+    cache_key = (
+        "volume", kind, source, server_uri or "", root or "",
+        max_dim, norm, scale, round(vmin_pct, 3), round(vmax_pct, 3),
+    )
+
+    def _run() -> tuple[bytes, dict]:
+        cached = _volume_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        node = arrays_mod.resolve_array(source, kind, server_uri, root)
+        meta = arrays_mod.array_shape_meta(node)
+        global_range = None
+        if norm == "global":
+            global_range = images_mod._sample_global_stats(node, meta)
+        result = volumes_mod.build_volume(node, meta, opts, max_dim, global_range)
+        _volume_cache.set(cache_key, result)
+        return result
+
+    try:
+        payload, vol_meta = await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("image_volume failed: %s", exc)
+        raise HTTPException(500, "Failed to build image volume") from exc
+
+    return Response(
+        content=payload,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "private, max-age=300",
+            "X-Volume-Meta": json.dumps(vol_meta, separators=(",", ":")),
+        },
     )
 
 
@@ -1212,6 +1370,45 @@ async def masks_to_tiled(payload: ExportRequest) -> dict:
     threading.Thread(
         target=tiled_mask_sync.run_mask_sync_job,
         args=(jid, source_items, payload),
+        daemon=True,
+    ).start()
+    return {"job_id": jid}
+
+
+@app.get("/api/masks/from-tiled/preview")
+async def masks_from_tiled_preview(source: str = Query(...), server_uri: Optional[str] = None) -> dict:
+    """Metadata-only check for saved masks on this sample, before offering to
+    load them — powers the "no saved masks yet" disabled state in Annotate's
+    Load-saved-masks panel without launching a job destined to fail."""
+    import tiled_mask_sync
+
+    return await asyncio.to_thread(tiled_mask_sync.read_masks_summary, source, server_uri)
+
+
+@app.post("/api/masks/from-tiled")
+async def masks_from_tiled(payload: MasksFromTiledRequest) -> dict:
+    """Vectorize a previously-written ``<stem>__masks`` container back into
+    annotation shapes, for the Annotate tab's "Load saved masks" action.
+
+    Runs on a background thread (no ML_LOCK — pure I/O + skimage, not a model
+    forward pass); poll ``/api/export/status/{job_id}`` for progress. The
+    result is shaped exactly like an inference job's ({classes, slices,
+    n_shapes}), so the frontend's existing import machinery is reused as-is.
+    """
+    import tiled_mask_sync
+
+    summary = await asyncio.to_thread(tiled_mask_sync.read_masks_summary, payload.source, payload.server_uri)
+    if not summary.get("available"):
+        raise HTTPException(
+            404,
+            "No saved masks found for this sample — run inference in the Train tab "
+            "and use 'Write masks to Tiled' first.",
+        )
+
+    jid = export_jobs.new_job("")
+    threading.Thread(
+        target=tiled_mask_sync.run_masks_readback_job,
+        args=(jid, payload),
         daemon=True,
     ).start()
     return {"job_id": jid}

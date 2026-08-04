@@ -16,6 +16,7 @@ import { buildSourceKey } from '@/lib/sourceKey';
 import { useTrainCapability } from '@/hooks/useTrainCapability';
 import { useTrainRuns } from '@/hooks/useTrainRuns';
 import { useExportJob } from '@/hooks/useExportJob';
+import { useDraftSync } from '@/hooks/useDraftSync';
 import { useImageSlice, useLoadedSliceImage } from '@/hooks/useImageSlice';
 import { gatherTrainingSources, listAnnotatedSourceKeys } from '@/lib/gatherTrainingSources';
 import { buildModelConfig, trainConfigSignature, validateTrainConfig } from '@/lib/trainModelConfig';
@@ -81,6 +82,14 @@ export default function TrainPage() {
 
   const isTiledSource = kind === 'tiled';
   const sourceKey = source && kind ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri) : null;
+  // "Import as annotations" below writes shapes (and possibly new classes)
+  // straight into the store for this sourceKey — without this, nothing here
+  // autosaves them: AnnotatePage is the only OTHER place that mounts
+  // useDraftSync, and routes render exactly one page at a time, so navigating
+  // to Annotate afterward would establish a "clean" baseline that already
+  // includes the import, and the debounced PUT would never fire. This closes
+  // that gap the same way every edit in Annotate is already persisted.
+  useDraftSync(sourceKey);
   const candidates = useMemo(() => listAnnotatedSourceKeys(byImage), [byImage]);
 
   // Auto-select the currently open sample the first time it becomes available.

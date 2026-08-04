@@ -46,8 +46,12 @@ Thumbs.db
 .vscode/
 *.swp
 
-# Claude Code session-local tool state (per-machine, not project content)
+# Claude Code / Codex session-local tool state (per-machine, not project content)
 .claude/
+.codex/
+
+# graphify-generated knowledge graph (regenerate with `/graphify`; large, not source)
+graphify-out/
 
 # Test / coverage artifacts
 .pytest_cache/

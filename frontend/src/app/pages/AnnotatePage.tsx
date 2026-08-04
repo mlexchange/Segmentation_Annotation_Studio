@@ -25,6 +25,7 @@ import SliceNavigator from '@/components/annotate/SliceNavigator';
 import MaskToolsPanel from '@/components/annotate/MaskToolsPanel';
 import MeasurementPanel from '@/components/annotate/MeasurementPanel';
 import ApplyModelPanel from '@/components/annotate/ApplyModelPanel';
+import LoadMasksPanel from '@/components/annotate/LoadMasksPanel';
 import AnnotationCanvas from '@/components/annotate/AnnotationCanvas';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import DownloadModal from '@/components/annotate/DownloadModal';
@@ -376,6 +377,20 @@ export default function AnnotatePage() {
             buildTrainingPayload={buildTrainingPayload}
             onImportPredictions={handleApplyModelPredictions}
           />
+
+          {kind === 'tiled' && (
+            <LoadMasksPanel
+              source={source}
+              serverUri={serverUri}
+              nSlices={meta?.nSlices ?? 1}
+              hasShapesOnSlices={(indices) =>
+                indices.some((idx) => (byImage[sourceKey ?? '']?.[String(idx)]?.length ?? 0) > 0)
+              }
+              needsSaveBeforeApply={needsSaveBeforeApply}
+              onEnsureSaved={() => save({ notes: 'Auto-save before loading saved masks' })}
+              onImportPredictions={handleApplyModelPredictions}
+            />
+          )}
 
           {/* Full Train tab — last, since the inline panel above covers the
               common apply/refine loop without leaving Annotate. */}

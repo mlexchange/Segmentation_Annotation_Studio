@@ -475,6 +475,20 @@ export const useAnnotationStore = create<AnnotationState>()(
         negativeSlices: s.negativeSlices,
         draft: s.draft,
       }),
+      // Without this, zundo records an entry for EVERY set() — including ones
+      // that change nothing. `clearDraft()` is the costly case: the canvas calls
+      // it defensively on each tool switch, so switching to Magic (or away after
+      // committing) inserted undo steps that reverse nothing the user can see,
+      // making the Undo button look broken until they pressed it enough times to
+      // get past them. Reference equality per tracked key is sufficient: every
+      // real edit rebuilds the object it touches, EMPTY_DRAFT is a singleton, and
+      // touchHistory() deliberately shallow-clones byImage to force an entry —
+      // which this still records.
+      equality: (past, current) =>
+        past.byImage === current.byImage
+        && past.splitBySlice === current.splitBySlice
+        && past.negativeSlices === current.negativeSlices
+        && past.draft === current.draft,
       // Notify the class-delete journal on each tracked edit. zundo calls onSave only
       // for real edits (undo/redo bypass it), keeping the journal in lockstep.
       onSave: () => onTrackedEdit(),

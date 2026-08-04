@@ -85,31 +85,32 @@ def _sample_global_stats(node: Any, meta: dict[str, Any]) -> tuple[float, float]
     return result
 
 
-def render_slice(
+def normalize_scalar_unit(
     arr: np.ndarray,
     opts: dict[str, Any],
     global_range: tuple[float, float] | None = None,
 ) -> np.ndarray:
-    """Render a 2-D or H×W×C array slice to uint8 RGB.
+    """Normalize a 2-D grayscale array to float64 in ``[0, 1]``.
+
+    This is the exact intensity pipeline behind :func:`render_slice`'s
+    grayscale branch (NaN handling, log/symlog transform, global-vs-slice
+    percentile bounds), extracted so the 3-D volume endpoint (``volumes.py``)
+    can normalize each slice identically to the 2-D canvas — same
+    ``RenderOpts``, same ``global_range``, same output domain, just skipping
+    the final uint8/colormap step. If you change intensity math here, do NOT
+    duplicate it elsewhere; a 3D volume that looks different from the 2D
+    slice it was built from is the exact bug this split is meant to prevent.
 
     Args:
-        arr: 2-D grayscale or H×W×(3|4) colour array.
+        arr: 2-D grayscale array (native dtype).
         opts: :class:`~schemas.RenderOpts`-compatible dict with keys
-            ``norm``, ``scale``, ``vmin_pct``, ``vmax_pct``, ``cmap``.
+            ``norm``, ``scale``, ``vmin_pct``, ``vmax_pct``.
         global_range: ``(vmin, vmax)`` used when ``opts["norm"] == "global"``.
             Ignored in slice-norm mode.
 
     Returns:
-        uint8 RGB array of shape ``(H, W, 3)``.
+        float64 array of the same shape as *arr*, clamped to ``[0, 1]``.
     """
-    is_rgb = arr.ndim == 3
-    if is_rgb:
-        rgb = arr[:, :, :3].astype(np.float64)
-        mn, mx = float(rgb.min()), float(rgb.max())
-        if mx > mn:
-            rgb = (rgb - mn) / (mx - mn) * 255.0
-        return np.clip(rgb, 0, 255).astype(np.uint8)
-
     data = arr.astype(np.float64)
     data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -154,7 +155,35 @@ def render_slice(
         data = (data - vmin_abs) / (vmax_abs - vmin_abs)
     else:
         data = np.zeros_like(data)
-    data = np.clip(data, 0.0, 1.0)
+    return np.clip(data, 0.0, 1.0)
+
+
+def render_slice(
+    arr: np.ndarray,
+    opts: dict[str, Any],
+    global_range: tuple[float, float] | None = None,
+) -> np.ndarray:
+    """Render a 2-D or H×W×C array slice to uint8 RGB.
+
+    Args:
+        arr: 2-D grayscale or H×W×(3|4) colour array.
+        opts: :class:`~schemas.RenderOpts`-compatible dict with keys
+            ``norm``, ``scale``, ``vmin_pct``, ``vmax_pct``, ``cmap``.
+        global_range: ``(vmin, vmax)`` used when ``opts["norm"] == "global"``.
+            Ignored in slice-norm mode.
+
+    Returns:
+        uint8 RGB array of shape ``(H, W, 3)``.
+    """
+    is_rgb = arr.ndim == 3
+    if is_rgb:
+        rgb = arr[:, :, :3].astype(np.float64)
+        mn, mx = float(rgb.min()), float(rgb.max())
+        if mx > mn:
+            rgb = (rgb - mn) / (mx - mn) * 255.0
+        return np.clip(rgb, 0, 255).astype(np.uint8)
+
+    data = normalize_scalar_unit(arr, opts, global_range)
 
     cmap = opts.get("cmap", "gray")
     if cmap == "viridis":
@@ -165,12 +194,18 @@ def render_slice(
             from matplotlib import pyplot as plt
 
             viridis = plt.get_cmap("viridis")
-            rgb = (viridis(data)[:, :, :3] * 255).astype(np.uint8)
+            # round(), not truncate: volumes.build_volume quantizes the same
+            # [0,1] unit data with round() for its 3-D voxels (see
+            # normalize_scalar_unit), so a bare cast here would make a 2-D
+            # slice and the 3-D volume it should match disagree by up to 1
+            # LSB at every pixel — exactly the drift normalize_scalar_unit
+            # was split out to prevent.
+            rgb = (viridis(data)[:, :, :3] * 255).round().astype(np.uint8)
         except Exception:
-            gray = (data * 255).astype(np.uint8)
+            gray = (data * 255).round().astype(np.uint8)
             rgb = np.stack([gray, gray, gray], axis=-1)
     else:
-        gray = (data * 255).astype(np.uint8)
+        gray = (data * 255).round().astype(np.uint8)
         rgb = np.stack([gray, gray, gray], axis=-1)
 
     return rgb
