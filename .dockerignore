@@ -1,0 +1,49 @@
+# Build artifacts & deps (rebuilt inside the image)
+**/node_modules
+**/dist
+**/.vite
+frontend/dist
+backend/static
+
+# Secrets and machine-specific runtime configuration. Keep checked-in examples.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Mutable, unpinned model snapshots are fetched outside image builds.
+frontend/public/models/
+
+# Python envs / caches
+.venv
+.conda-py312
+**/__pycache__
+**/*.pyc
+.pytest_cache
+htmlcov
+.coverage
+
+# Tiled server config, data & catalog (external in production — never bundled)
+.tiled
+tiled/
+
+# Local data, backups, runtime files
+data
+.drafts
+.reset-backups
+*.pid
+.run
+
+# VCS / editor / OS
+.git
+.gitignore
+.idea
+.vscode
+.DS_Store
+
+# Plans / docs not needed in the image
+*.md
+
+# peter's version of the repo
+peter/
+
+.reset-backups/

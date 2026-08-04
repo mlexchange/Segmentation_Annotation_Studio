@@ -1,0 +1,37 @@
+# Production app container (frontend + backend). Tiled runs separately — point
+# TILED_URI/TILED_API_KEY at your external Tiled server.
+#
+#   docker compose up --build
+#
+services:
+  app:
+    build:
+      context: .
+      args:
+        # Optional deployed MkDocs URL; empty hides the Docs link in the SPA.
+        VITE_DOCS_URL: "${VITE_DOCS_URL:-}"
+    ports:
+      # The API has no network-user authentication; publish it on loopback only.
+      - "127.0.0.1:8002:8002"
+    environment:
+      # External Tiled server (required):
+      TILED_URI: "${TILED_URI:-http://host.docker.internal:8010}"
+      TILED_API_KEY: "${TILED_API_KEY:-}"
+      # Persisted annotation drafts/versions/exports live under this path:
+      LOCAL_DATA_ROOT: "/data"
+      # Same-origin SPA → CORS can be empty; set if you split origins:
+      BROWSE_ALLOWED_ORIGINS: "${BROWSE_ALLOWED_ORIGINS:-}"
+    volumes:
+      - annotation-data:/data
+    init: true
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # host.docker.internal lets the container reach a Tiled on the host (Linux):
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  annotation-data:

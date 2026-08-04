@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sam3-annotation-studio-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  # FastAPI depends on pydantic transitively, but schemas.py imports it directly
+  # (BaseModel, field/model validators) — declare the direct import explicitly
+  # rather than relying on another package's transitive pin.
+  "pydantic>=2.7",
+  # tiled_config.py reads tiled/config.yml directly via yaml.safe_load(); tiled[client]
+  # happens to pull PyYAML transitively today, but that's not a declared contract.
+  "pyyaml>=6.0",
+  # Required by FastAPI for multipart form data (the /api/ingest/upload route uses
+  # Form/UploadFile). Not pulled in transitively, so it must be declared explicitly.
+  "python-multipart>=0.0.9",
+  "uvicorn[standard]>=0.30",
+  # Client only — the app talks to an EXTERNAL Tiled (tiled.client / tiled.queries).
+  # The Tiled *server* is not a runtime dependency and is intentionally not shipped
+  # in the Docker image. Local dev runs its own Tiled server via start_all.sh, which
+  # installs tiled[all] into .venv independently of this file.
+  "tiled[client]>=0.1",
+  "numpy>=1.26",
+  "pillow>=10.3",
+  "python-dotenv>=1.0",
+  "matplotlib>=3.8",
+  "pycocotools>=2.0.7",
+  "scikit-image>=0.22",
+  "tifffile>=2024.0",
+  "imagecodecs",
+]
+
+[project.optional-dependencies]
+dev  = ["flake8", "flake8-isort", "black"]
+test = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+# Train tab (DINOv3 + LoRA fine-tune, and dlsia TUNet trained from scratch).
+# Deliberately optional and NOT installed in the Docker image — these pull in
+# a multi-GB torch wheel and dlsia's own (fairly heavy) transitive tree; local
+# dev installs this via start_all.sh's ensure_ml_env() on capable hosts.
+# Everything in train_common.py/dino_runtime.py/dlsia_runtime.py/train_jobs.py/
+# infer_jobs.py imports torch/dlsia lazily and is import-safe without them —
+# every /api/train/* route degrades to a clear error, never a crash.
+# qlty (tiling.py's patch/stitch geometry) ships as a dlsia dependency, but is
+# declared explicitly: the DINOv3 family otherwise needs only torch, and tiling
+# must not silently break in a torch-only install.
+ml = ["torch>=2.4", "dlsia>=0.3", "qlty>=1.5"]
+
+[tool.setuptools]
+py-modules = []
+
+[tool.isort]
+# Align isort's wrap width with flake8's --max-line-length=120 so import ordering
+# doesn't rewrap everything to 79 columns. flake8-isort reads this config.
+profile = "black"
+line_length = 120
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

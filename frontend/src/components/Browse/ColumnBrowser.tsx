@@ -1,0 +1,578 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowsClockwise, Brain, PencilSimple, Plus, Stack } from '@phosphor-icons/react';
+import BrowseColumn from './BrowseColumn';
+import BrowseDetailPanel from './BrowseDetailPanel';
+import ItemsColumn from './ItemsColumn';
+import SlicesColumn from './SlicesColumn';
+import AnnotationsColumn from './AnnotationsColumn';
+import ResizeDivider from './ResizeDivider';
+import { useBrowseData, type BrowseItem } from './hooks/useBrowseData';
+import { useOpenInAnnotate } from '@/hooks/useOpenInAnnotate';
+import type { ServerInfo } from '@/types/server';
+import { ANNOTATION_FILTER_OPTIONS, type AnnotationFilter } from '@/types/annotationFilter';
+
+interface ColumnBrowserProps {
+  serverUri: string;
+  containerPath?: string | null;
+  /** Path of a sample to auto-select on arrival (e.g. jumping in from ingest). */
+  focusPath?: string | null;
+  servers: ServerInfo[];
+  selectedServerUri: string;
+  onServerChange: (uri: string) => void;
+  annotationFilter: AnnotationFilter;
+  onAnnotationFilterChange: (filter: AnnotationFilter) => void;
+}
+
+const DEFAULT_COLUMN_WIDTH = 220;
+const DEFAULT_ITEMS_WIDTH = 260;
+const DEFAULT_ANNOTATIONS_WIDTH = 220;
+const DEFAULT_DETAIL_WIDTH = 340;
+const MIN_DETAIL_WIDTH = 280;
+const MAX_DETAIL_WIDTH = 900;
+
+/** Pick a sensible default column width for a facet field based on its name/length. */
+function columnWidthForField(field: string): number {
+  if (field === 'sample_name') return 200;
+  if (field === 'Annotated') return 160;
+  if (field === 'Annotated at') return 280;
+  if (field === 'Shape count' || field === 'Class count') return 160;
+  // ~7px per character at text-xs + padding for the field picker
+  return Math.min(360, Math.max(DEFAULT_COLUMN_WIDTH, field.length * 7 + 48));
+}
+
+/** Format a column value for display (e.g. localise the "Annotated at" timestamp). */
+function formatColumnValue(field: string, value: string): string {
+  if (field === 'Annotated at') {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) {
+      return new Date(parsed).toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+    }
+  }
+  return value;
+}
+
+/** True if the backend's Tiled-metadata sync recorded a saved annotation for this
+ *  sample (see backend/tiled_annotation_sync.py's STUDIO_ANNOTATED = "yes"|"no"). */
+function isItemAnnotated(item: BrowseItem | null): boolean {
+  return item?.metadata?.studio_annotated === 'yes';
+}
+
+/**
+ * ColumnBrowser — Miller-column metadata browser for a Tiled server: a chain of facet
+ * columns narrows to a matching sample list, with a resizable detail panel. Manages column
+ * widths, auto-scroll to new columns, and opening selected samples in Annotate.
+ */
+export default function ColumnBrowser({
+  serverUri,
+  containerPath,
+  focusPath,
+  servers,
+  selectedServerUri,
+  onServerChange,
+  annotationFilter,
+  onAnnotationFilterChange,
+}: ColumnBrowserProps) {
+  const { state, actions } = useBrowseData(serverUri, 'All', containerPath);
+  const { openTiledArray } = useOpenInAnnotate();
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const [columnWidths, setColumnWidths] = useState<number[]>([]);
+  const [itemsColumnWidth, setItemsColumnWidth] = useState(DEFAULT_ITEMS_WIDTH);
+  const [sliceColumnWidth, setSliceColumnWidth] = useState(DEFAULT_ITEMS_WIDTH);
+  const [annotationsColumnWidth, setAnnotationsColumnWidth] = useState(DEFAULT_ANNOTATIONS_WIDTH);
+  const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL_WIDTH);
+  const [openStatus, setOpenStatus] = useState<string | null>(null);
+
+  /** Position of the selected item within the drilled-into dataset's slices, or
+   *  -1 when the selection isn't one of them. Doubles as the "show the
+   *  Annotations column" test and as the slice key its annotations live under
+   *  (the same index `openSample` opens the volume at). */
+  const selectedSliceIndex = useMemo(
+    () => (state.expandedSample && state.selectedItem
+      ? state.slices.findIndex((s) => s.path === state.selectedItem!.path)
+      : -1),
+    [state.expandedSample, state.selectedItem, state.slices],
+  );
+
+  // Keep columnWidths in sync with the number of columns.
+  useEffect(() => {
+    setColumnWidths((prev) => {
+      const n = state.columns.length;
+      if (prev.length === n) return prev;
+      if (prev.length > n) return prev.slice(0, n);
+      const additions = Array.from({ length: n - prev.length }, (_, i) => {
+        const field = state.columns[prev.length + i]?.field ?? '';
+        return columnWidthForField(field);
+      });
+      return [...prev, ...additions];
+    });
+  }, [state.columns]);
+
+  const prevColumnCount = useRef(0);
+  const skipNextAutoScroll = useRef(false);
+
+  // Total columns in the scroller: facet columns + the Slices and Annotations
+  // drill-in columns, so revealing either one auto-scrolls like adding a facet.
+  const scrollerColumnCount =
+    state.columns.length + (state.expandedSample ? 1 : 0) + (selectedSliceIndex >= 0 ? 1 : 0);
+
+  // Scroll to reveal newly added columns (not on the initial bulk load).
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    if (skipNextAutoScroll.current) {
+      skipNextAutoScroll.current = false;
+      el.scrollLeft = 0;
+      prevColumnCount.current = scrollerColumnCount;
+      return;
+    }
+
+    if (scrollerColumnCount > prevColumnCount.current) {
+      el.scrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+    }
+    prevColumnCount.current = scrollerColumnCount;
+  }, [scrollerColumnCount]);
+
+  // First-load: show every sample immediately (low-friction default) so data
+  // already in Tiled appears without the user having to add filter columns.
+  // Reset when the server/container changes (which resets the browse state).
+  const initialised = useRef(false);
+  useEffect(() => {
+    initialised.current = false;
+  }, [serverUri, containerPath]);
+
+  useEffect(() => {
+    if (initialised.current || state.connectionStatus !== 'connected') return;
+    initialised.current = true;
+    skipNextAutoScroll.current = true;
+    actions.showAll();
+  }, [state.connectionStatus, actions]);
+
+  /** Update the stored width for the facet column at the given index. */
+  const handleResizeColumn = useCallback((index: number, newWidth: number) => {
+    setColumnWidths((prev) => {
+      if (index < 0 || index >= prev.length) return prev;
+      const next = [...prev];
+      next[index] = newWidth;
+      return next;
+    });
+  }, []);
+
+  /** Append a column for the first facet not already in use. */
+  const handleAddColumn = useCallback(() => {
+    const used = new Set(state.columns.map((c) => c.field));
+    const next = state.facets.find((f) => !used.has(f));
+    if (next) actions.addColumn(next);
+  }, [state.columns, state.facets, actions]);
+
+  /** Open a sample in the Annotate or Train tab (navigates), surfacing progress/errors via
+   *  openStatus. A slice of the drilled-in volume opens the whole volume at that slice index,
+   *  so its annotations share the volume's sourceKey rather than a standalone single-array key. */
+  const openSample = useCallback(
+    async (item: BrowseItem, destination: '/annotate' | '/train') => {
+      setOpenStatus(`Opening ${item.sample}…`);
+      try {
+        const sliceIdx = state.expandedSample
+          ? state.slices.findIndex((s) => s.path === item.path)
+          : -1;
+        if (state.expandedSample && sliceIdx >= 0) {
+          await openTiledArray(state.expandedSample.path, serverUri, sliceIdx, destination);
+        } else {
+          await openTiledArray(item.path, serverUri, 0, destination);
+        }
+      } catch (err) {
+        setOpenStatus(`Failed to open: ${err}`);
+      }
+    },
+    [openTiledArray, serverUri, state.expandedSample, state.slices],
+  );
+  const handleOpenInAnnotate = useCallback((item: BrowseItem) => openSample(item, '/annotate'), [openSample]);
+  const handleOpenInTrain = useCallback((item: BrowseItem) => openSample(item, '/train'), [openSample]);
+
+  /** Sample-row click: drill multi-slice volumes into a Slices column; select
+   *  single images into the detail panel (collapsing any open drill-in). */
+  const handleSelectItem = useCallback(
+    (item: BrowseItem | null) => {
+      if (item && (item.n_slices ?? 1) > 1) {
+        actions.expandSample(state.expandedSample?.path === item.path ? null : item);
+        return;
+      }
+      if (state.expandedSample) actions.expandSample(null);
+      actions.selectItem(item);
+    },
+    [actions, state.expandedSample],
+  );
+
+  /**
+   * Select the sample the caller pointed us at, once the full sample list has
+   * loaded. Lets "Browse this dataset" land on a specific dataset while Browse
+   * still lists from the root — where a sample is the whole volume and its
+   * annotations resolve. Runs at most once per focusPath.
+   */
+  const focusedPath = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusPath || focusedPath.current === focusPath) return;
+    if (!state.showingAll || state.itemsLoading) return;
+    focusedPath.current = focusPath;
+    // An ungrouped ingest's container IS the sample row, so it matches directly.
+    // A grouped ingest's container instead holds several sample sub-containers —
+    // there's no row AT focusPath, only rows one level under it — so fall back to
+    // the first of those; landing on one sample of the dataset beats landing on
+    // none of it.
+    const match =
+      state.items.find((it) => it.path === focusPath)
+      ?? state.items.find((it) => it.path.startsWith(`${focusPath}/`));
+    // Not in this listing (different container, or filtered out) — leave as-is.
+    if (match) handleSelectItem(match);
+  }, [focusPath, state.showingAll, state.itemsLoading, state.items, handleSelectItem]);
+
+  const activeFilters = useMemo(() => {
+    const out: Record<string, string> = {};
+    state.columns.forEach((col) => {
+      if (col.selected !== null) out[col.field] = col.selected;
+    });
+    return out;
+  }, [state.columns]);
+
+  const activeFilterCount = Object.keys(activeFilters).length;
+  const lastColumn = state.columns[state.columns.length - 1];
+  const showItems = state.showingAll || (state.columns.length > 0 && lastColumn?.selected !== null);
+
+  return (
+    <div className="flex flex-col h-full bg-slate-900 text-slate-200">
+      <Toolbar
+        facetsLoading={state.facetsLoading}
+        facetCount={state.facets.length}
+        activeFilterCount={activeFilterCount}
+        showingAll={state.showingAll}
+        selectedItem={state.selectedItem}
+        onOpenInAnnotate={handleOpenInAnnotate}
+        onOpenInTrain={handleOpenInTrain}
+        onRefresh={actions.refresh}
+        onAddColumn={handleAddColumn}
+        onShowAll={actions.showAll}
+        servers={servers}
+        selectedServerUri={selectedServerUri}
+        onServerChange={onServerChange}
+        annotationFilter={annotationFilter}
+        onAnnotationFilterChange={onAnnotationFilterChange}
+      />
+
+      {openStatus && (
+        <div className="shrink-0 px-4 py-1.5 text-xs font-medium border-b border-slate-700 bg-slate-800 text-sky-200">
+          {openStatus}
+        </div>
+      )}
+
+      {state.connectionStatus === 'disconnected' && (
+        <div className="shrink-0 px-4 py-2 text-xs border-b border-red-900 bg-red-950/80 text-red-300">
+          Cannot reach the API server. Make sure the backend (port 8002) and Tiled server are running.
+        </div>
+      )}
+
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        <div
+          ref={scrollRef}
+          className="relative z-0 flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
+        >
+          {state.columns.length === 0 && !state.showingAll && !state.facetsLoading && (
+            <div className="flex items-center justify-center flex-1">
+              <p className="text-sm text-slate-400 text-center px-6">
+                {state.connectionStatus === 'disconnected'
+                  ? 'Connect to a Tiled server to browse.'
+                  : state.facets.length === 0
+                    ? 'No metadata fields to filter by. Click "All samples" to view every dataset.'
+                    : 'Click "Add column" to filter, or "All samples" to view everything.'}
+              </p>
+            </div>
+          )}
+
+          {state.columns.map((col, i) => (
+            <React.Fragment key={i}>
+              <BrowseColumn
+                colIndex={i}
+                column={col}
+                facets={state.facets}
+                width={columnWidths[i] ?? DEFAULT_COLUMN_WIDTH}
+                formatValue={formatColumnValue}
+                onFieldChange={actions.changeColumnField}
+                onSelect={actions.selectValue}
+                onRemove={actions.removeColumn}
+                isLast={i === state.columns.length - 1}
+              />
+              <ResizeDivider
+                currentWidth={columnWidths[i] ?? DEFAULT_COLUMN_WIDTH}
+                onResize={(w) => handleResizeColumn(i, w)}
+              />
+            </React.Fragment>
+          ))}
+
+          {showItems && (
+            <>
+              <ResizeDivider
+                key="resize-items"
+                currentWidth={itemsColumnWidth}
+                onResize={setItemsColumnWidth}
+                resizeRight
+              />
+              <ItemsColumn
+                items={state.items}
+                total={state.itemsTotal}
+                loading={state.itemsLoading}
+                selectedItem={state.selectedItem}
+                onSelect={handleSelectItem}
+                onOpenInAnnotate={handleOpenInAnnotate}
+                width={itemsColumnWidth}
+                serverUri={serverUri}
+                annotationFilter={annotationFilter}
+                expandedPath={state.expandedSample?.path ?? null}
+              />
+            </>
+          )}
+
+          {state.expandedSample && (
+            <>
+              <ResizeDivider
+                key="resize-slices"
+                currentWidth={sliceColumnWidth}
+                onResize={setSliceColumnWidth}
+                resizeRight
+              />
+              <SlicesColumn
+                dataset={state.expandedSample}
+                slices={state.slices}
+                loading={state.slicesLoading}
+                selectedItem={state.selectedItem}
+                onSelect={actions.selectItem}
+                onOpenInAnnotate={handleOpenInAnnotate}
+                onClose={() => actions.expandSample(null)}
+                width={sliceColumnWidth}
+                serverUri={serverUri}
+              />
+            </>
+          )}
+
+          {state.expandedSample && state.selectedItem && selectedSliceIndex >= 0 && (
+            <>
+              <ResizeDivider
+                key="resize-annotations"
+                currentWidth={annotationsColumnWidth}
+                onResize={setAnnotationsColumnWidth}
+                resizeRight
+              />
+              <AnnotationsColumn
+                dataset={state.expandedSample}
+                slice={state.selectedItem}
+                sliceIndex={selectedSliceIndex}
+                onOpenInAnnotate={handleOpenInAnnotate}
+                onClose={() => actions.selectItem(null)}
+                width={annotationsColumnWidth}
+                serverUri={serverUri}
+              />
+            </>
+          )}
+        </div>
+
+        {state.selectedItem && (
+          <>
+            <ResizeDivider
+              key="resize-detail"
+              currentWidth={detailWidth}
+              onResize={setDetailWidth}
+              resizeRight
+              minWidth={MIN_DETAIL_WIDTH}
+              maxWidth={MAX_DETAIL_WIDTH}
+            />
+            <DetailPanelSlot
+              item={state.selectedItem}
+              width={detailWidth}
+              onClose={() => actions.selectItem(null)}
+              serverUri={serverUri}
+              onOpenInAnnotate={handleOpenInAnnotate}
+              onOpenInTrain={handleOpenInTrain}
+            />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+interface ToolbarProps {
+  facetsLoading: boolean;
+  facetCount: number;
+  activeFilterCount: number;
+  showingAll: boolean;
+  selectedItem: BrowseItem | null;
+  onOpenInAnnotate: (item: BrowseItem) => void;
+  onOpenInTrain: (item: BrowseItem) => void;
+  onRefresh: () => void;
+  onAddColumn: () => void;
+  onShowAll: () => void;
+  servers: ServerInfo[];
+  selectedServerUri: string;
+  onServerChange: (uri: string) => void;
+  annotationFilter: AnnotationFilter;
+  onAnnotationFilterChange: (filter: AnnotationFilter) => void;
+}
+
+/** Toolbar — top bar with server/annotation selectors and refresh / show-all / add-column actions. */
+function Toolbar({
+  facetsLoading,
+  facetCount,
+  activeFilterCount,
+  showingAll,
+  selectedItem,
+  onOpenInAnnotate,
+  onOpenInTrain,
+  onRefresh,
+  onAddColumn,
+  onShowAll,
+  servers,
+  selectedServerUri,
+  onServerChange,
+  annotationFilter,
+  onAnnotationFilterChange,
+}: ToolbarProps) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 border-b border-slate-700 bg-slate-800 shrink-0">
+      <span className="text-sm font-semibold text-slate-200 whitespace-nowrap">Metadata Browser</span>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          Server
+          <select
+            value={selectedServerUri}
+            onChange={(e) => onServerChange(e.target.value)}
+            className="text-xs rounded px-2 py-1 bg-slate-900 text-slate-200 border border-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500 min-w-[180px] max-w-[280px]"
+          >
+            {servers.map((s) => (
+              <option key={s.uri} value={s.uri}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          Annotation
+          <select
+            value={annotationFilter}
+            onChange={(e) => onAnnotationFilterChange(e.target.value as AnnotationFilter)}
+            className="text-xs rounded px-2 py-1 bg-slate-900 text-slate-200 border border-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
+          >
+            {ANNOTATION_FILTER_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {facetsLoading && <span className="text-xs text-slate-400">Loading fields…</span>}
+
+      <div className="flex items-center gap-1 ml-auto">
+        {activeFilterCount > 0 && (
+          <span className="text-xs px-2 py-0.5 rounded bg-blue-950 text-blue-300">
+            {activeFilterCount} filter{activeFilterCount !== 1 ? 's' : ''} active
+          </span>
+        )}
+
+        {selectedItem && (
+          <button
+            type="button"
+            onClick={() => onOpenInAnnotate(selectedItem)}
+            title="Open this scan in the Annotate tab"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors bg-sky-700 text-white border border-sky-600 hover:bg-sky-600"
+          >
+            <PencilSimple size={13} />
+            Open in Annotate
+          </button>
+        )}
+
+        {selectedItem && isItemAnnotated(selectedItem) && (
+          <button
+            type="button"
+            onClick={() => onOpenInTrain(selectedItem)}
+            title="Open this annotated scan in the Train tab to fine-tune or run inference"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors bg-violet-700 text-white border border-violet-600 hover:bg-violet-600"
+          >
+            <Brain size={13} />
+            Open in Train
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={onRefresh}
+          title="Refresh"
+          className="flex items-center gap-1 px-2 py-1 rounded text-xs text-slate-400 hover:bg-slate-700 transition-colors"
+        >
+          <ArrowsClockwise size={13} />
+        </button>
+        <button
+          type="button"
+          onClick={onShowAll}
+          title="Show every sample without filtering"
+          className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium border transition-colors ${
+            showingAll
+              ? 'bg-slate-600 text-white border-slate-500'
+              : 'bg-slate-700 text-slate-200 border-slate-600 hover:bg-slate-600'
+          }`}
+        >
+          <Stack size={12} />
+          All samples
+        </button>
+        <button
+          type="button"
+          onClick={onAddColumn}
+          disabled={facetsLoading || facetCount === 0}
+          className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-blue-700 text-white transition-colors disabled:opacity-40 hover:bg-blue-600"
+        >
+          <Plus size={12} />
+          Add column
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+interface DetailPanelSlotProps {
+  item: BrowseItem | null;
+  width: number;
+  onClose: () => void;
+  serverUri: string;
+  onOpenInAnnotate: (item: BrowseItem) => void;
+  onOpenInTrain: (item: BrowseItem) => void;
+}
+
+/** Fixed-width container that hosts the BrowseDetailPanel for the selected sample. */
+function DetailPanelSlot({ item, width, onClose, serverUri, onOpenInAnnotate, onOpenInTrain }: DetailPanelSlotProps) {
+  if (!item) return null; // nothing selected → render no panel
+  return (
+    <div
+      className="relative z-10 flex h-full shrink-0 flex-col border-l border-slate-700 bg-slate-900 shadow-[-4px_0_12px_rgba(0,0,0,0.25)]"
+      style={{ width }}
+    >
+      <BrowseDetailPanel
+        item={item}
+        width={width}
+        onClose={onClose}
+        serverUri={serverUri}
+        onOpenInAnnotate={() => onOpenInAnnotate(item)}
+        onOpenInTrain={isItemAnnotated(item) ? () => onOpenInTrain(item) : undefined}
+      />
+    </div>
+  );
+}
