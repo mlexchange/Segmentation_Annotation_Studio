@@ -1,8 +1,12 @@
 import { claheRgba } from '@/lib/clahe';
 import { applySharpen } from '@/lib/sharpen';
+import { applyGaussianBlurRgba } from '@/lib/blur';
 
 /** Nonlinear display preprocessors baked before the linear brightness/contrast/levels. */
 export interface PreprocessOpts {
+  /** Gaussian blur sigma in NATIVE image pixels (0 = off). Rescaled internally when
+   *  rendering at an upscaled working resolution, so σ means the same thing at any. */
+  blur?: number;
   /** Adaptive (local) contrast — CLAHE. Replaces the old global stretch. */
   clahe?: boolean;
   sharpen?: boolean;
@@ -14,10 +18,17 @@ export interface PreprocessOpts {
  * the user actually sees. Windowing a low-contrast tomography slice before
  * encoding is one of the biggest levers on mask quality.
  *
- * Order: nonlinear preprocessors first (CLAHE → Sharpen), then the linear chain
- * mirroring the canvas filter exactly (Brighten → Contrast → Levels): Brighten
- * adds `brightness*255`; Contrast scales around mid-grey by `((contrast+100)/100)^2`;
- * Levels remaps `[lo,hi] → [0,255]`. Returns a canvas at native resolution.
+ * Order: nonlinear preprocessors first (Blur → CLAHE → Sharpen), then the linear
+ * chain mirroring the canvas filter exactly (Brighten → Contrast → Levels):
+ * Brighten adds `brightness*255`; Contrast scales around mid-grey by
+ * `((contrast+100)/100)^2`; Levels remaps `[lo,hi] → [0,255]`. Blur runs first so
+ * it denoises the raw slice; a following Sharpen can then deliberately re-crisp
+ * the edges the blur softened.
+ *
+ * `upscale` (1, 2, 4) resamples to `width*upscale × height*upscale` with smooth
+ * interpolation — the "working resolution" for the drawing tools. `width`/`height`
+ * stay in NATIVE image pixels and the blur sigma is rescaled to match, so callers
+ * and σ mean the same thing at any working resolution.
  */
 export function renderAdjusted(
   image: CanvasImageSource,
@@ -28,25 +39,33 @@ export function renderAdjusted(
   levelsLo = 0,
   levelsHi = 255,
   preprocess?: PreprocessOpts,
+  upscale = 1,
 ): HTMLCanvasElement {
+  const u = Math.max(1, upscale);
+  const w = Math.round(width * u);
+  const h = Math.round(height * u);
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = w;
+  canvas.height = h;
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-  ctx.drawImage(image, 0, 0, width, height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(image, 0, 0, w, h);
 
-  const doPre = !!(preprocess && (preprocess.clahe || preprocess.sharpen));
+  const blurSigma = (preprocess?.blur ?? 0) * u; // σ is given in native pixels
+  const doPre = !!(preprocess && (blurSigma > 0 || preprocess.clahe || preprocess.sharpen));
   const bcNoop = brightness === 0 && contrast === 0;
   const levelsNoop = levelsLo <= 0 && levelsHi >= 255;
   if (!doPre && bcNoop && levelsNoop) return canvas;
 
-  const imageData = ctx.getImageData(0, 0, width, height);
+  const imageData = ctx.getImageData(0, 0, w, h);
   const d = imageData.data; // Uint8ClampedArray → assignments auto-clamp to [0,255]
 
   // Nonlinear preprocessors first (baked once), in a fixed order.
   if (doPre) {
-    if (preprocess!.clahe) claheRgba(d, width, height);
-    if (preprocess!.sharpen) applySharpen(d, width, height);
+    if (blurSigma > 0) applyGaussianBlurRgba(d, w, h, blurSigma);
+    if (preprocess!.clahe) claheRgba(d, w, h);
+    if (preprocess!.sharpen) applySharpen(d, w, h);
   }
 
   if (!(bcNoop && levelsNoop)) {
@@ -73,16 +92,17 @@ export function renderAdjusted(
 }
 
 /**
- * Bake ONLY the nonlinear preprocessors (CLAHE / Sharpen) into a canvas — used as
- * the Konva display base, since brightness/contrast/levels/gamma/colormap stay on
- * the GPU SVG filter applied over it. Returns the source untouched when no
- * preprocessor is active.
+ * Bake ONLY the nonlinear preprocessors (Blur / CLAHE / Sharpen) into a canvas —
+ * used as the Konva display base, since brightness/contrast/levels/gamma/colormap
+ * stay on the GPU SVG filter applied over it. `upscale` also resamples to the
+ * working resolution (see `renderAdjusted`).
  */
 export function renderPreprocessOnly(
   image: CanvasImageSource,
   width: number,
   height: number,
   preprocess: PreprocessOpts,
+  upscale = 1,
 ): HTMLCanvasElement {
-  return renderAdjusted(image, width, height, 0, 0, 0, 255, preprocess);
+  return renderAdjusted(image, width, height, 0, 0, 0, 255, preprocess, upscale);
 }

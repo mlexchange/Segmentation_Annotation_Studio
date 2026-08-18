@@ -1,8 +1,8 @@
 /**
  * useKeybinds — keyboard shortcuts for the annotation workspace.
  *
- * Tools:   p=polygon  l=ellipse  e=rectangle  r=eraser  b=brush  f=fill  g=magic
- *          m=magnetic  s=select   (each key is a letter in the tool's label)
+ * Tools:   p=polygon  l=ellipse  e=rectangle  r=eraser  b=brush  h=threshold brush
+ *          f=fill  g=magic  m=magnetic  s=select  (each key is a letter in the label)
  * Pan:     hold Space (reverts to the previous tool on release)
  * View:    x=next slice (forward)  t=fit image to screen  arrows=prev/next slice
  * Edit:    Ctrl/Cmd+Z=undo   Ctrl/Cmd+Shift+Z / Ctrl+Y=redo
@@ -23,6 +23,7 @@ const TOOL_KEYBINDS: Record<string, Tool> = {
   e: 'rectangle',   // Rect
   l: 'ellipse',     // eLlipse (e is taken by rect)
   b: 'brush',
+  h: 'threshold',   // tHreshold brush (t is fit-to-screen)
   f: 'fill',
   r: 'eraser',      // eRaser
 };

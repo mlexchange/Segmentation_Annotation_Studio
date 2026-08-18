@@ -1,15 +1,20 @@
 /**
  * Toolbar — tool selector (radiogroup), brush size, opacity, undo/redo.
- * Keybinds: p=polygon, l=ellipse, e=rectangle, r=eraser, b=brush, f=fill, s=select,
- *           g=magic, m=magnetic, Space=pan (hold), x=next slice, t=fit to screen, Ctrl/Cmd+Z=undo
+ * Keybinds: p=polygon, l=ellipse, e=rectangle, r=eraser, b=brush, h=threshold brush,
+ *           f=fill, s=select, g=magic, m=magnetic, Space=pan (hold), x=next slice,
+ *           t=fit to screen, Ctrl/Cmd+Z=undo
  */
-import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, PaintBrush, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
+import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, PaintBrush, Drop, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
+import { useMemo } from 'react';
 import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import * as editHistory from '@/hooks/editHistory';
 import { cn } from '@/lib/utils';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
+import HistogramControl from '@/components/annotate/HistogramControl';
+import { otsuThreshold } from '@/lib/magicwand';
+import { displayAffineFor, remapHistogramToDisplay } from '@/lib/displayTransform';
 import { useSam } from '@/hooks/useSam';
 
 // macOS labels the Alt key "Option" (⌥); the key name only differs on screen.
@@ -79,12 +84,23 @@ function ToolButton({ tool, label, icon, keybind, activeTool, disabled, onSelect
 interface ToolbarProps {
   /** When true, drawing tools are greyed out (e.g. no class defined yet). */
   disabled?: boolean;
+  /** 256-bin luminance histogram of the current slice — drives the threshold band
+   *  picker. Owned by AnnotatePage (the canvas emits it); null before load. It is
+   *  sampled from the PREPROCESSED base, so it must be remapped through the display
+   *  transform to line up with the band (which is authored in displayed space). */
+  histogramBins?: number[] | null;
+  /** Live brightness/contrast/levels/gamma, used for exactly that remap. */
+  display?: { brightness: number; contrast: number; levelsLo: number; levelsHi: number; gamma: number };
+  /** Working resolution multiplier — sets the sub-pixel brush radius floor. */
+  upscale?: number;
 }
 
 /** Renders the tool radiogroup, undo/redo, and the active tool's parameter controls. */
-export default function Toolbar({ disabled = false }: ToolbarProps) {
+export default function Toolbar({ disabled = false, histogramBins = null, display, upscale = 1 }: ToolbarProps) {
   const {
     tool, setTool, brushSize, setBrushSize, fillThreshold, setFillThreshold,
+    thresholdLo, thresholdHi, setThresholdBand,
+    thresholdOverlay, setThresholdOverlay,
     magicTolerance, setMagicTolerance, magicMode, setMagicMode, magicSigma, setMagicSigma,
     magicEdgeStop, setMagicEdgeStop, magicEngine, setMagicEngine,
     samDetail, setSamDetail, samThreshold, setSamThreshold,
@@ -96,6 +112,19 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     selectScope, setSelectScope,
   } = useToolStore();
   const sam = useSam(tool === 'magic' && magicEngine === 'sam');
+  // At an upscaled working resolution the brush can go sub-pixel — a 2x grid
+  // resolves a 0.5 px radius, which is the whole point of upscaling.
+  const minRadius = 1 / Math.max(1, upscale);
+  const snapRadius = (n: number) => Math.round(n / minRadius) * minRadius;
+
+  // The band is authored in DISPLAYED intensity, but the histogram is sampled from
+  // the preprocessed base — remap it so the plot under the knobs shows the same
+  // image the user is looking at (and the same one the band cuts).
+  const bandHistogram = useMemo(() => {
+    if (!histogramBins || !display) return histogramBins;
+    const affine = displayAffineFor(display.brightness, display.contrast, display.levelsLo, display.levelsHi);
+    return remapHistogramToDisplay(histogramBins, affine, display.gamma);
+  }, [histogramBins, display]);
   // Undo/redo route through editHistory so a class deletion replays alongside its region
   // change; canUndo/canRedo still reflect the (1:1) zundo stack.
   const canUndo = useStore(useAnnotationStore.temporal, (s) => s.pastStates.length > 0);
@@ -110,6 +139,7 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
     { tool: 'rectangle', label: 'Rect',    icon: <Rectangle size={18} />,   keybind: 'e' },
     { tool: 'ellipse',   label: 'Ellipse', icon: <Circle size={18} />,      keybind: 'l' },
     { tool: 'brush',     label: 'Brush',   icon: <PaintBrush size={18} />,  keybind: 'b' },
+    { tool: 'threshold', label: 'Thresh',  icon: <Drop size={18} />,        keybind: 'h' },
     { tool: 'fill',      label: 'Fill',    icon: <PaintBucket size={18} />, keybind: 'f' },
     { tool: 'eraser',    label: 'Eraser',  icon: <Eraser size={18} />,      keybind: 'r' },
   ];
@@ -178,27 +208,29 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
         <span className="font-mono font-semibold text-gray-500">⌘/Ctrl+Z</span> undo
       </div>
 
-      {(tool === 'brush' || tool === 'eraser') && (
+      {(tool === 'brush' || tool === 'eraser' || tool === 'threshold') && (
         <div className="flex flex-col gap-1 mt-1">
           <label className="text-xs text-gray-500">Brush radius (px)</label>
           <div className="flex items-center gap-2">
             <input
               type="range"
-              min={1}
+              min={minRadius}
               max={500}
+              step={minRadius}
               value={brushSize}
-              onChange={(e) => setBrushSize(Math.max(1, Number(e.target.value)))}
+              onChange={(e) => setBrushSize(Math.max(minRadius, Number(e.target.value)))}
               className="flex-1 min-w-0"
               aria-label="Brush radius"
             />
             <input
               type="number"
-              min={1}
+              min={minRadius}
               max={500}
+              step={minRadius}
               value={brushSize}
               onChange={(e) => {
                 const n = Number(e.target.value);
-                if (Number.isFinite(n)) setBrushSize(Math.min(500, Math.max(1, Math.round(n))));
+                if (Number.isFinite(n)) setBrushSize(Math.min(500, Math.max(minRadius, snapRadius(n))));
               }}
               className="w-16 flex-shrink-0 border border-gray-200 rounded px-1 py-0.5 text-xs text-right tabular-nums"
               aria-label="Brush radius (px)"
@@ -220,6 +252,56 @@ export default function Toolbar({ disabled = false }: ToolbarProps) {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {tool === 'threshold' && (
+        <div className="flex flex-col gap-2 mt-1">
+          <HistogramControl
+            bins={bandHistogram}
+            lo={thresholdLo}
+            hi={thresholdHi}
+            onChange={setThresholdBand}
+            onReset={() => setThresholdBand(0, 255)}
+            label="Threshold"
+            accent="red"
+            actions={
+              <button
+                type="button"
+                onClick={() => {
+                  if (!bandHistogram) return;
+                  // Otsu splits the slice into dark/bright; paint the brighter class
+                  // by default (the usual "select the feature, not the matrix" case).
+                  setThresholdBand(otsuThreshold(bandHistogram), 255);
+                }}
+                disabled={!bandHistogram}
+                title="Auto threshold (Otsu) — splits the histogram into two classes"
+                className={cn(
+                  'px-1.5 py-0.5 rounded text-[10px] border transition-colors',
+                  bandHistogram
+                    ? 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50 hover:border-sky-300'
+                    : 'bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed',
+                )}
+              >
+                Auto
+              </button>
+            }
+          />
+          <label className="flex items-center gap-2 text-[11px] text-gray-600 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={thresholdOverlay}
+              onChange={(e) => setThresholdOverlay(e.target.checked)}
+              className="accent-red-600"
+            />
+            Show in-range overlay
+          </label>
+          <p className="text-[10px] text-gray-500 leading-snug">
+            Paints only where intensity falls inside the band, so a stroke stops at the
+            feature boundary. <b>Shift-click</b> samples the pixel under the cursor;{' '}
+            <b>{REMOVE_KEY_LABEL}-drag</b> erases. For noisy scans raise <b>Blur</b> in
+            Display first.
+          </p>
         </div>
       )}
 

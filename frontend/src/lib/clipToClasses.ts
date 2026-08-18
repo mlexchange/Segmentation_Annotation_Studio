@@ -60,6 +60,7 @@ export function clipShapesToOthers(
   sliceShapes: Shape[],
   width: number,
   height: number,
+  upscale = 1,
 ): PolygonShape[] {
   const out: PolygonShape[] = [];
   const otherByClass = new Map<number, MultiPolygon>();
@@ -77,7 +78,7 @@ export function clipShapesToOthers(
 
   for (const shape of newShapes) {
     const res = clipOneBoolean(shape, otherMP(shape.classId), sameMP(shape.classId), width, height);
-    if (res === null) out.push(...clipShapesToOthersMask([shape], sliceShapes, width, height));
+    if (res === null) out.push(...clipShapesToOthersMask([shape], sliceShapes, width, height, upscale));
     else out.push(...res);
   }
   return out;
@@ -93,8 +94,11 @@ export function clipShapesToOthersMask(
   sliceShapes: Shape[],
   width: number,
   height: number,
+  upscale = 1,
 ): PolygonShape[] {
-  const { gw, gh, scale } = fullResGridFor(width, height);
+  // `upscale` keeps sub-pixel geometry (e.g. a Threshold Brush region traced at 2x)
+  // from being re-snapped to the native pixel grid by this fallback round-trip.
+  const { gw, gh, scale } = fullResGridFor(width, height, upscale);
   const out: PolygonShape[] = [];
 
   const otherMaskByClass = new Map<number, Uint8Array>();

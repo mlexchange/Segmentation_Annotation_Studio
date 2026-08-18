@@ -87,9 +87,11 @@ export function mergeNewWithSameClass(
   sliceShapes: Shape[],
   width: number,
   height: number,
+  upscale = 1,
 ): MergeResult {
-  // Full resolution so the merged region preserves existing geometry (no erosion).
-  const { gw, gh, scale } = fullResGridFor(width, height);
+  // Full resolution so the merged region preserves existing geometry (no erosion);
+  // `upscale` additionally preserves sub-pixel detail from an upscaled working grid.
+  const { gw, gh, scale } = fullResGridFor(width, height, upscale);
   const add: Shape[] = [];
   const removeIds: string[] = [];
 

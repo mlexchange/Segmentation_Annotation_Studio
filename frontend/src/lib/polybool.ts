@@ -116,6 +116,19 @@ export function eraseStampToMultiPolygon(points: number[], radius: number, width
     .map((p) => [flatToRing(p.points), ...p.holes.map(flatToRing)]);
 }
 
+/**
+ * Build a MultiPolygon from already-vectorized regions (flat outer ring + flat
+ * hole rings), e.g. the Threshold Brush's mask→polygon output, so it can be
+ * boolean-subtracted from shapes.
+ */
+export function regionsToMultiPolygon(
+  regions: Array<{ points: number[]; holes: number[][] }>,
+): MultiPolygon {
+  return regions
+    .filter((p) => p.points.length >= 6)
+    .map((p) => [flatToRing(p.points), ...p.holes.map(flatToRing)]);
+}
+
 /** Boolean-union a set of shapes into one MultiPolygon (empty if none / on failure). */
 export function unionShapesToMultiPolygon(shapes: Shape[], width: number, height: number): MultiPolygon {
   const geoms = shapes.map((s) => shapeToMultiPolygon(s, width, height)).filter((g) => g.length > 0);

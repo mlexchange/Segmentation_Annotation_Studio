@@ -30,14 +30,15 @@ import { buildSourceKey } from '@/lib/sourceKey';
 import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type GrayField } from '@/lib/magicwand';
 import { useSam } from '@/hooks/useSam';
 import { renderAdjusted, renderPreprocessOnly } from '@/lib/sam/adjust';
-import { gridFor, fullResGridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
+import { gridFor, fullResGridFor, rasterizeShapes, rasterizeUnion, stampStroke } from '@/lib/rasterize';
 import { keepComponentsAtPoints } from '@/lib/morphology';
-import { unionShapesToPolygons, unionShapesToMultiPolygon, eraseStampToMultiPolygon, subtractFromShape } from '@/lib/polybool';
+import { unionShapesToPolygons, unionShapesToMultiPolygon, eraseStampToMultiPolygon, subtractFromShape, regionsToMultiPolygon } from '@/lib/polybool';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
 import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
 import { mergeNewWithSameClass, expandSameClassOverlap } from '@/lib/mergeSameClass';
 import { useClipboardStore } from '@/stores/clipboardStore';
 import { colormapTables, type ColormapName } from '@/lib/colormaps';
+import { displayAffineFor, displayBandToBase } from '@/lib/displayTransform';
 
 // macOS labels the Alt key "Option" (⌥). e.altKey is true for it either way,
 // so only the on-screen label needs to differ.
@@ -46,6 +47,10 @@ const REMOVE_KEY_LABEL = IS_MAC ? 'Option' : 'Alt';
 
 /** Shared stable empty shape list — see `storeShapes` for why identity matters. */
 const EMPTY_SHAPES: Shape[] = [];
+
+/** Upscale budget: the working resolution is clamped back to 1x past this many
+ *  pixels so a large slice at 4x can't exhaust memory (~64 MP ≈ 256 MB of RGBA). */
+const MAX_WORKING_PIXELS = 64e6;
 
 interface AnnotationCanvasProps {
   brightness: number;
@@ -60,6 +65,12 @@ interface AnnotationCanvasProps {
    *  tools' baked view but NOT the exported pixels). */
   clahe?: boolean;
   sharpen?: boolean;
+  /** Gaussian pre-blur sigma in image pixels (0 = off). */
+  blur?: number;
+  /** Working-resolution multiplier (1, 2, 4): resamples the slice for the display
+   *  base and every tool field so small features get more pixels. Annotation
+   *  coordinates stay in NATIVE image pixels — they just gain sub-pixel precision. */
+  upscale?: number;
   /** Emits the current slice's 256-bin luminance histogram when it loads. */
   onHistogram?: (bins: number[]) => void;
   activeClassId: number | null;
@@ -120,6 +131,15 @@ function withAlpha(hex: string, a: number): string {
   if (!/^[0-9a-fA-F]{6}$/.test(h)) return hex;
   const n = parseInt(h, 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
+/** hex (#rgb or #rrggbb) → [r,g,b]. Falls back to mid-grey if it isn't a hex color. */
+function hexToRgb(hex: string): [number, number, number] {
+  let h = hex.replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return [128, 128, 128];
+  const n = parseInt(h, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
 /** Shortest distance from point (px,py) to segment AB. */
@@ -400,6 +420,8 @@ export default function AnnotationCanvas({
   gamma = 1,
   clahe = false,
   sharpen = false,
+  blur = 0,
+  upscale = 1,
   onHistogram,
   activeClassId,
   activeBrushShapeId,
@@ -419,6 +441,7 @@ export default function AnnotationCanvas({
   // Imperative refs for lag-free brush drawing
   const draftStrokeLayerRef = useRef<Konva.Layer>(null);
   const draftLineRef = useRef<Konva.Line>(null);
+  const thresholdPreviewRef = useRef<Konva.Image>(null);
   const brushCursorLayerRef = useRef<Konva.Layer>(null);
   const brushCursorRef = useRef<Konva.Circle>(null);
 
@@ -431,6 +454,22 @@ export default function AnnotationCanvas({
     radius: number;
     /** For erase: whether the target is a brush shape or a vector shape. */
     eraseTargetKind?: 'brush' | 'vector';
+  } | null>(null);
+
+  // Threshold-brush stroke, buffered exactly like `draftStrokeRef`: a binary mask
+  // over the threshold field's grid that accumulates only in-band pixels, plus the
+  // offscreen canvas mirroring it for the live preview. Flushed on mouseup.
+  const thresholdStrokeRef = useRef<{
+    mode: 'paint' | 'erase';
+    /** Grid geometry of the field this stroke was started against. */
+    gw: number; gh: number; scale: number;
+    mask: Uint8Array;
+    /** In-band gate for the whole slice (same grid) — the stroke can't leave it. */
+    gate: Uint8Array;
+    /** Last pointer position in image coords, for segment stamping. */
+    last: { x: number; y: number };
+    canvas: HTMLCanvasElement;
+    imageData: ImageData;
   } | null>(null);
 
   const { kind, source, serverUri, meta, currentSlice, renderOpts } = useDatasetStore();
@@ -466,6 +505,13 @@ export default function AnnotationCanvas({
   const clipToOtherClasses = useToolStore((s) => s.clipToOtherClasses);
   const mergeOverlappingSameClass = useToolStore((s) => s.mergeOverlappingSameClass);
   const fillThreshold = useToolStore((s) => s.fillThreshold);
+  // NOTE: thresholdLo/thresholdHi are deliberately NOT subscribed — dragging the
+  // band would then re-render this entire component every frame. They are read
+  // via getState() at use sites and drive the overlay through a store
+  // subscription (see the overlay block below).
+  const thresholdOverlay = useToolStore((s) => s.thresholdOverlay);
+  const thresholdSampleWidth = useToolStore((s) => s.thresholdSampleWidth);
+  const setThresholdBand = useToolStore((s) => s.setThresholdBand);
   const { classes } = useClassStore();
 
   const [stageSize, setStageSize] = useState({ width: 800, height: 600 });
@@ -543,14 +589,21 @@ export default function AnnotationCanvas({
   // becomes the Konva image base; brightness/contrast/levels/gamma/colormap still
   // apply on top via the GPU SVG filter. Cache-key fragment so encodes/fields
   // refresh when toggled.
-  const preprocess = useMemo(() => ({ clahe, sharpen }), [clahe, sharpen]);
-  const preprocessKey = `${clahe ? 1 : 0}${sharpen ? 1 : 0}`;
+  const preprocess = useMemo(() => ({ clahe, sharpen, blur }), [clahe, sharpen, blur]);
+  const preprocessKey = `${clahe ? 1 : 0}${sharpen ? 1 : 0}b${blur}`;
+  // Working resolution, clamped so a huge slice can't blow up memory at 4x
+  // (each level costs 4x the pixels for the base canvas AND every tool field).
+  const workScale = useMemo(() => {
+    if (!meta) return 1;
+    const u = Math.max(1, upscale);
+    return meta.width * meta.height * u * u > MAX_WORKING_PIXELS ? 1 : u;
+  }, [meta, upscale]);
   const displayBase = useMemo<CanvasImageSource | null>(() => {
     if (!imageEl || !meta) return imageEl;
-    return (clahe || sharpen)
-      ? renderPreprocessOnly(imageEl, meta.width, meta.height, preprocess)
+    return (clahe || sharpen || blur > 0 || workScale > 1)
+      ? renderPreprocessOnly(imageEl, meta.width, meta.height, preprocess, workScale)
       : imageEl;
-  }, [imageEl, meta, clahe, sharpen, preprocess]);
+  }, [imageEl, meta, clahe, sharpen, blur, workScale, preprocess]);
 
   // SAM sees the preprocessed + brightness/contrast/levels-adjusted image
   // (windowing a low-contrast slice greatly helps), so the encode is keyed on
@@ -558,7 +611,9 @@ export default function AnnotationCanvas({
   const samEncodeKey = imageEl && meta
     ? `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}|pp${preprocessKey}`
     : null;
-  /** Lazily render the display-adjusted slice (preprocess → brightness/contrast/levels) that SAM encodes. */
+  /** Lazily render the display-adjusted slice (preprocess → brightness/contrast/levels)
+   *  that SAM encodes. Deliberately kept at 1x: SAM resizes its input to 1024²
+   *  internally, so an upscaled source would only cost memory. */
   const makeSamSource = useCallback(
     () => renderAdjusted(imageEl!, meta!.width, meta!.height, brightness, contrast, levelsLo, levelsHi, preprocess),
     [imageEl, meta, brightness, contrast, levelsLo, levelsHi, preprocess],
@@ -582,17 +637,13 @@ export default function AnnotationCanvas({
   // sync with what's displayed.
   const displayFilterId = 'display-adjust-' + useId().replace(/[^a-zA-Z0-9]/g, '');
   const displayAffine = useMemo(() => {
-    const b255 = brightness * 255;
-    const adjust = Math.pow((contrast + 100) / 100, 2);
-    const range = Math.max(1, levelsHi - levelsLo);
-    const A = adjust * (255 / range);
-    const Bconst = (255 / range) * (adjust * b255 + 127.5 * (1 - adjust)) - (255 * levelsLo) / range;
+    const { slope, intercept } = displayAffineFor(brightness, contrast, levelsLo, levelsHi);
     // The filter is a no-op only when brightness/contrast/levels AND gamma AND
     // colormap are all identity — otherwise it must stay applied.
     const identity =
       brightness === 0 && contrast === 0 && levelsLo <= 0 && levelsHi >= 255 &&
       gamma === 1 && colormap === 'gray';
-    return { slope: A, intercept: Bconst / 255, identity };
+    return { slope, intercept, identity };
   }, [brightness, contrast, levelsLo, levelsHi, gamma, colormap]);
 
   // Colormap LUT (per-channel tableValues) for the display filter; null = gray.
@@ -742,12 +793,12 @@ export default function AnnotationCanvas({
   const computeCommittedSlice = useCallback((newShapes: Shape[], sliceShapes: Shape[]): Shape[] => {
     let toAdd = newShapes;
     if (clipToOtherClasses && meta && newShapes.some((s) => hasOtherClass(sliceShapes, s.classId))) {
-      toAdd = clipShapesToOthers(newShapes, sliceShapes, meta.width, meta.height);
+      toAdd = clipShapesToOthers(newShapes, sliceShapes, meta.width, meta.height, workScale);
     }
     // Auto-merge with overlapping same-class shapes (replaces those + the new shape with
     // one unioned polygon). Runs after clipping so other-class bounds still hold.
     if (mergeOverlappingSameClass && meta && toAdd.length) {
-      const { add, removeIds } = mergeNewWithSameClass(toAdd, sliceShapes, meta.width, meta.height);
+      const { add, removeIds } = mergeNewWithSameClass(toAdd, sliceShapes, meta.width, meta.height, workScale);
       if (removeIds.length) {
         const kept = sliceShapes.filter((s) => !removeIds.includes(s.id));
         return [...kept, ...add];
@@ -755,7 +806,7 @@ export default function AnnotationCanvas({
       toAdd = add;
     }
     return [...sliceShapes, ...toAdd];
-  }, [clipToOtherClasses, mergeOverlappingSameClass, meta]);
+  }, [clipToOtherClasses, mergeOverlappingSameClass, meta, workScale]);
 
   const commitShapes = useCallback((newShapes: Shape[]) => {
     if (!sourceKey || newShapes.length === 0) return;
@@ -767,7 +818,9 @@ export default function AnnotationCanvas({
   const activeColor =
     activeClassId !== null ? colorForClass(activeClassId) : '#4090ff';
 
-  const showBrushCursor = (underlyingTool === 'brush' || underlyingTool === 'eraser') && !!meta && !isPreviewing;
+  const showBrushCursor =
+    (underlyingTool === 'brush' || underlyingTool === 'eraser' || underlyingTool === 'threshold') &&
+    !!meta && !isPreviewing;
 
   /** Current pointer position mapped from stage/display coords to image pixels. */
   const getPointerImagePos = () => {
@@ -786,7 +839,7 @@ export default function AnnotationCanvas({
     if (magneticCostRef.current && magneticBuiltForRef.current === base) {
       return magneticCostRef.current;
     }
-    const cm = buildCostMap(base, meta.width, meta.height);
+    const cm = buildCostMap(base, meta.width, meta.height, 512, workScale);
     magneticCostRef.current = cm;
     magneticBuiltForRef.current = base;
     return cm;
@@ -815,16 +868,152 @@ export default function AnnotationCanvas({
   // what the user sees, exactly like SAM. Cache key includes the display settings.
   const magicFieldRef = useRef<GrayField | null>(null);
   const magicFieldForRef = useRef<string | null>(null);
+  /** Cache-key fragment for fields built from the display-adjusted slice (wand, SAM):
+   *  brightness/contrast/levels are part of what those tools see. */
+  const adjustedKey = `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}|pp${preprocessKey}|u${workScale}`;
+  /** Cache-key fragment for fields built from the PREPROCESSED base (threshold brush
+   *  + its overlay, matching the histogram). Deliberately excludes brightness/
+   *  contrast/levels so those sliders never invalidate a field. */
+  const baseKey = `${sourceKey}|${currentSlice}|pp${preprocessKey}|u${workScale}`;
   const ensureMagicField = useCallback((): GrayField | null => {
     if (!imageEl || !meta) return null;
-    const key = `${sourceKey}|${currentSlice}|b${brightness}|c${contrast}|l${levelsLo}-${levelsHi}|pp${preprocessKey}`;
-    if (magicFieldRef.current && magicFieldForRef.current === key) return magicFieldRef.current;
-    const src = renderAdjusted(imageEl, meta.width, meta.height, brightness, contrast, levelsLo, levelsHi, preprocess);
-    const f = buildField(src, meta.width, meta.height);
+    if (magicFieldRef.current && magicFieldForRef.current === adjustedKey) return magicFieldRef.current;
+    const src = renderAdjusted(imageEl, meta.width, meta.height, brightness, contrast, levelsLo, levelsHi, preprocess, workScale);
+    const f = buildField(src, meta.width, meta.height, 1600, workScale);
     magicFieldRef.current = f;
-    magicFieldForRef.current = key;
+    magicFieldForRef.current = adjustedKey;
     return f;
-  }, [imageEl, meta, sourceKey, currentSlice, brightness, contrast, levelsLo, levelsHi, preprocessKey, preprocess]);
+  }, [imageEl, meta, brightness, contrast, levelsLo, levelsHi, preprocess, workScale, adjustedKey]);
+
+  // Threshold-brush field. Built at FULL working resolution (no 1600-px cap) — a
+  // brush needs per-pixel accuracy where a click-based wand can afford a coarser grid.
+  //
+  // Source is the PREPROCESSED base, not the brightness/contrast/levels-adjusted
+  // render the wand and SAM build. That is NOT a change in semantics: the band is
+  // still evaluated against displayed intensity, so the sliders steer the brush.
+  // The equivalence is moved rather than lost — `bandInBaseSpace` maps the band
+  // backwards through the display transform (monotonic, hence exactly the same
+  // pixel set; see lib/displayTransform.ts), which turns a per-tick full-image
+  // re-render into a couple of `Math.pow` calls. Only blur/CLAHE/sharpen, the
+  // slice, and the working scale invalidate this field.
+  const thresholdFieldRef = useRef<GrayField | null>(null);
+  const thresholdFieldForRef = useRef<string | null>(null);
+  const ensureThresholdField = useCallback((): GrayField | null => {
+    if (!imageEl || !meta) return null;
+    if (thresholdFieldRef.current && thresholdFieldForRef.current === baseKey) return thresholdFieldRef.current;
+    // No gradient: the brush gates purely on intensity, and a Sobel pass over a
+    // full-resolution (possibly 4x) grid would be pure waste.
+    const f = buildField(displayBase ?? imageEl, meta.width, meta.height, Math.max(meta.width, meta.height), workScale, false);
+    thresholdFieldRef.current = f;
+    thresholdFieldForRef.current = baseKey;
+    return f;
+  }, [imageEl, meta, displayBase, workScale, baseKey]);
+
+  /** The threshold band, mapped from the DISPLAYED intensities the user authored
+   *  it in into the base space the cached fields live in. Brightness/contrast/
+   *  levels/gamma therefore steer the brush exactly as they steer the image —
+   *  without any of them invalidating a field or touching a pixel. */
+  const bandInBaseSpace = useCallback(() => {
+    const { thresholdLo, thresholdHi } = useToolStore.getState();
+    return displayBandToBase(thresholdLo, thresholdHi, displayAffine, gamma);
+  }, [displayAffine, gamma]);
+
+  /** Binary gate over a field: 1 where the pixel reads as in-band on screen. This
+   *  is what the brush may paint. Reads the band from the store rather than a
+   *  subscribed value — see the overlay below for why the canvas deliberately does
+   *  NOT re-render on band changes. */
+  const buildThresholdGate = useCallback((field: GrayField): Uint8Array => {
+    const { lo, hi } = bandInBaseSpace();
+    const gate = new Uint8Array(field.gw * field.gh);
+    const { gray } = field;
+    for (let i = 0; i < gate.length; i++) {
+      const v = gray[i];
+      if (v >= lo && v <= hi) gate[i] = 1;
+    }
+    return gate;
+  }, [bandInBaseSpace]);
+
+  // ---- Red in-band overlay (ImageJ's threshold display) -------------------
+  // Shows exactly which pixels the brush may paint. Three things keep dragging
+  // the band (or any display slider) smooth, all of which cost real frames when
+  // done the obvious way:
+  //   1. Its own SMALL field (≤1024 px, no upscale, no gradient) instead of the
+  //      brush's full-resolution one — activating the tool or nudging brightness
+  //      must not trigger a full-res renderAdjusted + buildField.
+  //   2. Repainted IMPERATIVELY into a persistent canvas — routing it through
+  //      React state re-rendered this whole (very large) component per frame.
+  //   3. Driven by a store subscription, so the canvas never re-renders on a band
+  //      change at all. That's why thresholdLo/Hi are not subscribed above.
+  const overlayFieldRef = useRef<GrayField | null>(null);
+  const overlayFieldForRef = useRef<string | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayImageDataRef = useRef<ImageData | null>(null);
+  const overlayImageRef = useRef<Konva.Image>(null);
+  const showThresholdOverlay = tool === 'threshold' && thresholdOverlay && !isPreviewing;
+
+  const ensureOverlayField = useCallback((): GrayField | null => {
+    if (!imageEl || !meta) return null;
+    if (overlayFieldRef.current && overlayFieldForRef.current === baseKey) return overlayFieldRef.current;
+    // Same preprocessed source as the brush field (see above), so the overlay shows
+    // exactly what the brush would paint — including as the display sliders move,
+    // since both read the band through `bandInBaseSpace`.
+    const f = buildField(displayBase ?? imageEl, meta.width, meta.height, 1024, 1, false);
+    overlayFieldRef.current = f;
+    overlayFieldForRef.current = baseKey;
+    return f;
+  }, [imageEl, meta, displayBase, baseKey]);
+
+  /** Repaint the overlay canvas for the current band and push it to Konva. */
+  const paintThresholdOverlay = useCallback(() => {
+    const node = overlayImageRef.current;
+    if (!node) return;
+    const field = ensureOverlayField();
+    if (!field) return;
+    const { gw, gh, gray } = field;
+    let canvas = overlayCanvasRef.current;
+    if (!canvas || canvas.width !== gw || canvas.height !== gh) {
+      canvas = document.createElement('canvas');
+      canvas.width = gw;
+      canvas.height = gh;
+      overlayCanvasRef.current = canvas;
+      overlayImageDataRef.current = null;
+    }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const { lo, hi } = bandInBaseSpace();
+    // Reuse the pixel buffer across repaints — a band drag repaints every frame
+    // and a fresh multi-MB ImageData per frame is pure GC churn.
+    let img = overlayImageDataRef.current;
+    if (!img) {
+      img = ctx.createImageData(gw, gh);
+      overlayImageDataRef.current = img;
+    }
+    const d = img.data;
+    for (let i = 0; i < gray.length; i++) {
+      const v = gray[i];
+      const o = i * 4;
+      if (v < lo || v > hi) { d[o + 3] = 0; continue; }
+      d[o] = 239; d[o + 1] = 68; d[o + 2] = 68; d[o + 3] = 255; // red-500
+    }
+    ctx.putImageData(img, 0, 0);
+    node.image(canvas);
+    node.getLayer()?.batchDraw();
+  }, [ensureOverlayField, bandInBaseSpace]);
+
+  useEffect(() => {
+    if (!showThresholdOverlay) return;
+    // Coalesce bursts (a band drag commits once per frame) into one repaint.
+    let pending = 0;
+    const schedule = () => {
+      if (pending) return;
+      pending = requestAnimationFrame(() => { pending = 0; paintThresholdOverlay(); });
+    };
+    schedule();
+    const unsub = useToolStore.subscribe((s, prev) => {
+      if (s.thresholdLo !== prev.thresholdLo || s.thresholdHi !== prev.thresholdHi) schedule();
+    });
+    return () => { unsub(); if (pending) cancelAnimationFrame(pending); };
+  }, [showThresholdOverlay, paintThresholdOverlay]);
 
   // Auto negative ("not") prompts for SAM: interior points of nearby other-class
   // regions, so a new selection won't bleed into already-labeled areas. Anchored
@@ -1042,6 +1231,145 @@ export default function AnnotationCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.magneticSeed, draft.tool, draft.sourceKey, draft.sliceKey, sourceKey, currentSlice, imageEl, displayBase]);
 
+  // ---- Threshold brush ----------------------------------------------------
+  // Paints only where the displayed intensity is inside the band, so a stroke
+  // stops dead at a feature boundary. The result can't be expressed as a stroke +
+  // radius, so it accumulates as a mask and commits as POLYGONS.
+
+  /** Begin a threshold stroke at `pos`, priming the mask, gate, and preview canvas. */
+  const startThresholdStroke = (pos: { x: number; y: number }, erase: boolean): void => {
+    const field = ensureThresholdField();
+    if (!field || !meta) return;
+    const { gw, gh, scale } = field;
+    const canvas = document.createElement('canvas');
+    canvas.width = gw;
+    canvas.height = gh;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    thresholdStrokeRef.current = {
+      mode: erase ? 'erase' : 'paint',
+      gw, gh, scale,
+      mask: new Uint8Array(gw * gh),
+      gate: buildThresholdGate(field),
+      last: pos,
+      canvas,
+      imageData: ctx.createImageData(gw, gh),
+    };
+    if (thresholdPreviewRef.current) {
+      thresholdPreviewRef.current.image(canvas);
+      thresholdPreviewRef.current.visible(true);
+    }
+    extendThresholdStroke(pos);
+  };
+
+  /** Stamp the segment from the last point to `pos` and repaint the preview.
+   *  Only the segment's dirty rect is rewritten — repainting the whole grid every
+   *  mousemove would be tens of millions of writes per frame at a 2x/4x full-res
+   *  grid, which is exactly the size this tool is meant to be used at. */
+  const extendThresholdStroke = (pos: { x: number; y: number }): void => {
+    const st = thresholdStrokeRef.current;
+    if (!st) return;
+    const { gw, gh, scale, mask, gate } = st;
+    const from = st.last;
+    stampStroke(mask, gw, gh, [from.x, from.y, pos.x, pos.y], brushSize / scale, scale, 1, gate);
+    st.last = pos;
+
+    // Dirty rect of this segment in grid cells (the stamped capsule's bbox).
+    const r = Math.max(0.5, brushSize / scale) + 1;
+    const x0 = Math.max(0, Math.floor(Math.min(from.x, pos.x) / scale - r));
+    const x1 = Math.min(gw - 1, Math.ceil(Math.max(from.x, pos.x) / scale + r));
+    const y0 = Math.max(0, Math.floor(Math.min(from.y, pos.y) / scale - r));
+    const y1 = Math.min(gh - 1, Math.ceil(Math.max(from.y, pos.y) / scale + r));
+    if (x1 < x0 || y1 < y0) return;
+
+    // Erase strokes preview white (matching the eraser's draft line); paint
+    // strokes use the active class color.
+    const d = st.imageData.data;
+    const [cr, cg, cb] = st.mode === 'erase' ? [255, 255, 255] : hexToRgb(activeColor);
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const i = y * gw + x;
+        if (!mask[i]) continue;
+        const o = i * 4;
+        d[o] = cr; d[o + 1] = cg; d[o + 2] = cb; d[o + 3] = 255;
+      }
+    }
+    st.canvas
+      .getContext('2d')
+      ?.putImageData(st.imageData, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    thresholdPreviewRef.current?.getLayer()?.batchDraw();
+  };
+
+  /** Flush the buffered threshold stroke: mask → polygons → one undo step. */
+  const commitThresholdStroke = (): void => {
+    const st = thresholdStrokeRef.current;
+    thresholdStrokeRef.current = null;
+    if (thresholdPreviewRef.current) {
+      thresholdPreviewRef.current.visible(false);
+      thresholdPreviewRef.current.image(undefined);
+      thresholdPreviewRef.current.getLayer()?.batchDraw();
+    }
+    if (!st || !sourceKey || !meta || activeClassId === null) return;
+
+    const { gw, gh, scale, mask } = st;
+    let any = false;
+    for (let i = 0; i < mask.length; i++) if (mask[i]) { any = true; break; }
+    if (!any) return;
+
+    const regions = maskToPolygonsWithHoles(mask, gw, gh, { minRegion: 4, scale })
+      .filter((p) => p.points.length >= 6);
+    if (regions.length === 0) return;
+
+    if (st.mode === 'erase') {
+      // Subtract the painted region from the shapes it actually overlaps, via the
+      // same node-preserving boolean path the eraser uses. The raster overlap test
+      // matters: `subtractFromShape` always rebuilds geometry, so running it on
+      // untouched shapes would churn their ids and vertices for nothing.
+      const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
+      const visible = (s: Shape) => classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+      const inScope = (s: Shape) => eraseAllClasses || s.classId === activeClassId;
+      const overlapsStroke = (s: Shape) => {
+        const sm = rasterizeShapes([s], gw, gh, scale);
+        for (let i = 0; i < mask.length; i++) if (mask[i] && sm[i]) return true;
+        return false;
+      };
+      const stampMP = regionsToMultiPolygon(regions);
+      if (stampMP.length === 0) return;
+
+      const next: Shape[] = [];
+      const replacedSelection: string[] = [];
+      let changed = false;
+      for (const s of sliceShapes) {
+        if (!inScope(s) || !visible(s) || !overlapsStroke(s)) { next.push(s); continue; }
+        const polys = subtractFromShape(s, stampMP, meta.width, meta.height);
+        if (polys === null) { next.push(s); continue; }
+        changed = true;
+        next.push(...polys);
+        if (selectedShapeIds.includes(s.id)) replacedSelection.push(...polys.map((p) => p.id));
+      }
+      if (changed) {
+        setShapes(sourceKey, currentSlice, next);
+        setSelectedShapeIds([
+          ...selectedShapeIds.filter((id) => next.some((s) => s.id === id)),
+          ...replacedSelection,
+        ]);
+      }
+      return;
+    }
+
+    // Paint: commit as polygons through the shared path, so clip-to-other-classes
+    // and merge-same-class apply and the whole stroke is a single undo step.
+    commitShapes(
+      regions.map((p) => ({
+        id: uuidv4(),
+        classId: activeClassId,
+        kind: 'polygon' as const,
+        points: p.points,
+        ...(p.holes.length ? { holes: p.holes } : {}),
+      })),
+    );
+  };
+
   /** Flush the buffered draft stroke to the Zustand store (one write per stroke). */
   const commitDraftStroke = () => {
     const draft = draftStrokeRef.current;
@@ -1086,7 +1414,7 @@ export default function AnnotationCanvas({
       // Bake the erase directly into polygon geometry for every target — the
       // vertices always match the visible shape, splits produce independent
       // polygons, and undo is one clean shape-replacement step.
-      const { gw, gh, scale } = fullResGridFor(meta.width, meta.height);
+      const { gw, gh, scale } = fullResGridFor(meta.width, meta.height, workScale);
       // The erase stamp as polygon geometry, subtracted from each shape via a true
       // boolean difference so untouched vertices are PRESERVED (only the cut edge
       // gets new points). Falls back per-shape to a rasterize→re-vectorize round-trip
@@ -1139,7 +1467,7 @@ export default function AnnotationCanvas({
         // Re-vectorize at full resolution so the round-trip is ~idempotent: existing
         // merged/clipped regions keep their shape instead of eroding or shifting a
         // little each time a stroke is added.
-        const { gw, gh, scale } = fullResGridFor(meta.width, meta.height);
+        const { gw, gh, scale } = fullResGridFor(meta.width, meta.height, workScale);
         const prospective = { ...brush, strokes: [...brush.strokes, { points: finalPoints, radius, mode: 'paint' as const }] };
         const mine = rasterizeShapes([prospective], gw, gh, scale);
         let clipChanged = false;
@@ -1362,6 +1690,22 @@ export default function AnnotationCanvas({
         draftLineRef.current.visible(true);
         draftStrokeLayerRef.current?.batchDraw();
       }
+    } else if (tool === 'threshold') {
+      // Shift-click samples instead of painting: re-center the band on the pixel
+      // under the cursor, keeping the configured sample width.
+      if (e.evt.shiftKey) {
+        const field = ensureThresholdField();
+        if (field) {
+          const gx = Math.max(0, Math.min(field.gw - 1, Math.floor(pos.x / field.scale)));
+          const gy = Math.max(0, Math.min(field.gh - 1, Math.floor(pos.y / field.scale)));
+          const v = field.gray[gy * field.gw + gx];
+          const half = thresholdSampleWidth / 2;
+          setThresholdBand(v - half, v + half);
+        }
+        return;
+      }
+      setIsDrawing(true);
+      startThresholdStroke(pos, e.evt.altKey);
     } else if (tool === 'eraser') {
       setIsDrawing(true);
       const sliceShapes = byImage[sourceKey]?.[String(currentSlice)] ?? [];
@@ -1447,6 +1791,13 @@ export default function AnnotationCanvas({
       return;
     }
 
+    // Threshold brush: stamp into the in-band mask and repaint the preview. Like
+    // the brush, this writes nothing to the store until mouseup.
+    if (tool === 'threshold' && e.evt.buttons === 1 && thresholdStrokeRef.current) {
+      extendThresholdStroke(pos);
+      return;
+    }
+
     // Buffer brush/eraser points — no store writes here
     if ((tool === 'brush' || tool === 'eraser') && e.evt.buttons === 1 && draftStrokeRef.current) {
       draftStrokeRef.current.points.push(pos.x, pos.y);
@@ -1503,6 +1854,7 @@ export default function AnnotationCanvas({
 
     if (isDrawing) {
       commitDraftStroke();
+      commitThresholdStroke();
       setIsDrawing(false);
     }
     if (!sourceKey || !meta || activeClassId === null) return;
@@ -1565,6 +1917,7 @@ export default function AnnotationCanvas({
     // Commit any in-progress stroke
     if (isDrawing) {
       commitDraftStroke();
+      commitThresholdStroke();
       setIsDrawing(false);
     }
     setDragStart(null);
@@ -2287,6 +2640,22 @@ export default function AnnotationCanvas({
           )}
         </Layer>
 
+        {/* Threshold band overlay (ImageJ-style): every pixel the threshold brush
+            is currently allowed to paint, in translucent red. Sits above the image
+            but below the annotations so existing regions stay readable. */}
+        {showThresholdOverlay && meta && (
+          <Layer listening={false} opacity={0.35} {...imageClip}>
+            <KonvaImage
+              ref={overlayImageRef}
+              image={overlayCanvasRef.current ?? undefined}
+              width={meta.width}
+              height={meta.height}
+              listening={false}
+              perfectDrawEnabled={false}
+            />
+          </Layer>
+        )}
+
         {/* Layer 1: committed shapes — cached + opacity applied once at the
             layer so overlapping same-class shapes render a uniform class color.
             Clipped to the image frame so strokes never render past the edges. */}
@@ -2516,6 +2885,19 @@ export default function AnnotationCanvas({
             perfectDrawEnabled={false}
             listening={false}
           />
+          {/* Threshold-brush stroke preview: the in-band mask painted so far,
+              drawn at image size (its canvas is at the working resolution). */}
+          {meta && (
+            <KonvaImage
+              ref={thresholdPreviewRef}
+              image={undefined}
+              width={meta.width}
+              height={meta.height}
+              visible={false}
+              listening={false}
+              perfectDrawEnabled={false}
+            />
+          )}
         </Layer>
 
         {/* Layer 4: brush/eraser size cursor preview (position updated imperatively) */}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { magicSelect, maskToPolygons, maskToPolygonsWithHoles, gradientField, type GrayField } from './magicwand';
+import { magicSelect, maskToPolygons, maskToPolygonsWithHoles, gradientField, otsuThreshold, type GrayField } from './magicwand';
 
 /** 40x40 grid (scale 1): background 0 with two value-200 blocks. */
 function twoBlocks(): GrayField {
@@ -167,5 +167,66 @@ describe('maskToPolygonsWithHoles', () => {
     const out = maskToPolygonsWithHoles(m, W, H, { minRegion: 8 });
     expect(out.length).toBe(1);
     expect(out[0].holes.length).toBe(0);
+  });
+});
+
+describe('fractional scale (upscaled working resolution)', () => {
+  /** 40x40 grid at scale 0.5 — i.e. a 20x20 NATIVE image sampled at 2x. */
+  function upscaledBlock(): GrayField {
+    const gw = 40, gh = 40;
+    const gray = new Float32Array(gw * gh);
+    // Grid cells 8..24 → native image coords 4..12.
+    for (let y = 8; y < 24; y++) for (let x = 8; x < 24; x++) gray[y * gw + x] = 200;
+    return { gw, gh, scale: 0.5, gray };
+  }
+
+  it('magicSelect seeds and returns polygons in NATIVE image coords', () => {
+    const field = upscaledBlock();
+    // Seed at native (8,8) → grid (16,16), inside the block.
+    const polys = magicSelect(field, 8, 8, { toleranceFrac: 0.2, mode: 'contiguous', smooth: 0, minRegion: 8 });
+    expect(polys.length).toBe(1);
+    const xs = polys[0].filter((_, i) => i % 2 === 0);
+    const ys = polys[0].filter((_, i) => i % 2 === 1);
+    // Native extent of the block is 4..12, not the 8..24 grid extent.
+    expect(Math.min(...xs)).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...xs)).toBeLessThanOrEqual(13);
+    expect(Math.min(...ys)).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...ys)).toBeLessThanOrEqual(13);
+  });
+
+  it('yields sub-pixel (half-integer) vertices a native-resolution grid could not', () => {
+    const field = upscaledBlock();
+    const polys = magicSelect(field, 8, 8, { toleranceFrac: 0.2, mode: 'contiguous', smooth: 0, minRegion: 8 });
+    const coords = polys[0];
+    expect(coords.some((v) => !Number.isInteger(v))).toBe(true);
+  });
+});
+
+describe('otsuThreshold', () => {
+  it('splits a clean bimodal histogram between the modes', () => {
+    const bins = new Array(256).fill(0);
+    bins[40] = 1000;   // dark mode
+    bins[200] = 1000;  // bright mode
+    const t = otsuThreshold(bins);
+    expect(t).toBeGreaterThan(40);
+    expect(t).toBeLessThan(200);
+  });
+
+  it('handles broad overlapping modes', () => {
+    const bins = new Array(256).fill(0);
+    for (let i = 30; i < 70; i++) bins[i] = 100;
+    for (let i = 150; i < 220; i++) bins[i] = 100;
+    const t = otsuThreshold(bins);
+    expect(t).toBeGreaterThanOrEqual(69);
+    expect(t).toBeLessThanOrEqual(150);
+  });
+
+  it('returns a safe default for degenerate histograms', () => {
+    expect(otsuThreshold([])).toBe(128);
+    expect(otsuThreshold(new Array(256).fill(0))).toBe(128);
+    // Single-valued: no valid two-class split, so the default stands.
+    const one = new Array(256).fill(0);
+    one[77] = 500;
+    expect(otsuThreshold(one)).toBe(128);
   });
 });

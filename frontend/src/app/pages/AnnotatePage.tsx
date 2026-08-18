@@ -1,7 +1,7 @@
 /**
  * AnnotatePage — react-konva canvas workspace with sidebar tools.
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router';
 import { DownloadSimple, FloppyDisk, ClockCounterClockwise, CircleDashed, ChartBar } from '@phosphor-icons/react';
 import { useDatasetStore } from '@/stores/datasetStore';
@@ -66,9 +66,26 @@ export default function AnnotatePage() {
   // Display-only false-color map + gamma.
   const [colormap, setColormap] = useState<ColormapName>('gray');
   const [gamma, setGamma] = useState(1);
-  // Display-only nonlinear preprocessors (adaptive CLAHE / Sharpen).
+  // Display-only nonlinear preprocessors (Gaussian blur / adaptive CLAHE / Sharpen).
   const [clahe, setClahe] = useState(false);
   const [sharpen, setSharpen] = useState(false);
+  const [blur, setBlur] = useState(0);
+  // Working resolution for the drawing tools (1x, 2x, 4x). Annotation coordinates
+  // stay native; upscaling only buys sub-pixel precision on small features.
+  const [upscale, setUpscale] = useState(1);
+  // Each level costs 4x the pixels in the base canvas AND in every tool field, so
+  // cap the offer at what this slice can afford (the canvas enforces the same limit).
+  // Bundled for the Toolbar's threshold band picker, which remaps the (base-space)
+  // histogram into displayed space so the plot matches the image and the band.
+  const thresholdDisplay = useMemo(
+    () => ({ brightness, contrast, levelsLo, levelsHi, gamma }),
+    [brightness, contrast, levelsLo, levelsHi, gamma],
+  );
+  const maxUpscale = useMemo(() => {
+    if (!meta) return 4;
+    const px = meta.width * meta.height;
+    return px * 16 <= 64e6 ? 4 : px * 4 <= 64e6 ? 2 : 1;
+  }, [meta]);
   const [showDownload, setShowDownload] = useState(false);
   const [showInsights, setShowInsights] = useState(false);
   // Region to zoom to + highlight on the canvas (from an Insights QA flag).
@@ -213,14 +230,19 @@ export default function AnnotatePage() {
             onChange={(v) => setFillOpacity(v / 100)}
           />
           <hr />
-          <Toolbar disabled={classes.length === 0} />
+          <Toolbar
+            disabled={classes.length === 0}
+            histogramBins={histogramBins}
+            display={thresholdDisplay}
+            upscale={upscale}
+          />
           <hr />
           <DisplayControls
             brightness={brightness}
             contrast={contrast}
             onBrightnessChange={setBrightness}
             onContrastChange={setContrast}
-            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); setClahe(false); setSharpen(false); }}
+            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); setClahe(false); setSharpen(false); setBlur(0); setUpscale(1); }}
             histogramBins={histogramBins}
             levelsLo={levelsLo}
             levelsHi={levelsHi}
@@ -234,6 +256,11 @@ export default function AnnotatePage() {
             sharpen={sharpen}
             onClaheChange={setClahe}
             onSharpenChange={setSharpen}
+            blur={blur}
+            onBlurChange={setBlur}
+            upscale={upscale}
+            onUpscaleChange={setUpscale}
+            maxUpscale={maxUpscale}
           />
           <hr />
           <SliceNavigator />
@@ -314,6 +341,8 @@ export default function AnnotatePage() {
             gamma={gamma}
             clahe={clahe}
             sharpen={sharpen}
+            blur={blur}
+            upscale={upscale}
             onHistogram={setHistogramBins}
             activeClassId={activeClassId}
             activeBrushShapeId={activeBrushShapeId}

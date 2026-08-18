@@ -3,7 +3,7 @@
  */
 import { create } from 'zustand';
 
-export type Tool = 'pan' | 'select' | 'polygon' | 'magnetic' | 'magic' | 'rectangle' | 'ellipse' | 'brush' | 'fill' | 'eraser';
+export type Tool = 'pan' | 'select' | 'polygon' | 'magnetic' | 'magic' | 'rectangle' | 'ellipse' | 'brush' | 'threshold' | 'fill' | 'eraser';
 
 export type MagicMode = 'contiguous' | 'global';
 /** Magic-selection engine: SAM (learned object prior) or the classic wand. */
@@ -21,6 +21,13 @@ export interface ToolState {
   fillThreshold: number;
   /** Selected shape ids (multi-select via marquee/shift-click). */
   selectedShapeIds: string[];
+  /** Threshold brush: paint only where the displayed intensity is in [lo,hi] (0–255). */
+  thresholdLo: number;
+  thresholdHi: number;
+  /** Show a red overlay of every in-band pixel on the slice (ImageJ-style). */
+  thresholdOverlay: boolean;
+  /** Band width applied when Shift-clicking to sample a pixel's intensity. */
+  thresholdSampleWidth: number;
   /** Magic-wand: similarity tolerance (0–1) and selection mode + denoise. */
   magicTolerance: number;
   magicMode: MagicMode;
@@ -59,6 +66,9 @@ export interface ToolState {
   setBrushSize: (size: number) => void;
   setFillOpacity: (opacity: number) => void;
   setFillThreshold: (t: number) => void;
+  setThresholdBand: (lo: number, hi: number) => void;
+  setThresholdOverlay: (v: boolean) => void;
+  setThresholdSampleWidth: (w: number) => void;
   /** Convenience single-select (clears to [] when null). */
   setSelectedShapeId: (id: string | null) => void;
   setSelectedShapeIds: (ids: string[]) => void;
@@ -84,6 +94,10 @@ export const useToolStore = create<ToolState>((set) => ({
   brushSize: 10,
   fillOpacity: 0.5,
   fillThreshold: 0.1,
+  thresholdLo: 0,
+  thresholdHi: 255,
+  thresholdOverlay: true,
+  thresholdSampleWidth: 24,
   selectedShapeIds: [],
   magicTolerance: 0.08,
   magicMode: 'contiguous',
@@ -108,6 +122,15 @@ export const useToolStore = create<ToolState>((set) => ({
   setFillOpacity: (fillOpacity) => set({ fillOpacity }),
   /** Sets the Fill (paint-bucket) similarity threshold (0–1). */
   setFillThreshold: (fillThreshold) => set({ fillThreshold }),
+  /** Sets the threshold-brush intensity band, clamped to 0–255 and kept ordered. */
+  setThresholdBand: (lo, hi) => set({
+    thresholdLo: Math.max(0, Math.min(255, Math.round(Math.min(lo, hi)))),
+    thresholdHi: Math.max(0, Math.min(255, Math.round(Math.max(lo, hi)))),
+  }),
+  /** Toggles the red in-band overlay shown while the threshold brush is active. */
+  setThresholdOverlay: (thresholdOverlay) => set({ thresholdOverlay }),
+  /** Sets the band width used when Shift-clicking to sample an intensity. */
+  setThresholdSampleWidth: (thresholdSampleWidth) => set({ thresholdSampleWidth }),
   /** Single-selects a shape, or clears the selection when null. */
   setSelectedShapeId: (id) => set({ selectedShapeIds: id ? [id] : [] }),
   /** Replaces the multi-selection with the given shape ids. */
