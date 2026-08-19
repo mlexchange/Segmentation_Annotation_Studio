@@ -51,9 +51,15 @@ export function fullResGridFor(width: number, height: number, upscale = 1): Mask
  * Rasterize *shapes* into a `gw × gh` binary mask (Uint8Array of 0/1). Paint
  * strokes and shape bodies set 1; brush erase strokes and vector `erased`
  * carve-outs set 0, applied per-shape so a later shape can repaint.
+ *
+ * Pass `out` to render into an existing buffer instead of allocating one. Callers
+ * that rasterize many shapes in a loop (overlap tests) reuse a single scratch
+ * array this way — at full resolution each allocation is multiple megabytes, and
+ * the garbage adds up fast. `out` must be `gw*gh` long and is NOT cleared: clear
+ * it yourself when reusing, or leave it to accumulate a union deliberately.
  */
-export function rasterizeShapes(shapes: Shape[], gw: number, gh: number, scale = 1): Uint8Array {
-  const mask = new Uint8Array(gw * gh);
+export function rasterizeShapes(shapes: Shape[], gw: number, gh: number, scale = 1, out?: Uint8Array): Uint8Array {
+  const mask = out ?? new Uint8Array(gw * gh);
   const s = scale || 1;
   for (const shape of shapes) {
     if (shape.kind === 'polygon') {

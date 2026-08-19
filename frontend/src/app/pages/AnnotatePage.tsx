@@ -27,6 +27,8 @@ import DownloadModal from '@/components/annotate/DownloadModal';
 import InsightsModal from '@/components/annotate/InsightsModal';
 import VersionHistoryModal from '@/components/annotate/VersionHistoryModal';
 import VersionPreviewBar from '@/components/annotate/VersionPreviewBar';
+import PerfOverlay from '@/components/annotate/PerfOverlay';
+import { initPerf } from '@/lib/perf';
 import SaveModal from '@/components/annotate/SaveModal';
 import type { SaveDraftPayload } from '@/hooks/useSave';
 
@@ -103,6 +105,9 @@ export default function AnnotatePage() {
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
 
+  // Dev-only timing HUD (?perf=1). Read once — the flag is fixed for the session.
+  const [perfOn] = useState(() => initPerf());
+
   // Crash-recovery autosave (local draft only, no Tiled sync)
   useDraftSync(sourceKey);
   // Undo/redo is per-sample: reset the region history + class-delete journal on switch.
@@ -114,6 +119,12 @@ export default function AnnotatePage() {
   const { isDirty, isSaving, lastSavedAt, save, buildSavePayload, saveSummary, versions, fetchVersionPayload, restoreVersion } = useSave(sourceKey);
 
   const { currentSlice, setSlice } = useDatasetStore();
+
+  // Shapes on the current slice — shown in the perf HUD, since it is the variable
+  // that drives most of the costs it reports. Only subscribed when the HUD is on.
+  const currentShapeCount = useAnnotationStore((s) =>
+    perfOn && sourceKey ? (s.byImage[sourceKey]?.[String(currentSlice)]?.length ?? 0) : 0,
+  );
 
   /** From an Insights QA flag: jump to its slice and zoom/highlight its region. */
   const handleInsightFocus = useCallback((slice: number, bbox?: { x: number; y: number; w: number; h: number }) => {
@@ -361,6 +372,7 @@ export default function AnnotatePage() {
               onRestore={handleRestoreFromPreview}
             />
           )}
+          {perfOn && <PerfOverlay shapeCount={currentShapeCount} />}
         </div>
       </div>
 

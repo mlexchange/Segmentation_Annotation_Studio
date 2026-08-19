@@ -9,6 +9,7 @@
  */
 import type { Shape } from '@/stores/annotationStore';
 import { gridFor, fullResGridFor, rasterizeShapes, rasterizeUnion } from '@/lib/rasterize';
+import { shapeBBox, unionBBox, bboxNear, type BBox } from '@/lib/geometry';
 import { maskToPolygonsWithHoles } from '@/lib/magicwand';
 import { unionShapesToPolygons } from '@/lib/polybool';
 import { v4 as uuidv4 } from 'uuid';
@@ -25,6 +26,48 @@ function masksIntersect(a: Uint8Array, b: Uint8Array): boolean {
   const n = Math.min(a.length, b.length);
   for (let i = 0; i < n; i++) if (a[i] && b[i]) return true;
   return false;
+}
+
+/**
+ * True if two 0/1 masks share a set pixel, scanning only the rows/columns where
+ * both shapes' bounds overlap. Equivalent to `masksIntersect` — outside the
+ * overlap rect at least one mask is empty by construction — but it avoids walking
+ * a multi-megapixel grid to answer a question about a small region.
+ */
+function masksIntersectIn(
+  a: Uint8Array, b: Uint8Array, gw: number, gh: number, rect: BBox, scale: number,
+): boolean {
+  const x0 = Math.max(0, Math.floor(rect.x / scale));
+  const y0 = Math.max(0, Math.floor(rect.y / scale));
+  const x1 = Math.min(gw - 1, Math.ceil((rect.x + rect.w) / scale));
+  const y1 = Math.min(gh - 1, Math.ceil((rect.y + rect.h) / scale));
+  for (let y = y0; y <= y1; y++) {
+    const row = y * gw;
+    for (let x = x0; x <= x1; x++) {
+      const i = row + x;
+      if (a[i] && b[i]) return true;
+    }
+  }
+  return false;
+}
+
+/** Grow a box by `pad` on every side. */
+function inflate(b: BBox, pad: number): BBox {
+  return { x: b.x - pad, y: b.y - pad, w: b.w + pad * 2, h: b.h + pad * 2 };
+}
+
+/**
+ * Intersection of two boxes, each first grown by `pad` (empty w/h < 0 when they
+ * remain disjoint). The padding absorbs rasterization rounding: two shapes whose
+ * boxes merely abut can still land set pixels in the same grid cell.
+ */
+function bboxOverlap(a: BBox, b: BBox, pad = 0): BBox {
+  const A = inflate(a, pad), B = inflate(b, pad);
+  const x = Math.max(A.x, B.x);
+  const y = Math.max(A.y, B.y);
+  const w = Math.min(A.x + A.w, B.x + B.w) - x;
+  const h = Math.min(A.y + A.h, B.y + B.h) - y;
+  return { x, y, w, h };
 }
 
 /**
@@ -46,6 +89,12 @@ export function expandSameClassOverlap(
     if (!m) { m = rasterizeShapes([s], gw, gh, scale); maskCache.set(s.id, m); }
     return m;
   };
+  const boxCache = new Map<string, BBox>();
+  const boxOf = (s: Shape): BBox => {
+    let b = boxCache.get(s.id);
+    if (!b) { b = shapeBBox(s); boxCache.set(s.id, b); }
+    return b;
+  };
 
   const chosen = new Map<string, Shape>(seed.map((s) => [s.id, s]));
   const classes = new Set(seed.map((s) => s.classId));
@@ -56,14 +105,19 @@ export function expandSameClassOverlap(
     let changed = true;
     while (changed && candidates.length > 0) {
       changed = false;
-      // Union mask of the current cluster members for this class.
+      // Union mask + bounds of the current cluster members for this class. The
+      // bounds let a candidate be rejected without rasterizing it at all, which
+      // matters because this loop is quadratic in cluster size.
       const union = new Uint8Array(gw * gh);
       for (const m of members) {
         const mm = maskOf(m);
         for (let i = 0; i < union.length; i++) if (mm[i]) union[i] = 1;
       }
+      const unionBounds = unionBBox(members);
       for (let i = candidates.length - 1; i >= 0; i--) {
-        if (masksIntersect(maskOf(candidates[i]), union)) {
+        const cand = candidates[i];
+        if (!bboxNear(boxOf(cand), unionBounds, scale + 1)) continue;
+        if (masksIntersect(maskOf(cand), union)) {
           const c = candidates.splice(i, 1)[0];
           chosen.set(c.id, c);
           members.push(c);
@@ -103,12 +157,29 @@ export function mergeNewWithSameClass(
   }
 
   for (const [classId, group] of byClass) {
-    const existing = sliceShapes.filter((s) => s.classId === classId);
+    const groupBounds = unionBBox(group);
+    // Bounds pre-filter before ANY rasterization: a shape whose box is disjoint
+    // from the new geometry cannot share a set pixel with it, so the mask test
+    // below would always say no. Without this, committing one stroke rasterizes
+    // every same-class shape on the slice into its own full-resolution buffer
+    // (millions of cells each) purely to be told they don't touch.
+    const existing = sliceShapes.filter(
+      (s) => s.classId === classId && bboxNear(shapeBBox(s), groupBounds, scale + 1),
+    );
     if (existing.length === 0) { add.push(...group); continue; }
 
-    // Cheap mask test to decide WHICH existing shapes to merge (fast, tolerant).
+    // Cheap mask test to decide WHICH of the remaining candidates to merge.
+    // One reused scratch buffer instead of an allocation per candidate, and the
+    // comparison only walks the rows/columns where the two boxes actually overlap.
     const newMask = rasterizeUnion(group, gw, gh, scale);
-    const overlapping = existing.filter((e) => masksIntersect(rasterizeShapes([e], gw, gh, scale), newMask));
+    const scratch = new Uint8Array(gw * gh);
+    const overlapping = existing.filter((e) => {
+      const rect = bboxOverlap(shapeBBox(e), groupBounds, scale + 1);
+      if (rect.w < 0 || rect.h < 0) return false;
+      scratch.fill(0);
+      rasterizeShapes([e], gw, gh, scale, scratch);
+      return masksIntersectIn(scratch, newMask, gw, gh, rect, scale);
+    });
     if (overlapping.length === 0) { add.push(...group); continue; }
 
     // Combine via a true polygon boolean union so the existing shapes keep their

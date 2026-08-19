@@ -20,10 +20,10 @@ import { Trash } from '@phosphor-icons/react';
 import type Konva from 'konva';
 import { v4 as uuidv4 } from 'uuid';
 import { useDatasetStore } from '@/stores/datasetStore';
-import { useAnnotationStore, type Shape, type PolygonShape, type BrushStroke, type EraseStroke } from '@/stores/annotationStore';
+import { useAnnotationStore, type Shape, type PolygonShape, type BrushStroke } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
 import { useClassStore, type AnnotationClass } from '@/stores/classStore';
-import { toImage, normalizeRect, normalizeEllipse } from '@/lib/geometry';
+import { toImage, normalizeRect, normalizeEllipse, shapeBBox, unionBBox, bboxNear, bboxIntersects, type BBox } from '@/lib/geometry';
 import { buildCostMap, dijkstra, tracePath, imageToGrid, simplifyPath, type CostMap } from '@/lib/livewire';
 import { useImageSlice } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
@@ -32,13 +32,15 @@ import { useSam } from '@/hooks/useSam';
 import { renderAdjusted, renderPreprocessOnly } from '@/lib/sam/adjust';
 import { gridFor, fullResGridFor, rasterizeShapes, rasterizeUnion, stampStroke } from '@/lib/rasterize';
 import { keepComponentsAtPoints } from '@/lib/morphology';
-import { unionShapesToPolygons, unionShapesToMultiPolygon, eraseStampToMultiPolygon, subtractFromShape, regionsToMultiPolygon } from '@/lib/polybool';
+import { unionShapesToPolygons, unionShapesToMultiPolygon, unionShapesChecked, eraseStampToMultiPolygon, subtractFromShape, regionsToMultiPolygon } from '@/lib/polybool';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
-import { clipShapesToOthers, hasOtherClass } from '@/lib/clipToClasses';
+import { clipShapesToOthers, clipShapesToOthersMask, hasOtherClass } from '@/lib/clipToClasses';
 import { mergeNewWithSameClass, expandSameClassOverlap } from '@/lib/mergeSameClass';
 import { useClipboardStore } from '@/stores/clipboardStore';
 import { colormapTables, type ColormapName } from '@/lib/colormaps';
+import ShapesLayer from './ShapesLayer';
 import { displayAffineFor, displayBandToBase } from '@/lib/displayTransform';
+import { time } from '@/lib/perf';
 
 // macOS labels the Alt key "Option" (⌥). e.altKey is true for it either way,
 // so only the on-screen label needs to differ.
@@ -316,13 +318,6 @@ function interiorPoint(shape: Shape): { x: number; y: number } | null {
     return null;
   }
   return null;
-}
-
-interface BBox { x: number; y: number; w: number; h: number; }
-
-/** True if two AABBs overlap. */
-function bboxIntersects(a: BBox, b: BBox): boolean {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
 /** True if segments AB and CD intersect. */
@@ -769,20 +764,49 @@ export default function AnnotationCanvas({
 
   // Cache the shapes layer for uniform opacity compositing — skipped mid-stroke
   // so the cache rebuild doesn't stall painting.
+  //
+  // The cache pixel ratio is quantized to powers of two rather than tracking zoom
+  // continuously. Re-caching rasterizes the whole layer, and keying it on the raw
+  // scale meant every wheel tick paid for that. Rounding UP to the next bucket
+  // means the cache is never coarser than the old `pixelRatio = scale` (at 1.5x it
+  // now caches at 2x), so shapes are equally or more crisp while most zoom steps
+  // reuse the existing cache outright.
+  const cachePixelRatio = useMemo(() => {
+    const scale = Math.min(Math.max(transform.scaleX, 1), 4);
+    return Math.min(4, Math.pow(2, Math.ceil(Math.log2(scale))));
+  }, [transform.scaleX]);
+
   useEffect(() => {
     const layer = shapesLayerRef.current;
     if (!layer) return;
     if (isDrawing) return;
-    layer.clearCache();
-    if (displayShapes.length > 0) {
-      const pr = Math.min(Math.max(transform.scaleX, 1), 4);
-      layer.cache({ pixelRatio: pr });
-    }
-    layer.batchDraw();
-  }, [displayShapes, renderClasses, fillOpacity, meta, transform.scaleX, isDrawing]);
+    time('layer-cache', () => {
+      layer.clearCache();
+      if (displayShapes.length > 0) {
+        layer.cache({ pixelRatio: cachePixelRatio });
+      }
+      layer.batchDraw();
+    });
+  }, [displayShapes, renderClasses, fillOpacity, meta, cachePixelRatio, isDrawing]);
+
+  // Class lookups by id. These run per shape, on both shape layers, on every
+  // render — a linear scan there is O(shapes × classes) for what should be O(1).
+  const classMap = useMemo(
+    () => new Map(classes.map((c) => [c.classId, c])),
+    [classes],
+  );
+  const renderClassMap = useMemo(
+    () => (renderClasses === classes ? classMap : new Map(renderClasses.map((c) => [c.classId, c]))),
+    [renderClasses, classes, classMap],
+  );
 
   const colorForClass = (classId: number) =>
-    renderClasses.find((c) => c.classId === classId)?.color ?? '#ff0000';
+    renderClassMap.get(classId)?.color ?? '#ff0000';
+  /** Visibility of a shape's class (defaults to visible for unknown classes). */
+  const isShapeVisible = useCallback(
+    (s: Shape) => classMap.get(s.classId)?.isVisible !== false,
+    [classMap],
+  );
 
   /** Commit new shapes, clipping them against other classes when the toggle is on
    *  (neighbor classes act as a hard boundary), and merging with overlapping
@@ -793,12 +817,12 @@ export default function AnnotationCanvas({
   const computeCommittedSlice = useCallback((newShapes: Shape[], sliceShapes: Shape[]): Shape[] => {
     let toAdd = newShapes;
     if (clipToOtherClasses && meta && newShapes.some((s) => hasOtherClass(sliceShapes, s.classId))) {
-      toAdd = clipShapesToOthers(newShapes, sliceShapes, meta.width, meta.height, workScale);
+      toAdd = time('clip', () => clipShapesToOthers(newShapes, sliceShapes, meta.width, meta.height, workScale));
     }
     // Auto-merge with overlapping same-class shapes (replaces those + the new shape with
     // one unioned polygon). Runs after clipping so other-class bounds still hold.
     if (mergeOverlappingSameClass && meta && toAdd.length) {
-      const { add, removeIds } = mergeNewWithSameClass(toAdd, sliceShapes, meta.width, meta.height, workScale);
+      const { add, removeIds } = time('merge', () => mergeNewWithSameClass(toAdd, sliceShapes, meta.width, meta.height, workScale));
       if (removeIds.length) {
         const kept = sliceShapes.filter((s) => !removeIds.includes(s.id));
         return [...kept, ...add];
@@ -812,7 +836,8 @@ export default function AnnotationCanvas({
     if (!sourceKey || newShapes.length === 0) return;
     const slice = useDatasetStore.getState().currentSlice;
     const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(slice)] ?? [];
-    setShapes(sourceKey, slice, computeCommittedSlice(newShapes, sliceShapes));
+    const next = time('commit', () => computeCommittedSlice(newShapes, sliceShapes));
+    setShapes(sourceKey, slice, next);
   }, [sourceKey, computeCommittedSlice, setShapes]);
 
   const activeColor =
@@ -839,7 +864,7 @@ export default function AnnotationCanvas({
     if (magneticCostRef.current && magneticBuiltForRef.current === base) {
       return magneticCostRef.current;
     }
-    const cm = buildCostMap(base, meta.width, meta.height, 512, workScale);
+    const cm = time('cost-map', () => buildCostMap(base, meta.width, meta.height, 512, workScale));
     magneticCostRef.current = cm;
     magneticBuiltForRef.current = base;
     return cm;
@@ -879,7 +904,7 @@ export default function AnnotationCanvas({
     if (!imageEl || !meta) return null;
     if (magicFieldRef.current && magicFieldForRef.current === adjustedKey) return magicFieldRef.current;
     const src = renderAdjusted(imageEl, meta.width, meta.height, brightness, contrast, levelsLo, levelsHi, preprocess, workScale);
-    const f = buildField(src, meta.width, meta.height, 1600, workScale);
+    const f = time('magic-field', () => buildField(src, meta.width, meta.height, 1600, workScale));
     magicFieldRef.current = f;
     magicFieldForRef.current = adjustedKey;
     return f;
@@ -903,11 +928,29 @@ export default function AnnotationCanvas({
     if (thresholdFieldRef.current && thresholdFieldForRef.current === baseKey) return thresholdFieldRef.current;
     // No gradient: the brush gates purely on intensity, and a Sobel pass over a
     // full-resolution (possibly 4x) grid would be pure waste.
-    const f = buildField(displayBase ?? imageEl, meta.width, meta.height, Math.max(meta.width, meta.height), workScale, false);
+    const f = time('threshold-field', () => buildField(displayBase ?? imageEl, meta.width, meta.height, Math.max(meta.width, meta.height), workScale, false));
     thresholdFieldRef.current = f;
     thresholdFieldForRef.current = baseKey;
     return f;
   }, [imageEl, meta, displayBase, workScale, baseKey]);
+
+  // Release the cached tool fields when the slice or sample changes. Each holds a
+  // Float32 gray plane (plus a gradient, for the wand) sized to the working
+  // resolution — up to tens of MB at 2x/4x — and without this they stay resident
+  // until the next use happens to replace them, which may be never.
+  useEffect(() => {
+    return () => {
+      magicFieldRef.current = null;
+      magicFieldForRef.current = null;
+      thresholdFieldRef.current = null;
+      thresholdFieldForRef.current = null;
+      overlayFieldRef.current = null;
+      overlayFieldForRef.current = null;
+      gateRef.current = null;
+      magneticCostRef.current = null;
+      magneticBuiltForRef.current = null;
+    };
+  }, [sourceKey, currentSlice]);
 
   /** The threshold band, mapped from the DISPLAYED intensities the user authored
    *  it in into the base space the cached fields live in. Brightness/contrast/
@@ -922,16 +965,25 @@ export default function AnnotationCanvas({
    *  is what the brush may paint. Reads the band from the store rather than a
    *  subscribed value — see the overlay below for why the canvas deliberately does
    *  NOT re-render on band changes. */
+  //  Cached across strokes: the gate only changes when the band, the display
+  //  transform, or the underlying field changes — not per mousedown, where
+  //  rebuilding it meant a fresh multi-megabyte pass at the start of every stroke.
+  const gateRef = useRef<{ key: string; field: GrayField; gate: Uint8Array } | null>(null);
   const buildThresholdGate = useCallback((field: GrayField): Uint8Array => {
     const { lo, hi } = bandInBaseSpace();
+    const key = `${baseKey}|${lo}|${hi}`;
+    const cached = gateRef.current;
+    if (cached && cached.key === key && cached.field === field) return cached.gate;
+
     const gate = new Uint8Array(field.gw * field.gh);
     const { gray } = field;
     for (let i = 0; i < gate.length; i++) {
       const v = gray[i];
       if (v >= lo && v <= hi) gate[i] = 1;
     }
+    gateRef.current = { key, field, gate };
     return gate;
-  }, [bandInBaseSpace]);
+  }, [bandInBaseSpace, baseKey]);
 
   // ---- Red in-band overlay (ImageJ's threshold display) -------------------
   // Shows exactly which pixels the brush may paint. Three things keep dragging
@@ -957,14 +1009,14 @@ export default function AnnotationCanvas({
     // Same preprocessed source as the brush field (see above), so the overlay shows
     // exactly what the brush would paint — including as the display sliders move,
     // since both read the band through `bandInBaseSpace`.
-    const f = buildField(displayBase ?? imageEl, meta.width, meta.height, 1024, 1, false);
+    const f = time('overlay-field', () => buildField(displayBase ?? imageEl, meta.width, meta.height, 1024, 1, false));
     overlayFieldRef.current = f;
     overlayFieldForRef.current = baseKey;
     return f;
   }, [imageEl, meta, displayBase, baseKey]);
 
   /** Repaint the overlay canvas for the current band and push it to Konva. */
-  const paintThresholdOverlay = useCallback(() => {
+  const paintThresholdOverlay = useCallback(() => time('overlay-paint', () => {
     const node = overlayImageRef.current;
     if (!node) return;
     const field = ensureOverlayField();
@@ -998,7 +1050,7 @@ export default function AnnotationCanvas({
     ctx.putImageData(img, 0, 0);
     node.image(canvas);
     node.getLayer()?.batchDraw();
-  }, [ensureOverlayField, bandInBaseSpace]);
+  }), [ensureOverlayField, bandInBaseSpace]);
 
   useEffect(() => {
     if (!showThresholdOverlay) return;
@@ -1030,8 +1082,7 @@ export default function AnnotationCanvas({
           : null;
     if (!ref) return [];
 
-    const isClassVisible = (s: Shape) =>
-      classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+    const isClassVisible = isShapeVisible;
 
     const cands: Array<{ x: number; y: number }> = [];
     for (const shape of storeShapes) {
@@ -1326,11 +1377,19 @@ export default function AnnotationCanvas({
       // matters: `subtractFromShape` always rebuilds geometry, so running it on
       // untouched shapes would churn their ids and vertices for nothing.
       const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
-      const visible = (s: Shape) => classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+      const visible = isShapeVisible;
       const inScope = (s: Shape) => eraseAllClasses || s.classId === activeClassId;
+      // The stroke's own bounds come free from the regions we just vectorized, so
+      // a shape nowhere near it is rejected before any rasterization happens.
+      const strokeBounds = unionBBox(
+        regions.map((p) => ({ id: '', classId: 0, kind: 'polygon' as const, points: p.points })),
+      );
+      const scratch = new Uint8Array(gw * gh);
       const overlapsStroke = (s: Shape) => {
-        const sm = rasterizeShapes([s], gw, gh, scale);
-        for (let i = 0; i < mask.length; i++) if (mask[i] && sm[i]) return true;
+        if (!bboxNear(shapeBBox(s), strokeBounds, scale + 1)) return false;
+        scratch.fill(0);
+        rasterizeShapes([s], gw, gh, scale, scratch);
+        for (let i = 0; i < mask.length; i++) if (mask[i] && scratch[i]) return true;
         return false;
       };
       const stampMP = regionsToMultiPolygon(regions);
@@ -1389,8 +1448,7 @@ export default function AnnotationCanvas({
     if (mode === 'erase') {
       if (!meta) return;
       const sliceShapes = useAnnotationStore.getState().byImage[sourceKey]?.[String(currentSlice)] ?? [];
-      const visible = (s: Shape) =>
-        classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+      const visible = isShapeVisible;
       const inScope = (s: Shape) => eraseAllClasses || s.classId === activeClassId;
       const strokeHits = (s: Shape) => {
         // Radius-aware so grazing a shape's edge (disk overlaps, center outside)
@@ -1475,6 +1533,13 @@ export default function AnnotationCanvas({
         // Clip detection (fast mask test): does the brush overlap other classes?
         // The actual clip is applied below via boolean difference so the brush tiles
         // flush against the neighbor (a mask carve left a ~1px unlabeled seam).
+        // Bounds of the brush including this stroke. Used ONLY for the same-class
+        // merge test below — the clip detection deliberately does not pre-filter
+        // (see the note in lib/clipToClasses.ts about the reverted filter).
+        const mineBounds = shapeBBox(prospective);
+        const nearBrush = (s: Shape) => bboxNear(shapeBBox(s), mineBounds, scale + 1);
+        const overlapScratch = new Uint8Array(gw * gh);
+
         if (clipToOtherClasses) {
           const others = sliceShapes.filter((s) => s.classId !== brush.classId);
           if (others.length > 0) {
@@ -1487,8 +1552,10 @@ export default function AnnotationCanvas({
         const mergeTargets = mergeOverlappingSameClass
           ? sliceShapes.filter((s) => {
               if (s.id === shapeId || s.classId !== brush.classId) return false;
-              const sm = rasterizeShapes([s], gw, gh, scale);
-              for (let i = 0; i < mine.length; i++) if (mine[i] && sm[i]) return true;
+              if (!nearBrush(s)) return false;
+              overlapScratch.fill(0);
+              rasterizeShapes([s], gw, gh, scale, overlapScratch);
+              for (let i = 0; i < mine.length; i++) if (mine[i] && overlapScratch[i]) return true;
               return false;
             })
           : [];
@@ -1504,12 +1571,30 @@ export default function AnnotationCanvas({
 
           // Clip via boolean difference so the brush tiles flush against other
           // classes (no ~1px unlabeled seam); existing shapes are untouched.
+          //
+          // `clipChanged` is decided by a mask test, so we KNOW there is overlap to
+          // remove here. Every failure below must therefore fall back to the mask
+          // clip rather than keeping the shape as-is: returning `bp` unchanged (the
+          // old behaviour) leaves the brush overlapping its neighbour while the
+          // toggle claims otherwise, which looks exactly like clipping being off.
           if (clipChanged) {
-            const otherMP = unionShapesToMultiPolygon(
-              sliceShapes.filter((s) => s.classId !== brush.classId), meta.width, meta.height,
-            );
-            if (otherMP.length) {
-              brushPolys = brushPolys.flatMap((bp) => subtractFromShape(bp, otherMP, meta.width, meta.height) ?? [bp]);
+            const others = sliceShapes.filter((s) => s.classId !== brush.classId);
+            const { mp: otherMP, ok } = unionShapesChecked(others, meta.width, meta.height);
+            if (ok && otherMP.length) {
+              // Boolean path per polygon; anything it can't do is batched into a
+              // single mask clip (that helper caches its masks per call, so one
+              // call for many shapes is far cheaper than one call each).
+              const kept: Shape[] = [];
+              const failed: Shape[] = [];
+              for (const bp of brushPolys) {
+                const sub = subtractFromShape(bp, otherMP, meta.width, meta.height);
+                if (sub === null) failed.push(bp); else kept.push(...sub);
+              }
+              brushPolys = failed.length
+                ? [...kept, ...clipShapesToOthersMask(failed, sliceShapes, meta.width, meta.height, workScale)]
+                : kept;
+            } else {
+              brushPolys = clipShapesToOthersMask(brushPolys, sliceShapes, meta.width, meta.height, workScale);
             }
           }
 
@@ -1715,8 +1800,7 @@ export default function AnnotationCanvas({
       // cursor we still start the stroke (so the preview shows and the user can
       // drag ONTO a shape) — the target is resolved from the whole stroke on
       // commit (see commitDraftStroke).
-      const visible = (s: Shape) =>
-        classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+      const visible = isShapeVisible;
       // "Erase all classes" ignores the active-class restriction (any visible shape).
       const inScope = (s: Shape) => eraseAllClasses || s.classId === activeClassId;
       let target: Shape | undefined;
@@ -1822,7 +1906,7 @@ export default function AnnotationCanvas({
       const additive = marqueeShiftRef.current;
       if (rect && rect.w > 3 && rect.h > 3 && sourceKey) {
         const ids = storeShapes
-          .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
+          .filter(isShapeVisible)
           .filter((s) => shapeIntersectsRect(s, rect))
           .map((s) => s.id);
         setSelectedShapeIds(additive ? Array.from(new Set([...selectedShapeIds, ...ids])) : ids);
@@ -1948,19 +2032,44 @@ export default function AnnotationCanvas({
   }, [showBrushCursor]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Zoom in/out toward the cursor, keeping the point under the pointer fixed. */
+  // Zoom is applied at most once per animation frame. A trackpad or free-spin
+  // wheel emits events far faster than the display refreshes, and each one used to
+  // trigger a full React render (and potentially a layer re-cache). Accumulating
+  // into a ref and flushing on rAF collapses a burst into a single update, with
+  // the same final scale and focal point.
+  const pendingZoomRef = useRef<{ steps: number; pointer: { x: number; y: number } } | null>(null);
+  const zoomRafRef = useRef<number | null>(null);
+  useEffect(() => () => { if (zoomRafRef.current != null) cancelAnimationFrame(zoomRafRef.current); }, []);
+
   const handleWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault();
     const stage = stageRef.current;
     if (!stage) return;
-    const scaleBy = 1.1;
-    const oldScale = transform.scaleX;
-    const pointer = stage.getPointerPosition()!;
-    const newScale = e.evt.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy;
-    const mousePointTo = { x: (pointer.x - transform.x) / oldScale, y: (pointer.y - transform.y) / oldScale };
-    setTransform({
-      scaleX: newScale, scaleY: newScale,
-      x: pointer.x - mousePointTo.x * newScale,
-      y: pointer.y - mousePointTo.y * newScale,
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+
+    const pending = pendingZoomRef.current;
+    const steps = (pending?.steps ?? 0) + (e.evt.deltaY < 0 ? 1 : -1);
+    pendingZoomRef.current = { steps, pointer };
+    if (zoomRafRef.current != null) return;
+
+    zoomRafRef.current = requestAnimationFrame(() => {
+      zoomRafRef.current = null;
+      const job = pendingZoomRef.current;
+      pendingZoomRef.current = null;
+      if (!job || job.steps === 0) return;
+      setTransform((t) => {
+        const newScale = t.scaleX * Math.pow(1.1, job.steps);
+        const mousePointTo = {
+          x: (job.pointer.x - t.x) / t.scaleX,
+          y: (job.pointer.y - t.y) / t.scaleY,
+        };
+        return {
+          scaleX: newScale, scaleY: newScale,
+          x: job.pointer.x - mousePointTo.x * newScale,
+          y: job.pointer.y - mousePointTo.y * newScale,
+        };
+      });
     });
   };
 
@@ -1994,138 +2103,6 @@ export default function AnnotationCanvas({
     return null;
   };
 
-  /** Destination-out lines that carve erase strokes out of a vector shape. */
-  const renderErased = (erased?: EraseStroke[]) =>
-    (erased ?? []).map((st, i) => (
-      <Line
-        key={`erase-${i}`}
-        points={st.points}
-        stroke="black"
-        strokeWidth={st.radius * 2}
-        lineCap="round"
-        lineJoin="round"
-        globalCompositeOperation="destination-out"
-        perfectDrawEnabled={false}
-        listening={false}
-      />
-    ));
-
-  /** Render a polygon that may have holes via an even-odd fill (outer path minus
-   *  hole subpaths). Even-odd — not destination-out — so a hole reveals whatever
-   *  is *beneath* it (e.g. another class) instead of erasing it off the layer. */
-  const renderPolygonWithHoles = (points: number[], holes: number[][], color: string, strokeW: number) => (
-    <KonvaShape
-      stroke={color}
-      strokeWidth={strokeW}
-      // width/height give the shape a real self-rect so the CACHED committed layer
-      // sizes its cache canvas to include it (otherwise it's clipped away when the
-      // only other in-bounds shape — the enclosed class — is hidden).
-      width={meta?.width ?? 0}
-      height={meta?.height ?? 0}
-      perfectDrawEnabled={false}
-      listening={false}
-      sceneFunc={(ctx: Konva.Context, node: Konva.Shape) => {
-        buildRingsPath(ctx, [points, ...holes]);
-        const raw = (ctx as unknown as { _context: CanvasRenderingContext2D })._context;
-        raw.fillStyle = color;
-        raw.fill('evenodd');
-        ctx.strokeShape(node);
-      }}
-    />
-  );
-
-  /** Render a committed shape (any kind) on the cached display layer, with the
-   *  active brush instance recolored to the active class and erase strokes carved out. */
-  const renderShape = (shape: Shape) => {
-    const color =
-      shape.id === activeBrushShapeId && activeClassId !== null
-        ? colorForClass(activeClassId)
-        : colorForClass(shape.classId);
-    const isSelected = selectedShapeIds.includes(shape.id);
-    const strokeW = (isSelected ? 2 : 1) / transform.scaleX;
-
-    if (shape.kind === 'polygon') {
-      return (
-        <Group key={shape.id}>
-          {shape.holes?.length
-            ? renderPolygonWithHoles(shape.points, shape.holes, color, strokeW)
-            : (
-              <Line
-                points={shape.points}
-                closed
-                fill={color}
-                stroke={color}
-                strokeWidth={strokeW}
-                perfectDrawEnabled={false}
-              />
-            )}
-          {renderErased(shape.erased)}
-        </Group>
-      );
-    }
-    if (shape.kind === 'rectangle') {
-      return (
-        <Group key={shape.id}>
-          <Rect
-            x={shape.x} y={shape.y} width={shape.w} height={shape.h}
-            fill={color}
-            stroke={color} strokeWidth={strokeW}
-            perfectDrawEnabled={false}
-          />
-          {renderErased(shape.erased)}
-        </Group>
-      );
-    }
-    if (shape.kind === 'ellipse') {
-      return (
-        <Group key={shape.id}>
-          <Ellipse
-            x={shape.cx} y={shape.cy} radiusX={shape.rx} radiusY={shape.ry}
-            fill={color}
-            stroke={color} strokeWidth={strokeW}
-            perfectDrawEnabled={false}
-          />
-          {renderErased(shape.erased)}
-        </Group>
-      );
-    }
-    if (shape.kind === 'brush') {
-      return (
-        <Group key={shape.id}>
-          {shape.strokes.map((stroke, i) => {
-            if (stroke.mode === 'erase') {
-              return (
-                <Line
-                  key={i}
-                  points={stroke.points}
-                  stroke="black"
-                  strokeWidth={stroke.radius * 2}
-                  lineCap="round"
-                  lineJoin="round"
-                  globalCompositeOperation="destination-out"
-                  perfectDrawEnabled={false}
-                  listening={false}
-                />
-              );
-            }
-            return (
-              <Line
-                key={i}
-                points={stroke.points}
-                stroke={color}
-                strokeWidth={stroke.radius * 2}
-                lineCap="round"
-                lineJoin="round"
-                perfectDrawEnabled={false}
-                listening={false}
-              />
-            );
-          })}
-        </Group>
-      );
-    }
-    return null;
-  };
 
   // ----- Interactive selection / move / vertex-edit (select tool only) -----
 
@@ -2147,7 +2124,7 @@ export default function AnnotationCanvas({
     const pos = getPointerImagePos();
     if (pos && activeClassId !== null) {
       const isVisible = (s: Shape) =>
-        classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+        isShapeVisible(s);
       let topActive: string | null = null;
       for (const s of storeShapes) {
         // Later in draw order = rendered on top → keep the last (topmost) match.
@@ -2440,6 +2417,23 @@ export default function AnnotationCanvas({
   };
 
   const showInteractive = tool === 'select' && !isPreviewing;
+
+  // Visible shapes with the single-selected one moved LAST, so its vertex handles
+  // (incl. amber hole vertices) sit above any shape enclosed in its holes. Memoized
+  // and built with a single partition rather than a comparator sort — this ran on
+  // every render of the select tool, and a sort whose only job is to hoist one
+  // element doesn't need to compare every pair.
+  const interactiveShapes = useMemo(() => {
+    if (!showInteractive) return EMPTY_SHAPES;
+    const rest: Shape[] = [];
+    let selected: Shape | null = null;
+    for (const s of storeShapes) {
+      if (!isShapeVisible(s)) continue;
+      if (s.id === selectedId) selected = s;
+      else rest.push(s);
+    }
+    return selected ? [...rest, selected] : rest;
+  }, [showInteractive, storeShapes, isShapeVisible, selectedId]);
   // The single selected shape (resize/transform only applies to one).
   const selectedShape = sourceKey && selectedId
     ? storeShapes.find((s) => s.id === selectedId) ?? null
@@ -2579,7 +2573,7 @@ export default function AnnotationCanvas({
       if (mod && k === 'a') {
         // Select all shapes on the slice, scoped to the active class or all classes.
         e.preventDefault();
-        const visible = (s: Shape) => classes.find((c) => c.classId === s.classId)?.isVisible !== false;
+        const visible = isShapeVisible;
         const ids = storeShapes
           .filter((s) => (selectScope === 'all' || s.classId === activeClassId) && visible(s))
           .map((s) => s.id);
@@ -2658,22 +2652,27 @@ export default function AnnotationCanvas({
 
         {/* Layer 1: committed shapes — cached + opacity applied once at the
             layer so overlapping same-class shapes render a uniform class color.
-            Clipped to the image frame so strokes never render past the edges. */}
-        <Layer ref={shapesLayerRef} listening={false} opacity={fillOpacity} {...imageClip}>
-          {displayShapes
-            .filter((s) => renderClasses.find((c) => c.classId === s.classId)?.isVisible !== false)
-            .map(renderShape)}
-        </Layer>
+            Clipped to the image frame so strokes never render past the edges.
+            Memoized (see ShapesLayer) so display-slider ticks don't reconcile it. */}
+        {meta && (
+          <ShapesLayer
+            layerRef={shapesLayerRef}
+            shapes={displayShapes}
+            classMap={renderClassMap}
+            fillOpacity={fillOpacity}
+            scaleX={transform.scaleX}
+            selectedShapeIds={selectedShapeIds}
+            activeBrushShapeId={activeBrushShapeId}
+            activeClassId={activeClassId}
+            imageWidth={meta.width}
+            imageHeight={meta.height}
+          />
+        )}
 
         {/* Interactive layer: hit targets for select/move/edit (select tool only). */}
         {showInteractive && (
           <Layer>
-            {storeShapes
-              .filter((s) => classes.find((c) => c.classId === s.classId)?.isVisible !== false)
-              // Render the single-selected shape LAST so its vertex handles (incl.
-              // amber hole vertices) sit above any shape enclosed in its holes.
-              .sort((a, b) => (a.id === selectedId ? 1 : 0) - (b.id === selectedId ? 1 : 0))
-              .map(renderInteractive)}
+            {interactiveShapes.map(renderInteractive)}
             <Transformer
               ref={transformerRef}
               rotateEnabled={false}
