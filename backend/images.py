@@ -184,8 +184,26 @@ def render_slice(
         return np.clip(rgb, 0, 255).astype(np.uint8)
 
     data = normalize_scalar_unit(arr, opts, global_range)
+    return apply_colormap(data, opts.get("cmap", "gray"))
 
-    cmap = opts.get("cmap", "gray")
+
+def apply_colormap(unit: np.ndarray, cmap: str = "gray") -> np.ndarray:
+    """Map an already-normalized ``[0, 1]`` array to uint8 RGB.
+
+    Split out of :func:`render_slice` so callers that produce unit-scale data
+    by some other route can colour it identically. The learned denoiser is one:
+    it consumes the display-mapped grayscale that ``normalize_scalar_unit``
+    already produced and returns a denoised version of it, so re-normalizing
+    its output would apply the mapping twice and change the contrast relative
+    to the un-denoised view.
+
+    Args:
+        unit: 2-D array whose values are already in ``[0, 1]``.
+        cmap: ``"gray"`` or ``"viridis"``; anything unrecognised renders gray.
+
+    Returns:
+        uint8 RGB array of shape ``(H, W, 3)``.
+    """
     if cmap == "viridis":
         try:
             import matplotlib
@@ -200,15 +218,11 @@ def render_slice(
             # slice and the 3-D volume it should match disagree by up to 1
             # LSB at every pixel — exactly the drift normalize_scalar_unit
             # was split out to prevent.
-            rgb = (viridis(data)[:, :, :3] * 255).round().astype(np.uint8)
+            return (viridis(unit)[:, :, :3] * 255).round().astype(np.uint8)
         except Exception:
-            gray = (data * 255).round().astype(np.uint8)
-            rgb = np.stack([gray, gray, gray], axis=-1)
-    else:
-        gray = (data * 255).round().astype(np.uint8)
-        rgb = np.stack([gray, gray, gray], axis=-1)
-
-    return rgb
+            pass
+    gray = (unit * 255).round().astype(np.uint8)
+    return np.stack([gray, gray, gray], axis=-1)
 
 
 def encode_png(rgb: np.ndarray) -> bytes:

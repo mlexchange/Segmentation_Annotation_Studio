@@ -12,6 +12,7 @@ import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
 import { useSourceTaxonomyStore } from '@/stores/sourceTaxonomyStore';
+import { useDenoiseStore } from '@/stores/denoiseStore';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { useTrainCapability } from '@/hooks/useTrainCapability';
 import { useTrainRuns } from '@/hooks/useTrainRuns';
@@ -20,6 +21,8 @@ import { useDraftSync } from '@/hooks/useDraftSync';
 import { useImageSlice, useLoadedSliceImage } from '@/hooks/useImageSlice';
 import { gatherTrainingSources, listAnnotatedSourceKeys } from '@/lib/gatherTrainingSources';
 import { buildModelConfig, trainConfigSignature, validateTrainConfig } from '@/lib/trainModelConfig';
+import { trainDenoisePayload } from '@/lib/trainDenoiseOption';
+import { isSegmentationRun } from '@/lib/runCompatibility';
 import { remapPredictedShapes, type RunClass } from '@/lib/importPredictions';
 import type { Shape } from '@/stores/annotationStore';
 import CapabilityBanner from '@/components/train/CapabilityBanner';
@@ -28,6 +31,7 @@ import TrainingDataPanel from '@/components/train/TrainingDataPanel';
 import HyperparamsPanel, { type HyperparamsState } from '@/components/train/HyperparamsPanel';
 import JobProgressBar from '@/components/train/JobProgressBar';
 import RunsPanel from '@/components/train/RunsPanel';
+import TrainDenoiseToggle from '@/components/train/TrainDenoiseToggle';
 import InferencePanel from '@/components/train/InferencePanel';
 import type { DinoCheckpoint } from '@/hooks/useTrainCapability';
 
@@ -48,8 +52,17 @@ export default function TrainPage() {
   const { classes, setClasses } = useClassStore();
   const classesBySource = useSourceTaxonomyStore((s) => s.classesBySource);
 
+  // The Annotate tab's denoise setting — only ever read here, and only when
+  // "Train on denoised input" is ticked below.
+  const denoise = useDenoiseStore((s) => s.denoise);
+
   const { capability } = useTrainCapability();
-  const { runs, invalidate: refreshRuns, deleteRun } = useTrainRuns();
+  const { runs: allRuns, invalidate: refreshRuns, deleteRun } = useTrainRuns();
+  // This tab's Runs/Inference card is segmentation-only (it imports predicted
+  // SHAPES) — a saved denoiser run has no class list to remap predictions
+  // against, so it's excluded here the same way `/api/train/runs`'s mixed
+  // listing gets filtered everywhere else it's consumed.
+  const runs = useMemo(() => allRuns.filter(isSegmentationRun), [allRuns]);
   // persistKey: survives switching to another tab and back mid-job — see
   // useExportJob's docstring. Fixed keys (not scoped to a sample) are correct
   // here: once submitted, a job is already bound to its own run_id server-side,
@@ -66,6 +79,9 @@ export default function TrainPage() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [hyperparams, setHyperparams] = useState<HyperparamsState>(DEFAULT_HYPERPARAMS);
   const [runName, setRunName] = useState('');
+  // Off by default: this one changes what the model LEARNS, not just what's on
+  // screen, so it has to be asked for explicitly.
+  const [trainOnDenoised, setTrainOnDenoised] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
 
@@ -151,6 +167,9 @@ export default function TrainPage() {
       classes: gathered.classes,
       model,
       run_name: runName.trim() || null,
+      // Adds nothing at all when the checkbox is off, so an un-denoised run is
+      // byte-identical to what this page sent before the option existed.
+      ...trainDenoisePayload(trainOnDenoised, denoise),
     });
   };
 
@@ -293,6 +312,13 @@ export default function TrainPage() {
           estimatingBatch={probeJob.status === 'running'}
           batchEstimateNote={batchEstimateNote}
           estimateDisabledReason={estimateDisabledReason}
+        />
+
+        <TrainDenoiseToggle
+          checked={trainOnDenoised}
+          onChange={setTrainOnDenoised}
+          disabled={trainJob.status === 'running'}
+          variant="dark"
         />
 
         {dataError && <p className="text-sm text-red-400">{dataError}</p>}

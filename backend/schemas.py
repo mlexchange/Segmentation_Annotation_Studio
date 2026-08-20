@@ -549,16 +549,22 @@ class ImageMeta(BaseModel):
 # ---------------------------------------------------------------------------
 # Model fine-tuning / inference (Train tab)
 #
-# Two model families share one training/inference pipeline (data prep, job
+# Three model families share one training/inference pipeline (data prep, job
 # registry, mask<->polygon vectorization, Tiled write-back):
-#   * "dinov3_lora"  — LoRA fine-tune of a pretrained DINOv3 ViT backbone
-#                      (backend/dino_runtime.py, backend/dino_train.py).
-#   * "dlsia_tunet"  — dlsia's tunable U-Net trained from scratch, no
-#                      pretrained checkpoint (backend/dlsia_runtime.py).
+#   * "dinov3_lora"    — LoRA fine-tune of a pretrained DINOv3 ViT backbone
+#                        (backend/dino_runtime.py, backend/dino_train.py).
+#   * "dlsia_tunet"    — dlsia's tunable U-Net trained from scratch, no
+#                        pretrained checkpoint (backend/dlsia_runtime.py).
+#   * "dlsia_denoiser" — the same dlsia TUNet architecture trained
+#                        self-supervised (Noise2Noise/Noise2Void) as a
+#                        single-channel regression denoiser instead of a
+#                        multi-class segmenter (backend/denoise_runtime.py,
+#                        backend/denoise_train.py). Selected via
+#                        ``TrainRequest.task == "denoising"``.
 # ---------------------------------------------------------------------------
 
 DinoArch = Literal["vits16", "vits16plus", "vitb16", "vitl16", "vith16plus", "vit7b16"]
-ModelFamily = Literal["dinov3_lora", "dlsia_tunet"]
+ModelFamily = Literal["dinov3_lora", "dlsia_tunet", "dlsia_denoiser"]
 
 
 def _validate_safe_filename_component(value: str, *, field_name: str) -> str:
@@ -693,8 +699,86 @@ class DlsiaTunetConfig(StrictModel):
     hyperparams: TunetHyperParams = Field(default_factory=TunetHyperParams)
 
 
+class DlsiaDenoiserConfig(StrictModel):
+    """Model-family config: a single-channel image denoiser trained
+    self-supervised, instead of a multi-class segmenter.
+
+    Two architectures share this family. Keeping them under one
+    ``model_family`` is deliberate: the frontend partitions runs with
+    ``isSegmentationRun == !isDenoiserRun`` (``lib/runCompatibility.ts``), so a
+    *new* family value would be silently treated as segmentation and offered in
+    the fine-tune / apply / inference pickers, which key off a class list a
+    denoiser does not have. An ``architecture`` discriminator inside the family
+    avoids that entirely.
+
+    :class:`TunetHyperParams` is reused verbatim rather than defining a parallel
+    hyperparameter class — ``depth``/``base_channels`` mean downsampling levels
+    and first-conv width for both architectures. Note it is the SAME class
+    object the segmentation family uses, so architecture-specific knobs
+    (``ae_compression``) live here on the config, not there.
+
+    Attributes:
+        model_family: Discriminator literal.
+        architecture: Which network to build — ``"tunet"`` (dlsia TUNet with
+            ``in_channels=1, out_channels=1``; see :mod:`denoise_runtime`) or
+            ``"cnn_ae"`` (a plain convolutional autoencoder with an explicit
+            latent bottleneck and NO skip connections; see
+            :mod:`autoencoder_runtime`). Defaults to ``"tunet"`` so runs saved
+            before this field existed keep their meaning.
+        hyperparams: Training hyperparameters (reuses the segmentation
+            family's TUNet knobs — depth/base_channels/growth_rate/etc.).
+        ae_compression: How much the ``"cnn_ae"`` bottleneck compresses, as a
+            ratio of input values to latent values. Higher removes more noise
+            but also discards more real detail. Only meaningful for
+            ``"cnn_ae"``.
+        training_scheme: Self-supervised training objective — ``"n2n"``
+            (Noise2Noise: paired noisy/noisy training), ``"n2v"``
+            (Noise2Void: blind-spot training from single noisy images), or
+            ``"ae"`` (pure self-reconstruction: target IS the input, and the
+            bottleneck is what forces noise out).
+
+            ``"ae"`` is valid ONLY with ``architecture="cnn_ae"``, enforced
+            below. On a skip-connected network like TUNet, training on
+            ``target == input`` makes ``f(x) = x`` trivially learnable: it
+            converges to copying the input, removes no noise whatsoever, and
+            still reports a falling loss. Without skips, the bottleneck cannot
+            pass the input through unchanged, so reconstruction becomes a real
+            denoising objective — noise is precisely the part that will not fit
+            through. That pairing is a correctness constraint, not a
+            convenience.
+    """
+
+    model_family: Literal["dlsia_denoiser"] = "dlsia_denoiser"
+    architecture: Literal["tunet", "cnn_ae"] = "tunet"
+    hyperparams: TunetHyperParams = Field(default_factory=TunetHyperParams)
+    training_scheme: Literal["n2n", "n2v", "ae"]
+    ae_compression: Annotated[int, Field(ge=4, le=64)] = 16
+
+    @model_validator(mode="after")
+    def _check_scheme_matches_architecture(self) -> "DlsiaDenoiserConfig":
+        """Keep scheme and architecture to the combinations that make sense.
+
+        ``ae`` + ``tunet`` is the identity-collapse footgun described above and
+        must be impossible to request. The reverse (``cnn_ae`` with a masking or
+        paired scheme) is not unsound in principle, just untested here, so it is
+        refused rather than silently shipped.
+        """
+        if self.training_scheme == "ae" and self.architecture != "cnn_ae":
+            raise ValueError(
+                "training_scheme='ae' (pure self-reconstruction) requires "
+                "architecture='cnn_ae'. On a skip-connected network it would just learn to "
+                "copy its input and remove no noise."
+            )
+        if self.architecture == "cnn_ae" and self.training_scheme != "ae":
+            raise ValueError(
+                "architecture='cnn_ae' is only supported with training_scheme='ae'; "
+                f"got {self.training_scheme!r}."
+            )
+        return self
+
+
 ModelConfig = Annotated[
-    Union[DinoV3LoraConfig, DlsiaTunetConfig],
+    Union[DinoV3LoraConfig, DlsiaTunetConfig, DlsiaDenoiserConfig],
     Field(discriminator="model_family"),
 ]
 
@@ -719,12 +803,26 @@ class BatchProbeRequest(StrictModel):
 
 
 class TrainRequest(StrictModel):
-    """Request body to start a fine-tuning job for either model family.
+    """Request body to start a fine-tuning job for any model family.
 
     Attributes:
+        task: What the trained model is for — ``"segmentation"`` (the
+            original behaviour, requires at least one class) or
+            ``"denoising"`` (a self-supervised Noise2Noise/Noise2Void
+            denoiser, which has no class taxonomy at all). Defaults to
+            ``"segmentation"`` so every pre-existing request body (which
+            never sent this field) keeps behaving exactly as before.
         sources: Annotated samples to train on (each with its own slices/splits).
         classes: Annotation classes/taxonomy shared across every source.
+            Required (at least one) when ``task == "segmentation"``; may be
+            empty when ``task == "denoising"``, since a denoiser has nothing
+            to classify.
         render: Render options used to rasterise training images.
+        denoise: Optional denoising applied to the model's INPUT pixels. Recorded
+            on the run and reapplied automatically at inference, so train and
+            predict can never disagree — see :class:`DenoiseTrainOpts`. Ignored
+            when ``task == "denoising"``: a denoiser learns to remove noise, so
+            pre-cleaning its input would defeat the point.
         auto_split: Auto-split configuration for slices without an explicit split.
         model: Model-family configuration (discriminated on ``model_family``).
         run_name: Optional human-readable label for the resulting run.
@@ -737,9 +835,11 @@ class TrainRequest(StrictModel):
             always a NEW run; the parent is never modified.
     """
 
+    task: Literal["segmentation", "denoising"] = "segmentation"
     sources: Annotated[list[ExportSourceItem], Field(min_length=1, max_length=1_000)]
-    classes: Annotated[list[AnnotationClass], Field(min_length=1, max_length=MAX_CLASSES_PER_DOCUMENT)]
+    classes: Annotated[list[AnnotationClass], Field(max_length=MAX_CLASSES_PER_DOCUMENT)]
     render: RenderOpts = Field(default_factory=RenderOpts)
+    denoise: DenoiseTrainOpts | None = None
     auto_split: dict[str, Any] = Field(
         default_factory=lambda: {"ratios": [0.8, 0.1, 0.1], "seed": 1234}
     )
@@ -774,7 +874,15 @@ class TrainRequest(StrictModel):
         255 (not the export path's usual per-format check) because the label
         map trained against is always 0-indexed classes with 255 reserved as
         the ignore index — see coco_export.lightly_classes_map / build_export_plan.
+
+        ``classes`` used to carry a hard ``Field(min_length=1)`` — fine while
+        every trained model was a classifier, but a self-supervised denoiser
+        has no classes at all. That unconditional constraint is replaced by
+        this task-aware check: still required (and still validated/capped)
+        for ``"segmentation"``, but allowed empty for ``"denoising"``.
         """
+        if self.task == "segmentation" and len(self.classes) < 1:
+            raise ValueError("Segmentation training requires at least one class")
         shape_maps = [item.slices for item in self.sources]
         _validate_taxonomy(self.classes, shape_maps)
         if len(self.classes) > 255:
@@ -820,6 +928,54 @@ class InferRequest(StrictModel):
         if len(value) != len(set(value)):
             raise ValueError("slice_indices must be unique")
         return value
+
+
+class DenoiseTrainOpts(StrictModel):
+    """Denoising applied to a model's INPUT pixels, at training and inference alike.
+
+    Distinct from the Annotate tab's denoise preview, which is display-only and
+    never reaches a model. When this is set on a training request it is recorded
+    on the saved run, and inference reads it back off the run rather than off the
+    request — the same rule ``tiling`` already follows, and for the same reason:
+    a model must see the same pixel distribution it was trained on. Letting the
+    two be chosen independently would produce a silent distribution shift with
+    no error, just quietly worse predictions.
+
+    Attributes:
+        method: A ``denoise.ALL_METHODS`` entry other than ``"none"``/``"model"``
+            (a learned denoiser as a preprocessor for another model is not
+            supported — it would need its own run and GPU pass per slice).
+        strength: 0..1, mapped onto the method's native parameter.
+    """
+
+    method: Annotated[str, Field(min_length=1, max_length=64)]
+    strength: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)] = 0.5
+
+
+class DenoiseBakeRequest(StrictModel):
+    """Request body to denoise a whole volume into a new Tiled dataset.
+
+    Attributes:
+        source: Tiled path of the volume to denoise.
+        server_uri: Tiled server URI.
+        method: A ``denoise.ALL_METHODS`` entry other than ``"none"``.
+        strength: 0..1, mapped onto the method's native parameter.
+        target_path: Destination Tiled path; defaults to
+            ``<source>_denoised`` (a sibling, so it lands next to its source in
+            Browse). Must sit beneath the configured ingest root.
+        description: Optional comma-separated tags, treated exactly as ingest
+            treats them — searchable in Browse and pre-created as annotation
+            classes.
+    """
+
+    source: Annotated[str, Field(min_length=1, max_length=4_096)]
+    server_uri: Annotated[str, Field(max_length=2_048)] | None = None
+    method: Annotated[str, Field(min_length=1, max_length=64)]
+    strength: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)] = 0.5
+    target_path: Annotated[str, Field(max_length=4_096)] | None = None
+    description: Annotated[str, Field(max_length=2_048)] = ""
+    run_id: Annotated[str, Field(max_length=256)] | None = None
+    """Saved denoiser run to apply when ``method == "model"``; ignored otherwise."""
 
 
 class MasksFromTiledRequest(StrictModel):

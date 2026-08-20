@@ -284,7 +284,14 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
       setChecking(true);
       try {
         const pre = await requestPreflight(target, supported.map((f) => f.name));
-        if (pre.conflicts.length > 0) {
+        // Ask before ADDING to a dataset that already has slices, not just before
+        // OVERWRITING one. Filename collisions aren't the only destructive case:
+        // a second batch with different filenames produces zero conflicts, so it
+        // used to silently merge into the existing sample — turning "upload my
+        // next dataset" into "grow the previous one", and (because slice order
+        // follows the children's lexical key order) potentially renumbering the
+        // slices that existing annotations point at.
+        if (pre.conflicts.length > 0 || (pre.container_exists && pre.existing_count > 0)) {
           setPending({ files: supported, target, preflight: pre });
           return;
         }
@@ -638,6 +645,7 @@ export default function IngestDropzone({ serverUri, onBrowse, onAnnotate }: Inge
           samplePreview={pending.preflight.sample_preview}
           onReplace={() => doUpload(pending.files, pending.target, 'replace')}
           onSkip={() => doUpload(pending.files, pending.target, 'skip')}
+          onAddToExisting={() => doUpload(pending.files, pending.target, 'fail')}
           onNewDataset={() => {
             const next = pending.preflight.suggested_container_path;
             setContainerPath(next);

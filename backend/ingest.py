@@ -590,10 +590,17 @@ def run_ingest_job(
         # described as it's created below. n_images is always the total file
         # count — it used to hold the SAMPLE count once grouped, which is what
         # n_samples is for.
+        #
+        # When this upload lands in a container that ALREADY holds slices, the
+        # count has to include them: writing just this batch's length would
+        # relabel a 63-slice sample as however many files the newest upload had.
+        # Browse derives n_slices from the real children, so the two would
+        # disagree visibly.
+        already_here = 0 if named_samples else len(_child_keys(target))
         _describe(
             target,
             parts[-1] if parts else "",
-            len(filenames),
+            already_here + len(filenames),
             container_path,
             n_samples=len(named_samples) if named_samples else None,
         )
@@ -605,7 +612,11 @@ def run_ingest_job(
             if not sample:
                 continue
             node = _ensure_container(client, [*parts, sample])
-            _describe(node, sample, len(names), f"{container_path}/{sample}")
+            # Same reasoning as the target above — a re-upload into an existing
+            # sample must not undercount its slices.
+            _describe(
+                node, sample, len(_child_keys(node)) + len(names), f"{container_path}/{sample}"
+            )
             sample_nodes[sample] = node
 
         # Only needed to resolve collisions; a container we just created is empty.

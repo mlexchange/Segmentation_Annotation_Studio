@@ -124,12 +124,22 @@ def save_run(
     adapter_state: dict[str, Any],
     metrics: dict[str, Any],
     resumed_from: str | None = None,
+    task: str = "segmentation",
+    denoise: dict[str, Any] | None = None,
 ) -> None:
     """Persist one run's config + adapter/weights + metrics to ``runs_dir()``.
 
     ``resumed_from`` records the run this one continued fine-tuning from, so a
     chain of successive refinements stays traceable (a resume always writes a
     NEW run — the parent is never modified).
+
+    ``task`` distinguishes a segmentation run from a self-supervised denoiser
+    run (see ``schemas.TrainRequest.task``); defaults to ``"segmentation"``
+    for callers that predate the denoiser family.
+
+    ``denoise`` records any denoising applied to the model's INPUT pixels, so
+    inference can reapply exactly the same preprocessing off the run instead of
+    trusting the caller to remember it (see :func:`denoising_render_slice_fn`).
     """
     import torch  # noqa: PLC0415
 
@@ -138,9 +148,11 @@ def save_run(
     config = {
         "run_id": run_id,
         "model_family": model_family,
+        "task": task,
         "model_config": model_config,
         "classes": classes,
         "render": render,
+        "denoise": denoise,
         "image_size": image_size,
         "hyperparams": hyperparams,
         "source_keys": source_keys,
@@ -169,6 +181,9 @@ def list_runs() -> list[dict[str, Any]]:
             continue
         try:
             config = json.loads((d / "config.json").read_text())
+            # Runs saved before `task` existed have no such key on disk — treat
+            # that as "segmentation", the only thing this app trained before.
+            config.setdefault("task", "segmentation")
             metrics = json.loads((d / "metrics.json").read_text()) if (d / "metrics.json").exists() else {}
             results.append({**config, "metrics": metrics})
         except Exception as exc:  # noqa: BLE001 — one bad run dir must not break the list
@@ -187,15 +202,24 @@ def delete_run(run_id: str) -> None:
 
 
 def load_run_config(run_id: str) -> dict[str, Any]:
-    """Return the parsed ``config.json`` for *run_id*, or raise 404."""
+    """Return the parsed ``config.json`` for *run_id*, or raise 404.
+
+    ``task`` is a field added after this app already had saved runs on disk —
+    an absent key means the run predates the field, and every run trained
+    before it existed was a segmentation run, so that is the default filled
+    in here rather than leaving callers (e.g. ``check_resume_compatible``) to
+    each re-derive the same backward-compat fallback.
+    """
     d = run_dir(run_id)
     config_path = d / "config.json"
     if not config_path.exists():
         raise HTTPException(404, f"Unknown run: {run_id!r}")
     try:
-        return json.loads(config_path.read_text())
+        config = json.loads(config_path.read_text())
     except json.JSONDecodeError as exc:
         raise HTTPException(500, "Run config is corrupt") from exc
+    config.setdefault("task", "segmentation")
+    return config
 
 
 def load_adapter_state(run_id: str) -> dict[str, Any]:
@@ -214,12 +238,68 @@ def load_adapter_state(run_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def denoising_render_slice_fn(denoise: Any) -> Callable[..., np.ndarray]:
+    """A ``render_slice``-compatible callable that denoises the RAW slice first.
+
+    The single place model-input denoising is applied, used by BOTH training
+    (:func:`prepare_datasets`) and inference (``infer_jobs``). Keeping one
+    implementation is the point: a model must see the same pixel distribution at
+    predict time that it saw during training, and two copies of this would be
+    free to drift apart silently — the failure mode is not an error, just
+    quietly worse predictions.
+
+    Denoising runs on raw intensity units, before ``render_slice`` normalises,
+    matching where the Annotate preview applies it.
+
+    Args:
+        denoise: Anything with ``.method``/``.strength`` (a
+            :class:`schemas.DenoiseTrainOpts`) or the equivalent dict as
+            reloaded from a run's ``config.json``. Falsy, or a ``"none"``
+            method, yields plain ``images.render_slice``.
+    """
+    import images as images_mod  # noqa: PLC0415
+
+    method, strength = _denoise_params(denoise)
+    if method is None:
+        return images_mod.render_slice
+
+    import denoise as denoise_mod  # noqa: PLC0415
+
+    def _render(arr: np.ndarray, opts: dict[str, Any], global_range: Any = None) -> np.ndarray:
+        # Colour sources are left alone: the classical filters are 2-D
+        # grayscale, and render_slice early-returns for RGB anyway.
+        if arr.ndim == 2:
+            arr = denoise_mod.denoise_slice(arr, method, strength)
+        return images_mod.render_slice(arr, opts, global_range)
+
+    return _render
+
+
+def _denoise_params(denoise: Any) -> tuple[str | None, float]:
+    """Normalise a DenoiseTrainOpts / dict / None into ``(method, strength)``.
+
+    Returns ``(None, ...)`` when no denoising should be applied — including for
+    ``"model"``, which would need its own run and a GPU pass per slice and is
+    deliberately not supported as a preprocessor for another model.
+    """
+    if not denoise:
+        return None, 0.5
+    if hasattr(denoise, "method"):
+        method, strength = denoise.method, float(denoise.strength)
+    else:
+        method, strength = denoise.get("method"), float(denoise.get("strength", 0.5))
+    if not method or method in ("none", "model"):
+        return None, strength
+    return method, strength
+
+
 def prepare_datasets(
     sources: list[Any],
     classes: list[Any],
     render: Any,
     auto_split: dict[str, Any],
     progress_cb: Callable[[str], None] | None = None,
+    denoise: Any = None,
 ) -> dict[str, list[tuple[np.ndarray, np.ndarray]]]:
     """Render + rasterize every annotated source into in-memory train/val pairs.
 
@@ -255,7 +335,7 @@ def prepare_datasets(
         plan = build_export_plan(
             node,
             shim,
-            render_slice_fn=images_mod.render_slice,
+            render_slice_fn=denoising_render_slice_fn(denoise),
             array_shape_meta_fn=arrays_mod.array_shape_meta,
             read_slice_fn=arrays_mod.read_slice,
             sample_global_stats_fn=images_mod._sample_global_stats,
@@ -349,6 +429,45 @@ class BuiltFamily(NamedTuple):
     adapter_state_fn: Callable[[], dict[str, Any]]
 
 
+def denoiser_runtime_for(config: dict[str, Any]) -> "Any":
+    """The runtime module that can load *config*'s saved denoiser.
+
+    Both inference paths (the single-slice canvas preview in
+    ``annotation_server`` and the whole-volume bake in ``denoise_bake``) need
+    this, and both need the same backward-compatible default — hence one
+    implementation rather than two that could drift.
+
+    A run's ``model_config["architecture"]`` names the network. Runs saved
+    before that field existed have no such key and are dlsia TUNets by
+    definition, so an absent value MUST default to ``"tunet"`` or every existing
+    run on disk becomes unloadable.
+
+    Raises:
+        ValueError: the run names an architecture this build doesn't know (e.g.
+            a run produced by a newer version).
+    """
+    architecture = (config.get("model_config") or {}).get("architecture", "tunet")
+    if architecture == "cnn_ae":
+        import autoencoder_runtime  # noqa: PLC0415
+
+        return autoencoder_runtime
+    if architecture == "tunet":
+        import denoise_runtime  # noqa: PLC0415
+
+        return denoise_runtime
+    raise ValueError(f"Unknown denoiser architecture on this run: {architecture!r}")
+
+
+def denoiser_needs_dlsia(config: dict[str, Any]) -> bool:
+    """Whether *config*'s denoiser architecture requires the dlsia dependency.
+
+    Only the TUNet architecture does; the convolutional autoencoder is plain
+    torch. Lets the inference gates refuse for the right reason instead of
+    demanding dlsia for a network that never touches it.
+    """
+    return (config.get("model_config") or {}).get("architecture", "tunet") == "tunet"
+
+
 def build_family(
     model_cfg: "Any",
     n_classes: int,
@@ -372,7 +491,15 @@ def build_family(
     (built for inference) discards it. Optimizer/scheduler state is not saved
     and so is not restored — a resume gets a fresh AdamW and a cosine schedule
     starting again at ``lr``, which is the normal fine-tune-again behaviour.
+
+    Every recognized ``schemas.ModelConfig`` member has its own explicit
+    branch below; anything else raises :class:`ValueError` rather than being
+    silently treated as a dlsia TUNet — that used to be this function's
+    implicit ``else``, which would happily (and wrongly) build a segmentation
+    TUNet for a config type nobody had actually written a branch for yet.
     """
+    from schemas import DlsiaDenoiserConfig, DlsiaTunetConfig  # noqa: PLC0415 — avoid a hard import-time cycle
+
     hp = model_cfg.hyperparams
 
     if model_cfg.model_family == "dinov3_lora":
@@ -410,35 +537,119 @@ def build_family(
             },
         )
 
-    import dlsia_runtime as fam  # noqa: PLC0415
+    if isinstance(model_cfg, DlsiaTunetConfig):
+        import dlsia_runtime as fam  # noqa: PLC0415
 
-    if not dlsia_available():
-        raise RuntimeError("dlsia is not installed on this server")
-    if init_state is not None:
-        # load_model rebuilds the net from the saved topo_dict, so the resumed
-        # topology is the run's own — depth/base_channels/growth_rate/image_size
-        # from the request are deliberately NOT used here (they can't be: a
-        # different topology cannot load these weights). run_train_job forces
-        # them to match the saved run before getting here.
-        log_cb(f"Resuming dlsia TUNet from saved weights on {device}…")
-        model = fam.load_model(init_state, device)
-        topo = init_state.get("topo_dict", {})
-        snapshot = {
-            "depth": topo.get("depth", hp.depth),
-            "base_channels": topo.get("base_channels", hp.base_channels),
-            "growth_rate": topo.get("growth_rate", hp.growth_rate),
-        }
-    else:
-        log_cb(f"Building dlsia TUNet (depth={hp.depth}, base_channels={hp.base_channels}) on {device}…")
-        model = fam.build_model(n_classes, hp.image_size, hp.depth, hp.base_channels, hp.growth_rate, device)
-        snapshot = {"depth": hp.depth, "base_channels": hp.base_channels, "growth_rate": hp.growth_rate}
-    return BuiltFamily(
-        forward_fn=fam.make_forward_fn(model),
-        to_tensor_fn=fam.make_to_tensor_fn(),
-        trainable_params=list(model.parameters()),
-        set_train_mode=fam.make_set_train_mode_fn(model),
-        model_config_snapshot=snapshot,
-        adapter_state_fn=lambda: fam.network_dict(model),
+        if not dlsia_available():
+            raise RuntimeError("dlsia is not installed on this server")
+        if init_state is not None:
+            # load_model rebuilds the net from the saved topo_dict, so the resumed
+            # topology is the run's own — depth/base_channels/growth_rate/image_size
+            # from the request are deliberately NOT used here (they can't be: a
+            # different topology cannot load these weights). run_train_job forces
+            # them to match the saved run before getting here.
+            log_cb(f"Resuming dlsia TUNet from saved weights on {device}…")
+            model = fam.load_model(init_state, device)
+            topo = init_state.get("topo_dict", {})
+            snapshot = {
+                "depth": topo.get("depth", hp.depth),
+                "base_channels": topo.get("base_channels", hp.base_channels),
+                "growth_rate": topo.get("growth_rate", hp.growth_rate),
+            }
+        else:
+            log_cb(f"Building dlsia TUNet (depth={hp.depth}, base_channels={hp.base_channels}) on {device}…")
+            model = fam.build_model(n_classes, hp.image_size, hp.depth, hp.base_channels, hp.growth_rate, device)
+            snapshot = {"depth": hp.depth, "base_channels": hp.base_channels, "growth_rate": hp.growth_rate}
+        return BuiltFamily(
+            forward_fn=fam.make_forward_fn(model),
+            to_tensor_fn=fam.make_to_tensor_fn(),
+            trainable_params=list(model.parameters()),
+            set_train_mode=fam.make_set_train_mode_fn(model),
+            model_config_snapshot=snapshot,
+            adapter_state_fn=lambda: fam.network_dict(model),
+        )
+
+    if isinstance(model_cfg, DlsiaDenoiserConfig):
+        # Two architectures share this family; both expose the identical
+        # six-function runtime template, so everything below the module choice
+        # is common. See DlsiaDenoiserConfig for why they aren't separate
+        # model_family values.
+        if model_cfg.architecture == "cnn_ae":
+            import autoencoder_runtime as fam  # noqa: PLC0415
+
+            # No dlsia_available() gate here, unlike the TUNet branch below:
+            # this network is plain torch and needs no optional dependency.
+            if init_state is not None:
+                log_cb(f"Resuming autoencoder denoiser from saved weights on {device}…")
+                model = fam.load_model(init_state, device)
+                topo = init_state.get("topo_dict", {})
+                snapshot = {
+                    "architecture": "cnn_ae",
+                    "depth": topo.get("depth", hp.depth),
+                    "base_channels": topo.get("base_channels", hp.base_channels),
+                    "ae_compression": topo.get("compression", model_cfg.ae_compression),
+                    "latent_channels": topo.get("latent_channels"),
+                }
+            else:
+                latent = fam.latent_channels_for(hp.depth, model_cfg.ae_compression)
+                log_cb(
+                    f"Building autoencoder denoiser (depth={hp.depth}, "
+                    f"base_channels={hp.base_channels}, {model_cfg.ae_compression}x compression "
+                    f"-> {latent} latent channels) on {device}…"
+                )
+                model = fam.build_model(
+                    hp.image_size, hp.depth, hp.base_channels, model_cfg.ae_compression, device
+                )
+                snapshot = {
+                    "architecture": "cnn_ae",
+                    "depth": hp.depth,
+                    "base_channels": hp.base_channels,
+                    "ae_compression": model_cfg.ae_compression,
+                    "latent_channels": latent,
+                }
+        else:
+            import denoise_runtime as fam  # noqa: PLC0415
+
+            if not dlsia_available():
+                raise RuntimeError("dlsia is not installed on this server")
+            if init_state is not None:
+                # Same warm-start contract as the segmentation TUNet branch above:
+                # the saved topo_dict wins, the request's topology knobs don't.
+                log_cb(f"Resuming dlsia denoiser TUNet from saved weights on {device}…")
+                model = fam.load_model(init_state, device)
+                topo = init_state.get("topo_dict", {})
+                snapshot = {
+                    "architecture": "tunet",
+                    "depth": topo.get("depth", hp.depth),
+                    "base_channels": topo.get("base_channels", hp.base_channels),
+                    "growth_rate": topo.get("growth_rate", hp.growth_rate),
+                }
+            else:
+                log_cb(
+                    f"Building dlsia denoiser TUNet (depth={hp.depth}, base_channels={hp.base_channels}) "
+                    f"on {device}…"
+                )
+                # No n_classes: denoise_runtime.build_model fixes in/out channels to
+                # 1 (single-channel regression) — there is nothing to parameterize.
+                model = fam.build_model(hp.image_size, hp.depth, hp.base_channels, hp.growth_rate, device)
+                snapshot = {
+                    "architecture": "tunet",
+                    "depth": hp.depth,
+                    "base_channels": hp.base_channels,
+                    "growth_rate": hp.growth_rate,
+                }
+        return BuiltFamily(
+            forward_fn=fam.make_forward_fn(model),
+            to_tensor_fn=fam.make_to_tensor_fn(),
+            trainable_params=list(model.parameters()),
+            set_train_mode=fam.make_set_train_mode_fn(model),
+            model_config_snapshot=snapshot,
+            adapter_state_fn=lambda: fam.network_dict(model),
+        )
+
+    raise ValueError(
+        f"Unknown model family/config type for build_family: {type(model_cfg).__name__!r} "
+        f"(model_family={getattr(model_cfg, 'model_family', None)!r})"
     )
 
 
@@ -651,6 +862,9 @@ def capability() -> dict[str, Any]:
         "dinov3": {"available": False, "checkpoints": []},
         "dlsia": {"available": False},
         "tiling": {"available": False},
+        # Classical denoising is pure CPU (scipy/skimage) and never touches
+        # ML_LOCK, so it stays usable while a training job runs.
+        "denoise": {"available": False, "methods": []},
         "models_dir": str(models_dir()),
         "runs_dir": str(runs_dir()),
         "busy": ML_LOCK.locked(),
@@ -674,6 +888,14 @@ def capability() -> dict[str, Any]:
         import tiling  # noqa: PLC0415 — avoid a hard import-time cycle (tiling imports train_common)
 
         result["tiling"] = {"available": tiling.qlty_available()}
+
+        import denoise  # noqa: PLC0415 — cheap, but keep the probe self-contained
+
+        # `available: True` unconditionally: scipy/skimage are hard dependencies
+        # here (unlike torch/dlsia), so the classical filters always work. The
+        # per-method `available` flags carry the real gating — wavelet needs
+        # PyWavelets, which skimage imports lazily and which is not installed.
+        result["denoise"] = {"available": True, "methods": denoise.describe_methods()}
     except Exception as exc:  # noqa: BLE001 — a capability probe must never 500
         logger.warning("Train capability probe failed: %s", exc)
         result["error"] = str(exc)

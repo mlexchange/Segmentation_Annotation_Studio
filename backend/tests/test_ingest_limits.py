@@ -187,3 +187,68 @@ def test_ingest_target_accepts_safe_browse_child(monkeypatch) -> None:
         "project",
         "images",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Starlette's multipart file-count default
+# ---------------------------------------------------------------------------
+
+def _tiny_tiff() -> bytes:
+    import io
+
+    import numpy as np
+    import tifffile
+
+    buf = io.BytesIO()
+    tifffile.imwrite(buf, np.zeros((2, 2), dtype=np.uint16))
+    return buf.getvalue()
+
+
+def _upload(client, n_files: int, raw: bytes):
+    files = [("files", (f"img_{i:05d}.tif", raw, "image/tiff")) for i in range(n_files)]
+    return client.post(
+        "/api/ingest/upload",
+        data={"container_path": "browse/big", "grouping": "single"},
+        files=files,
+    )
+
+
+def test_more_than_1000_files_is_accepted(monkeypatch) -> None:
+    """Regression guard for a limit nobody chose. Starlette's Request.form()
+    defaults to max_files=1000 and rejects past it with "Too many files.
+    Maximum number of files is 1000." — which fires during FastAPI's own body
+    parsing, BEFORE the route's MAX_INGEST_FILES check, making our 5000 limit
+    unreachable. _LargeUploadRoute pre-parses with our quota instead.
+    """
+    from fastapi.testclient import TestClient
+
+    import annotation_server
+
+    monkeypatch.setattr(annotation_server.ingest_mod, "run_ingest_job", lambda *a, **k: None)
+    raw = _tiny_tiff()
+    client = TestClient(annotation_server.app)
+
+    response = _upload(client, 1200, raw)
+
+    assert response.status_code == 200, response.json()
+    assert response.json()["total"] == 1200
+
+
+def test_our_own_file_limit_is_reachable_and_reports_our_wording(monkeypatch) -> None:
+    """The other half: raising the ceiling must not remove it. Our limit has to
+    be the one that actually fires, with our message and a 413 (Starlette's was
+    a 400 phrased differently)."""
+    from fastapi.testclient import TestClient
+
+    import annotation_server
+
+    monkeypatch.setattr(annotation_server.ingest_mod, "run_ingest_job", lambda *a, **k: None)
+    monkeypatch.setattr(annotation_server, "MAX_INGEST_FILES", 50)
+    raw = _tiny_tiff()
+    client = TestClient(annotation_server.app)
+
+    assert _upload(client, 50, raw).status_code == 200
+
+    over = _upload(client, 51, raw)
+    assert over.status_code == 413
+    assert "max 50" in over.json()["detail"]

@@ -26,6 +26,9 @@ import MaskToolsPanel from '@/components/annotate/MaskToolsPanel';
 import MeasurementPanel from '@/components/annotate/MeasurementPanel';
 import ApplyModelPanel from '@/components/annotate/ApplyModelPanel';
 import LoadMasksPanel from '@/components/annotate/LoadMasksPanel';
+import DenoisePanel from '@/components/annotate/DenoisePanel';
+import DenoiseBakeModal, { type DenoiseBakeTarget } from '@/components/annotate/DenoiseBakeModal';
+import { useDenoiseStore } from '@/stores/denoiseStore';
 import AnnotationCanvas from '@/components/annotate/AnnotationCanvas';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import DownloadModal from '@/components/annotate/DownloadModal';
@@ -39,7 +42,7 @@ import { useSourceTaxonomyStore } from '@/stores/sourceTaxonomyStore';
 /** Renders the annotation workspace: tool sidebar, canvas, and save/version/export flows. */
 export default function AnnotatePage() {
   const navigate = useNavigate();
-  const { source, kind, serverUri, meta } = useDatasetStore();
+  const { source, kind, serverUri, meta, renderOpts } = useDatasetStore();
   const { removeShapes, addShapes, byImage, splitBySlice, negativeSlices } = useAnnotationStore();
   const { selectedShapeIds, setSelectedShapeId, fillOpacity, setFillOpacity } = useToolStore();
   const { classes, setClasses } = useClassStore();
@@ -75,6 +78,17 @@ export default function AnnotatePage() {
   // Display-only nonlinear preprocessors (adaptive CLAHE / Sharpen).
   const [clahe, setClahe] = useState(false);
   const [sharpen, setSharpen] = useState(false);
+  // Server-side denoise of the RAW slice (see DenoisePanel) — unlike the knobs
+  // above, this changes the fetched PNG rather than being baked client-side, so
+  // the wand/SAM see it too. Lives in a store rather than local state because
+  // the Train tab's "Train on denoised input" reads the same setting (see
+  // stores/denoiseStore); behaviour here is otherwise unchanged.
+  const denoise = useDenoiseStore((s) => s.denoise);
+  const setDenoise = useDenoiseStore((s) => s.setDenoise);
+  const resetDenoise = useDenoiseStore((s) => s.resetDenoise);
+  // What the bake modal should apply — set by whichever Denoise mode asked for
+  // it (a classical filter, or a trained run), null when the modal is closed.
+  const [bakeTarget, setBakeTarget] = useState<DenoiseBakeTarget | null>(null);
   const [showDownload, setShowDownload] = useState(false);
   const [showInsights, setShowInsights] = useState(false);
   // Region to zoom to + highlight on the canvas (from an Insights QA flag).
@@ -281,7 +295,7 @@ export default function AnnotatePage() {
             contrast={contrast}
             onBrightnessChange={setBrightness}
             onContrastChange={setContrast}
-            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); setClahe(false); setSharpen(false); }}
+            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); setClahe(false); setSharpen(false); resetDenoise(); }}
             histogramBins={histogramBins}
             levelsLo={levelsLo}
             levelsHi={levelsHi}
@@ -295,6 +309,18 @@ export default function AnnotatePage() {
             sharpen={sharpen}
             onClaheChange={setClahe}
             onSharpenChange={setSharpen}
+          />
+          <hr />
+          <DenoisePanel
+            source={source}
+            kind={kind}
+            serverUri={serverUri}
+            sliceIndex={currentSlice}
+            nSlices={meta?.nSlices ?? 1}
+            renderOpts={renderOpts}
+            denoise={denoise}
+            onDenoiseChange={setDenoise}
+            onBake={kind === 'tiled' ? setBakeTarget : undefined}
           />
           <hr />
           <SliceNavigator />
@@ -371,6 +397,7 @@ export default function AnnotatePage() {
             source={source}
             serverUri={serverUri}
             currentSlice={currentSlice}
+            nSlices={meta?.nSlices ?? 1}
             currentClasses={classes}
             needsSaveBeforeApply={needsSaveBeforeApply}
             onEnsureSaved={() => save({ notes: 'Auto-save before applying a model' })}
@@ -416,6 +443,7 @@ export default function AnnotatePage() {
             gamma={gamma}
             clahe={clahe}
             sharpen={sharpen}
+            denoise={denoise}
             onHistogram={setHistogramBins}
             activeClassId={activeClassId}
             activeBrushShapeId={activeBrushShapeId}
@@ -438,6 +466,16 @@ export default function AnnotatePage() {
       </div>
 
       {showDownload && <DownloadModal onClose={() => setShowDownload(false)} />}
+
+      {bakeTarget && source && (
+        <DenoiseBakeModal
+          source={source}
+          serverUri={serverUri}
+          target={bakeTarget}
+          nSlices={meta?.nSlices ?? 1}
+          onClose={() => setBakeTarget(null)}
+        />
+      )}
       {showInsights && (
         <InsightsModal
           sourceKey={sourceKey}

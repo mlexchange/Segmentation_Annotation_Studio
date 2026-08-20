@@ -25,7 +25,7 @@ import { useToolStore } from '@/stores/toolStore';
 import { useClassStore, type AnnotationClass } from '@/stores/classStore';
 import { toImage, normalizeRect, normalizeEllipse } from '@/lib/geometry';
 import { buildCostMap, dijkstra, tracePath, imageToGrid, simplifyPath, type CostMap } from '@/lib/livewire';
-import { useImageSlice, useLoadedSliceImage } from '@/hooks/useImageSlice';
+import { useImageSlice, useLoadedSliceImage, NO_DENOISE, type DenoiseOpts } from '@/hooks/useImageSlice';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type GrayField } from '@/lib/magicwand';
 import { useSam } from '@/hooks/useSam';
@@ -60,6 +60,10 @@ interface AnnotationCanvasProps {
    *  tools' baked view but NOT the exported pixels). */
   clahe?: boolean;
   sharpen?: boolean;
+  /** Server-side denoise applied to the RAW slice before normalization, so it
+   *  arrives already inside the fetched PNG — no client-side bake, and the
+   *  tool caches invalidate on their own because the slice URL changes. */
+  denoise?: DenoiseOpts;
   /** Emits the current slice's 256-bin luminance histogram when it loads. */
   onHistogram?: (bins: number[]) => void;
   activeClassId: number | null;
@@ -400,6 +404,7 @@ export default function AnnotationCanvas({
   gamma = 1,
   clahe = false,
   sharpen = false,
+  denoise = NO_DENOISE,
   onHistogram,
   activeClassId,
   activeBrushShapeId,
@@ -535,7 +540,7 @@ export default function AnnotationCanvas({
     if (clipBlockedTimer.current !== null) window.clearTimeout(clipBlockedTimer.current);
   }, []);
 
-  const sliceQuery = useImageSlice(source, kind, currentSlice, renderOpts, serverUri);
+  const sliceQuery = useImageSlice(source, kind, currentSlice, renderOpts, serverUri, denoise);
   const loadedSlice = useLoadedSliceImage(sliceQuery.data);
   const imageEl = loadedSlice.image;
   const loadedRequestKey = loadedSlice.requestKey;

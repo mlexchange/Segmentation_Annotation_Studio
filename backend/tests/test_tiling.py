@@ -16,6 +16,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("qlty")
 
 import tiling  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 from train_common import IGNORE_INDEX  # noqa: E402
 
 
@@ -370,3 +371,165 @@ def test_label_values_use_the_pipeline_convention() -> None:
     assert label.dtype == np.uint8
     assert set(np.unique(label)).issubset({0, 1, 2})
     assert (label == 2).all()  # bright red -> class index 1 -> label 2
+
+
+# ---------------------------------------------------------------------------
+# Denoising (regression) — shares `tiling._blend_tiled_forward` with the
+# segmentation path above; these tests exercise it through
+# `denoise_image_tiled`, which stops at the blended canvas (no softmax/argmax).
+# ---------------------------------------------------------------------------
+
+
+def _gradient_rgb(height: int, width: int) -> np.ndarray:
+    """A smooth synthetic image (2-D gradient): no texture of its own, so any
+    reconstruction error comes from the tiling/blending machinery rather than
+    from image content a filter would legitimately treat unevenly."""
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    plane = (yy / max(height - 1, 1) + xx / max(width - 1, 1)) / 2.0
+    return (np.stack([plane] * 3, axis=-1) * 255.0).astype(np.uint8)
+
+
+def test_denoise_image_tiled_matches_a_simple_transform_applied_whole() -> None:
+    """A pointwise transform (`batch * 0.5`) must reconstruct exactly, the same
+    way segmentation's per-pixel-rule test does above — except this is
+    `denoise_image_tiled` (a *regression* forward_fn), so the result is the
+    blended canvas itself with no softmax/argmax on top."""
+    window, height, width = 64, 150, 130
+    rgb = _gradient_rgb(height, width)
+
+    denoised = tiling.denoise_image_tiled(
+        rgb, forward_fn=lambda batch: batch * 0.5, to_tensor_fn=_identity_to_tensor,
+        window=window, device="cpu",
+    )
+
+    expected = (_identity_to_tensor(rgb) * 0.5).numpy()
+    assert denoised.shape == (3, height, width)  # forward_fn kept all 3 channels
+    np.testing.assert_allclose(denoised, expected, atol=1e-5)
+
+
+def test_denoise_image_tiled_squeezes_a_single_output_channel() -> None:
+    """A real denoiser emits 1 channel; the result should read like a plain
+    image (H, W), not a (1, H, W) array a caller has to know to squeeze."""
+    rgb = _gradient_rgb(80, 80)
+
+    denoised = tiling.denoise_image_tiled(
+        rgb, forward_fn=lambda batch: batch.mean(dim=1, keepdim=True) + 1.0,
+        to_tensor_fn=_identity_to_tensor, window=64, device="cpu",
+    )
+
+    assert denoised.shape == (80, 80)
+
+
+# How far into a window's own edge the synthetic "less context near the
+# border" inaccuracy below reaches, and how large it gets right at the edge.
+# Deliberately much bigger than the smooth gradient's own pixel-to-pixel
+# variation, so a real seam would be unmistakable rather than lost in noise.
+_EDGE_BIAS_RADIUS = 3
+_EDGE_BIAS_MAX = 3.0
+
+
+def _edge_biased_forward(batch: "torch.Tensor") -> "torch.Tensor":
+    """Stand-in 'model' with a deliberately large, explicit window-edge
+    inaccuracy: it adds a bias that ramps from :data:`_EDGE_BIAS_MAX` right at
+    its OWN edge down to 0 a few pixels in — modelling, in an easy-to-reason-
+    about way, a real conv net's reduced accuracy near its input patch's
+    border (less surrounding context). Run per-window (as the tiled path
+    does), that 'own edge' is the WINDOW boundary, not the true image edge —
+    exactly the inaccuracy qlty's border down-weighting + overlap exist to
+    hide. Collapses RGB to 1 channel, denoiser-shaped.
+    """
+    _, _, h, w = batch.shape
+    yy, xx = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
+    dist_to_edge = torch.minimum(torch.minimum(yy, h - 1 - yy), torch.minimum(xx, w - 1 - xx)).float()
+    bias = torch.clamp(_EDGE_BIAS_MAX - dist_to_edge, min=0.0)
+    return batch.mean(dim=1, keepdim=True) + bias
+
+
+def test_denoise_image_tiled_hides_window_edge_seams() -> None:
+    """The real regression test for "the feathering still works": with a
+    forward_fn whose accuracy genuinely depends on distance from ITS OWN
+    edge (see :func:`_edge_biased_forward`), reconstruct a smooth gradient and
+    compare against the SAME rule run once over the whole image — the ideal a
+    seamless tiling should approach, where the bias only ever appears at the
+    true image border.
+
+    Away from the true image border, error near a former window edge must not
+    be anywhere near the injected bias's magnitude — that is exactly what the
+    down-weighted border ring plus a neighbour's full-weight interior are for.
+    (Right at the true image edge the bias is intrinsic — even a non-tiled
+    forward pass sees it there — so that margin is excluded from both masks.)
+
+    Sanity-checked against a deliberately broken comparison (no window overlap
+    at all, i.e. no blending): that configuration leaves ~30-40% of the raw
+    bias at these same pixels, roughly 3-8x worse than the assertions below
+    allow, confirming this test would actually catch a broken border/overlap
+    invariant rather than passing vacuously.
+    """
+    window, height, width = 64, 200, 200
+    rgb = _gradient_rgb(height, width)
+
+    denoised = tiling.denoise_image_tiled(
+        rgb, forward_fn=_edge_biased_forward, to_tensor_fn=_identity_to_tensor,
+        window=window, device="cpu",
+    )
+
+    whole = _identity_to_tensor(rgb).unsqueeze(0)
+    expected = _edge_biased_forward(whole)[0, 0].numpy()
+    err = np.abs(denoised - expected)
+
+    # Classify every pixel by its distance to the nearest FORMER window edge
+    # (any tile origin or origin + window) on each axis.
+    step = tiling.step_for(window)
+    border = tiling.border_for(window)
+    y_origins = tiling.tile_origins(height, window, step)
+    x_origins = tiling.tile_origins(width, window, step)
+
+    def edge_distance(size: int, origins: list[int]) -> np.ndarray:
+        coords = np.arange(size)
+        edges = np.array(sorted({o for o in origins} | {o + window for o in origins}))
+        return np.min(np.abs(coords[:, None] - edges[None, :]), axis=1)
+
+    near_window_edge = (edge_distance(height, y_origins)[:, None] <= border) | (
+        edge_distance(width, x_origins)[None, :] <= border
+    )
+
+    margin = border + 2  # true image border, excluded from both masks
+    away_from_image_border = np.zeros((height, width), dtype=bool)
+    away_from_image_border[margin : height - margin, margin : width - margin] = True  # noqa: E203
+
+    boundary_mask = near_window_edge & away_from_image_border
+    interior_mask = (~near_window_edge) & away_from_image_border
+    assert boundary_mask.sum() > 0 and interior_mask.sum() > 0  # the test geometry actually covers both
+
+    boundary_err = float(err[boundary_mask].mean())
+    interior_err = float(err[interior_mask].mean())
+
+    # Interior pixels (far from every window's own edge) reconstruct exactly:
+    # nothing there ever saw the bias in the first place.
+    assert interior_err < 1e-3
+    # Boundary pixels DID see up to _EDGE_BIAS_MAX of injected bias from at
+    # least one contributing window, but blending must suppress the vast
+    # majority of it — see the module docstring's measured comparison above.
+    assert boundary_err < 0.15 * _EDGE_BIAS_MAX
+
+
+def test_denoise_image_tiled_crops_padding_for_a_small_image() -> None:
+    rgb = _gradient_rgb(30, 20)
+
+    denoised = tiling.denoise_image_tiled(
+        rgb, forward_fn=lambda batch: batch.mean(dim=1, keepdim=True),
+        to_tensor_fn=_identity_to_tensor, window=64, device="cpu",
+    )
+
+    assert denoised.shape == (30, 20)
+
+
+def test_denoise_image_tiled_cancellation_returns_none() -> None:
+    rgb = _gradient_rgb(200, 200)
+
+    denoised = tiling.denoise_image_tiled(
+        rgb, forward_fn=lambda batch: batch.mean(dim=1, keepdim=True),
+        to_tensor_fn=_identity_to_tensor, window=64, device="cpu", cancel_cb=lambda: True,
+    )
+
+    assert denoised is None

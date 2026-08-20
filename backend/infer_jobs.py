@@ -179,6 +179,19 @@ def run_infer_job(jid: str, request: InferRequest) -> None:
         # the run (not the request) keeps runs saved before tiling existed on the
         # original whole-slice-rescale path, where their weights are valid.
         tiled = bool((config.get("hyperparams") or {}).get("tiling", False))
+        # Input denoising is read off the RUN, never off the request — same rule
+        # as `tiled` above. The model was trained on these exact pixels, so
+        # letting a caller choose differently at predict time would be a silent
+        # distribution shift: no error, just quietly worse predictions. Runs
+        # saved before this field existed have no "denoise" key and get plain
+        # render_slice, which is exactly what they were trained with.
+        render_slice_fn = train_common.denoising_render_slice_fn(config.get("denoise"))
+        if config.get("denoise"):
+            export_jobs.log(
+                jid,
+                f"Applying the run's {config['denoise'].get('method')} input denoising "
+                "(recorded at training time).",
+            )
         if tiled:
             import tiling
 
@@ -200,7 +213,7 @@ def run_infer_job(jid: str, request: InferRequest) -> None:
             )
             forward_fn = fam.make_forward_fn(backbone, head)
             to_tensor_fn = fam.make_to_tensor_fn()
-        else:
+        elif config["model_family"] == "dlsia_tunet":
             import dlsia_runtime as fam
 
             if not train_common.dlsia_available():
@@ -209,6 +222,19 @@ def run_infer_job(jid: str, request: InferRequest) -> None:
             model.eval()
             forward_fn = fam.make_forward_fn(model)
             to_tensor_fn = fam.make_to_tensor_fn()
+        elif config["model_family"] == "dlsia_denoiser":
+            # A denoiser is a 1->1 regression model with no class channels, so
+            # the label-map path below (softmax/argmax over n_classes, then
+            # vectorising into shapes) is meaningless for it. Refuse clearly
+            # instead of loading it through dlsia_runtime, which is what the
+            # old catch-all `else` did — that produced a shape mismatch deep in
+            # the forward pass rather than an explanation.
+            raise RuntimeError(
+                "This is a denoiser run, not a segmentation model — it produces a denoised "
+                "image, not labelled regions. Apply it from the Annotate tab's Denoise panel."
+            )
+        else:
+            raise RuntimeError(f"Unsupported model family: {config['model_family']!r}")
 
         import torch
         import torch.nn.functional as F
@@ -237,7 +263,7 @@ def run_infer_job(jid: str, request: InferRequest) -> None:
                     break
 
                 arr = arrays_mod.read_slice(node, meta, slice_idx)
-                rgb = images_mod.render_slice(arr, render, global_range)
+                rgb = render_slice_fn(arr, render, global_range)
 
                 if tiled:
                     import tiling

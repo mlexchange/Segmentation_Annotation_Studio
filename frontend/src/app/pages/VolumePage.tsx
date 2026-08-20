@@ -16,14 +16,15 @@ import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { useVolume } from '@/hooks/useVolume';
-import { volumeDimsFor, type VolumeDims } from '@/lib/volume/volumeDims';
+import {
+  QUALITY_LADDER, effectiveMaxDim, volumeDimsFor, type VolumeDims,
+} from '@/lib/volume/volumeDims';
 import { buildLabelVolume } from '@/lib/volume/labelVolume';
 import type { VolumeMode } from '@/lib/volume/volumeRenderer';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import VolumeCanvas from '@/components/volume/VolumeCanvas';
 import ClassVisibilityList from '@/components/volume/ClassVisibilityList';
 
-const QUALITY_OPTIONS = [128, 192, 256, 320, 384] as const;
 const DEFAULT_MAX_DIM = 256;
 /** Debounces label-volume rebuilds after an annotation edit — a single
  *  keystroke-adjacent stroke can touch several slices in quick succession, and
@@ -150,7 +151,13 @@ export default function VolumePage() {
     );
   }
 
-  const expectedDims = volumeDimsFor(meta.nSlices, meta.height, meta.width, maxDim);
+  // The EFFECTIVE quality, not the requested one: the server clamps to the
+  // voxel budget with this same ladder, so the label volume rasterized here has
+  // to be built on the clamped grid too. Using the raw request would put the
+  // overlay on a finer grid than the raw data whenever a capped quality is
+  // chosen — an overlay silently offset from the data it describes.
+  const effectiveDim = effectiveMaxDim(meta.nSlices, meta.height, meta.width, maxDim);
+  const expectedDims = volumeDimsFor(meta.nSlices, meta.height, meta.width, effectiveDim);
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -260,12 +267,30 @@ export default function VolumePage() {
             onChange={(e) => setMaxDim(Number(e.target.value))}
             className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-sky-500"
           >
-            {QUALITY_OPTIONS.map((q) => (
-              <option key={q} value={q}>
-                {q}px{q === DEFAULT_MAX_DIM ? ' (default)' : ''}
-              </option>
-            ))}
+            {QUALITY_LADDER.map((q) => {
+              // Show the grid this quality actually yields for THIS volume. A
+              // thin stack reaches the top of the ladder cheaply, while a cubic
+              // one gets clamped to the voxel budget — without this the same
+              // "1024px" label would mean wildly different things per dataset,
+              // and a clamped choice would look like it did nothing.
+              const eff = effectiveMaxDim(meta.nSlices, meta.height, meta.width, q);
+              const d = volumeDimsFor(meta.nSlices, meta.height, meta.width, eff);
+              const mb = (d.nz * d.ny * d.nx) / (1024 * 1024);
+              return (
+                <option key={q} value={q}>
+                  {q}px{q === DEFAULT_MAX_DIM ? ' (default)' : ''}
+                  {` — ${d.nx}x${d.ny}x${d.nz}, ${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`}
+                  {eff !== q ? ' (capped)' : ''}
+                </option>
+              );
+            })}
           </select>
+          {effectiveDim !== maxDim && (
+            <p className="text-[11px] leading-snug text-amber-700">
+              Capped to {effectiveDim}px to stay within the volume memory budget — this stack is
+              too cubic for the full grid.
+            </p>
+          )}
         </div>
 
         <button

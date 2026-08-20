@@ -356,3 +356,52 @@ def test_openapi_image_volume_route_is_registered() -> None:
 
     assert "/api/image/volume" in schema["paths"]
     assert "get" in schema["paths"]["/api/image/volume"]
+
+
+# ---------------------------------------------------------------------------
+# Quality ladder + voxel budget (mirrored by frontend/src/lib/volume/volumeDims.ts)
+# ---------------------------------------------------------------------------
+
+def test_effective_max_dim_never_exceeds_the_voxel_budget() -> None:
+    """The budget is what makes raising the ladder to 1024 safe: a cubic source
+    would otherwise reach 1024**3 = 1 GB per volume, and the 3-D tab holds two."""
+    for n_slices, h, w in [(63, 3232, 3232), (2000, 2000, 2000), (5000, 512, 512), (1, 4096, 4096)]:
+        for requested in volumes.QUALITY_LADDER:
+            eff = volumes.effective_max_dim(n_slices, h, w, requested)
+            d = volumes.volume_dims(n_slices, h, w, eff)
+            assert d["nz"] * d["ny"] * d["nx"] <= volumes.MAX_VOLUME_VOXELS, (n_slices, h, w, requested)
+
+
+def test_effective_max_dim_never_exceeds_what_was_asked_for() -> None:
+    for requested in volumes.QUALITY_LADDER:
+        assert volumes.effective_max_dim(63, 3232, 3232, requested) <= requested
+
+
+def test_a_thin_stack_reaches_the_top_of_the_ladder() -> None:
+    """The point of budgeting voxels instead of capping each axis: 63 x 3232^2
+    at 1024 is only ~41 MB, so it should NOT be clamped."""
+    assert volumes.effective_max_dim(63, 3232, 3232, 1024) == 1024
+
+
+def test_a_cubic_source_is_clamped_below_the_top_of_the_ladder() -> None:
+    assert volumes.effective_max_dim(2000, 2000, 2000, 1024) < 1024
+
+
+def test_effective_max_dim_is_monotonic_in_the_request() -> None:
+    """Asking for more quality must never yield a coarser grid."""
+    seen = [volumes.effective_max_dim(2000, 2000, 2000, q) for q in volumes.QUALITY_LADDER]
+    assert seen == sorted(seen)
+
+
+def test_a_non_ladder_request_that_fits_passes_through_untouched() -> None:
+    """The route accepts any int in 32..1024, not just ladder entries, and this
+    must never round one UP — the frontend rasterizes its label volume onto
+    whatever grid comes back."""
+    for requested in (32, 100, 257, 511, 1000):
+        assert volumes.effective_max_dim(63, 3232, 3232, requested) == requested
+
+
+def test_clamping_only_ever_reduces() -> None:
+    for n_slices, h, w in [(63, 3232, 3232), (2000, 2000, 2000), (5000, 512, 512)]:
+        for requested in (32, 100, 256, 384, 700, 1024):
+            assert volumes.effective_max_dim(n_slices, h, w, requested) <= requested

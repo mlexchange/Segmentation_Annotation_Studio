@@ -4,6 +4,8 @@
  */
 import { Trash } from '@phosphor-icons/react';
 import type { TrainRun } from '@/hooks/useTrainRuns';
+import { useTrainCapability } from '@/hooks/useTrainCapability';
+import { denoiseMethodLabel } from '@/lib/trainDenoiseOption';
 
 interface RunsPanelProps {
   runs: TrainRun[];
@@ -15,9 +17,16 @@ interface RunsPanelProps {
 export const FAMILY_LABELS: Record<string, string> = {
   dinov3_lora: 'DINOv3 + LoRA',
   dlsia_tunet: 'dlsia TUNet',
+  // Architecture-agnostic: this family now covers both a dlsia TUNet and a
+  // plain convolutional autoencoder, and more than the two original schemes.
+  dlsia_denoiser: 'Denoiser (self-supervised)',
 };
 
 export default function RunsPanel({ runs, selectedRunId, onSelectRun, onDeleteRun }: RunsPanelProps) {
+  // Only to turn a stored method id ("tv") into its label ("Total variation");
+  // the query is shared and cached across the whole Train tab.
+  const { capability } = useTrainCapability();
+
   const handleDelete = (run: TrainRun) => {
     // Includes run_id, not just family + timestamp: two runs of the same family
     // trained close together can otherwise look identical in this dialog, with
@@ -52,6 +61,16 @@ export default function RunsPanel({ runs, selectedRunId, onSelectRun, onDeleteRu
                     <span className="text-xs text-slate-400">({String(run.model_config.arch)})</span>
                   )}
                   <span className="text-xs text-slate-500">{new Date(run.created_at).toLocaleString()}</span>
+                  {/* Two runs are otherwise indistinguishable here while
+                      expecting completely different input pixels. */}
+                  {run.denoise && (
+                    <span
+                      className="rounded bg-sky-900/50 px-1.5 py-px text-[10px] font-medium text-sky-300"
+                      title={`Trained on ${denoiseMethodLabel(run.denoise.method, capability.denoise.methods)}-denoised input at ${Math.round(run.denoise.strength * 100)}% strength. Inference reapplies this automatically.`}
+                    >
+                      denoised input · {denoiseMethodLabel(run.denoise.method, capability.denoise.methods)}
+                    </span>
+                  )}
                 </div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-slate-400">
                   {run.metrics.val_miou != null && <span>mIoU {run.metrics.val_miou.toFixed(3)}</span>}

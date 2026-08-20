@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canContinueFineTuning, fineTuningBlockedReason } from './runCompatibility';
+import { canContinueFineTuning, fineTuningBlockedReason, isDenoiserRun, isSegmentationRun } from './runCompatibility';
 import type { AnnotationClass } from '@/stores/classStore';
 
 const cls = (...labels: string[]): AnnotationClass[] =>
@@ -55,5 +55,25 @@ describe('fineTuningBlockedReason', () => {
   it('points the user at applying instead, which does work across taxonomies', () => {
     const reason = fineTuningBlockedReason(runCls('blob'), cls('leaf'));
     expect(reason).toMatch(/apply it instead/i);
+  });
+});
+
+describe('isDenoiserRun / isSegmentationRun', () => {
+  it('classifies a dlsia_denoiser run as a denoiser run, not a segmentation run', () => {
+    expect(isDenoiserRun({ model_family: 'dlsia_denoiser' })).toBe(true);
+    expect(isSegmentationRun({ model_family: 'dlsia_denoiser' })).toBe(false);
+  });
+
+  it('classifies both segmentation families as segmentation runs, not denoiser runs', () => {
+    for (const family of ['dinov3_lora', 'dlsia_tunet']) {
+      expect(isSegmentationRun({ model_family: family })).toBe(true);
+      expect(isDenoiserRun({ model_family: family })).toBe(false);
+    }
+  });
+
+  it('are exact complements of each other', () => {
+    for (const family of ['dinov3_lora', 'dlsia_tunet', 'dlsia_denoiser', 'something_unknown']) {
+      expect(isSegmentationRun({ model_family: family })).toBe(!isDenoiserRun({ model_family: family }));
+    }
   });
 });

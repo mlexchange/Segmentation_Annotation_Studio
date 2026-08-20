@@ -50,3 +50,28 @@ export function fineTuningBlockedReason(
   }
   return `This run's classes (${runLabels}) don't line up with this image's (${currentLabels}). Continuing would train against the wrong classes — apply it instead, or train a new run.`;
 }
+
+/**
+ * Segmentation vs. denoiser runs, for pickers that only make sense for one or
+ * the other. `/api/train/runs` lists every run this server has ever produced
+ * regardless of task — segmentation (DINOv3+LoRA, dlsia TUNet) and, once the
+ * backend's denoiser-training work lands, self-supervised denoiser runs
+ * (Noise2Noise/Noise2Void) all come back in the same flat list. Fine-tune,
+ * apply-to-image, and inference pickers only understand segmentation runs
+ * (they key off a class list a denoiser run doesn't have); the Learned
+ * Denoiser panel's run picker is the mirror image.
+ *
+ * Matches `schemas.DlsiaDenoiserConfig.model_family`, the discriminator literal
+ * on the `ModelConfig` union.
+ */
+export interface RunFamilyLike {
+  model_family: string;
+}
+
+export function isDenoiserRun(run: RunFamilyLike): boolean {
+  return run.model_family === 'dlsia_denoiser';
+}
+
+export function isSegmentationRun(run: RunFamilyLike): boolean {
+  return !isDenoiserRun(run);
+}

@@ -15,17 +15,33 @@
  *
  * Both actions save a version first, so any import is one Version History
  * restore away from being undone rather than only an in-session Ctrl+Z.
+ *
+ * "Fine-tune & apply" is a training entry point, so it carries the same
+ * opt-in "Train on denoised input" checkbox as the Train tab — without it, a
+ * fine-tune would silently drop the setting, because the server records
+ * `denoise` from the REQUEST even on a resume (unlike the architecture
+ * settings, which it inherits from the parent run). "Apply" takes no such
+ * option: inference reapplies whatever the run itself recorded.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { MagicWand, Student } from '@phosphor-icons/react';
 import { useTrainRuns } from '@/hooks/useTrainRuns';
 import { useExportJob } from '@/hooks/useExportJob';
+import { useTrainCapability } from '@/hooks/useTrainCapability';
+import { useDenoiseStore } from '@/stores/denoiseStore';
 import { FAMILY_LABELS } from '@/components/train/RunsPanel';
-import { canContinueFineTuning, fineTuningBlockedReason } from '@/lib/runCompatibility';
+import TrainDenoiseToggle from '@/components/train/TrainDenoiseToggle';
+import { canContinueFineTuning, fineTuningBlockedReason, isSegmentationRun } from '@/lib/runCompatibility';
+import { denoiseMethodLabel, trainDenoisePayload } from '@/lib/trainDenoiseOption';
 import type { AnnotationClass } from '@/stores/classStore';
 import type { RunClass } from '@/lib/importPredictions';
+import type { TrainingSourceItem } from '@/lib/gatherTrainingSources';
 
 const DEFAULT_REFINE_EPOCHS = 15;
+
+/** Which of this sample's annotated slices "Fine-tune & apply" trains on.
+ *  Mirrors InferencePanel's inference-scope selector (current/range/all). */
+type TrainScope = 'current' | 'range' | 'all';
 
 interface ApplyModelPanelProps {
   hasOpenSample: boolean;
@@ -33,6 +49,9 @@ interface ApplyModelPanelProps {
   source: string | null;
   serverUri: string | null;
   currentSlice: number;
+  /** Total slices in the currently-open sample — bounds the fine-tune scope's
+   *  range inputs and labels "All slices (N)". */
+  nSlices: number;
   /** This image's current class list — decides which runs can be continued. */
   currentClasses: AnnotationClass[];
   /** True if the current annotation state has no matching saved version yet. */
@@ -46,15 +65,45 @@ interface ApplyModelPanelProps {
 }
 
 export default function ApplyModelPanel({
-  hasOpenSample, isTiledSource, source, serverUri, currentSlice, currentClasses,
+  hasOpenSample, isTiledSource, source, serverUri, currentSlice, nSlices, currentClasses,
   needsSaveBeforeApply, onEnsureSaved, buildTrainingPayload, onImportPredictions,
 }: ApplyModelPanelProps) {
-  const { runs, invalidate: refreshRuns } = useTrainRuns();
+  const { runs: allRuns, invalidate: refreshRuns } = useTrainRuns();
+  const { capability } = useTrainCapability();
+  // Read-only here: the Denoise panel above owns this setting.
+  const denoise = useDenoiseStore((s) => s.denoise);
+  // Apply/fine-tune here both key off a class list and write predicted SHAPES
+  // back onto the canvas — neither makes sense for a saved denoiser run (see
+  // the Learned Denoiser panel's own run picker for that flow), so exclude
+  // them from this picker the same way TrainPage's does.
+  const runs = useMemo(() => allRuns.filter(isSegmentationRun), [allRuns]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [refineEpochs, setRefineEpochs] = useState(DEFAULT_REFINE_EPOCHS);
   const [isSavingFirst, setIsSavingFirst] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [appliedCount, setAppliedCount] = useState<number | null>(null);
+  // Default 'all': preserves the pre-existing behavior (fine-tune on every
+  // annotated slice of this sample) for anyone who never touches this control.
+  const [trainScope, setTrainScope] = useState<TrainScope>('all');
+  // Off by default, exactly as on the Train tab — fine-tuning is training, and
+  // baking a filter into the model's input has to be asked for explicitly.
+  const [trainOnDenoised, setTrainOnDenoised] = useState(false);
+  const [trainRangeStart, setTrainRangeStart] = useState(0);
+  const [trainRangeEnd, setTrainRangeEnd] = useState(Math.max(0, nSlices - 1));
+
+  useEffect(() => {
+    setTrainRangeEnd(Math.max(0, nSlices - 1));
+  }, [nSlices]);
+
+  /** null = 'all' (no filtering — use every annotated slice, current behavior);
+   *  otherwise the concrete list of slice indices to restrict training to. */
+  const trainSliceIndices = (): number[] | null => {
+    if (trainScope === 'all') return null;
+    if (trainScope === 'current') return [currentSlice];
+    const lo = Math.max(0, Math.min(trainRangeStart, trainRangeEnd));
+    const hi = Math.min(nSlices - 1, Math.max(trainRangeStart, trainRangeEnd));
+    return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+  };
 
   // Scoped by `source`, unlike Train's fixed job keys: Annotate stays mounted
   // while the user switches samples (no remount, so no persistence need there),
@@ -142,6 +191,11 @@ export default function ApplyModelPanel({
   const fineTuneBlocked = selectedRun
     ? fineTuningBlockedReason(selectedRun.classes, currentClasses)
     : null;
+  // Input denoising baked into the selected run at training time. Surfaced
+  // read-only: inference reapplies it off the run itself, so there is no
+  // choice to offer here — only the fact of it, which is otherwise invisible
+  // and would make two identical-looking runs behave differently.
+  const selectedRunDenoise = selectedRun?.denoise ?? null;
 
   /** Save first (so any import is undoable from Version History), then act. */
   const saveThen = async (action: () => void) => {
@@ -172,6 +226,38 @@ export default function ApplyModelPanel({
       setLocalError(payload.error);
       return;
     }
+
+    // buildTrainingPayload() always gathers every annotated slice of THIS
+    // sample (there's exactly one source item, this image); when the user has
+    // narrowed the scope to a single slice or a range, filter it down here
+    // rather than changing what buildTrainingPayload itself means elsewhere.
+    let sources = payload.sources as TrainingSourceItem[];
+    const scopedIndices = trainSliceIndices();
+    if (scopedIndices !== null) {
+      const allowed = new Set(scopedIndices.map(String));
+      const item = sources[0];
+      const scopedSlices = Object.fromEntries(
+        Object.entries(item.slices).filter(([sliceKey]) => allowed.has(sliceKey)),
+      );
+      const scopedShapeCount = Object.values(scopedSlices).reduce((n, shapes) => n + shapes.length, 0);
+      if (scopedShapeCount === 0) {
+        setLocalError(
+          scopedIndices.length === 1
+            ? `No annotations on slice ${scopedIndices[0]} — choose a different scope or annotate here first.`
+            : `No annotations on slices ${scopedIndices[0]}–${scopedIndices[scopedIndices.length - 1]} — choose a different scope.`,
+        );
+        return;
+      }
+      sources = [{
+        ...item,
+        slices: scopedSlices,
+        split_by_slice: Object.fromEntries(
+          Object.entries(item.split_by_slice).filter(([sliceKey]) => allowed.has(sliceKey)),
+        ),
+        negative_slices: item.negative_slices.filter((sliceKey) => allowed.has(sliceKey)),
+      }];
+    }
+
     // The server overrides every architecture-defining setting (arch,
     // checkpoint, LoRA shapes, patch size, tiling) from the run being resumed,
     // so only the genuinely re-tunable epoch count matters here. arch/checkpoint
@@ -190,10 +276,15 @@ export default function ApplyModelPanel({
     void saveThen(() => {
       awaitingTrainedRunRef.current = true;
       void startTrainJob('/api/train/start', {
-        sources: payload.sources,
+        sources,
         classes: payload.classes,
         model,
         resume_from_run_id: selectedRunId,
+        // Unlike the architecture settings above, the server does NOT inherit
+        // this from the run being resumed — it records whatever the request
+        // carries. Omitted entirely when the checkbox is off, which keeps a
+        // plain fine-tune identical to what this panel sent before.
+        ...trainDenoisePayload(trainOnDenoised, denoise),
       });
     });
   };
@@ -236,6 +327,57 @@ export default function ApplyModelPanel({
             {isSavingFirst ? 'Saving…' : inferJob.status === 'running' ? 'Applying…' : 'Apply to this image'}
           </button>
 
+          {selectedRunDenoise && (
+            <p className="text-[11px] leading-snug text-gray-500">
+              Trained on{' '}
+              {denoiseMethodLabel(selectedRunDenoise.method, capability.denoise.methods)}-denoised
+              input ({Math.round(selectedRunDenoise.strength * 100)}%). Applying it reapplies the
+              same filter automatically — nothing to set here.
+            </p>
+          )}
+
+          <div className="flex flex-col gap-1 pt-0.5">
+            <span className="text-xs text-gray-400">Fine-tune on</span>
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
+              {([
+                ['current', `This slice (${currentSlice})`],
+                ['range', 'Slice range'],
+                ['all', `All annotated slices`],
+              ] as const).map(([value, label]) => (
+                <label key={value} className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                  <input
+                    type="radio" name="finetune-scope" className="accent-violet-600"
+                    checked={trainScope === value} disabled={busy}
+                    onChange={() => setTrainScope(value)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            {trainScope === 'range' && (
+              <div className="flex items-center gap-2 pl-5 text-xs text-gray-600">
+                <input
+                  type="number" min={0} max={nSlices - 1} value={trainRangeStart} disabled={busy}
+                  onChange={(e) => setTrainRangeStart(Number(e.target.value))}
+                  className="w-16 rounded border border-gray-300 bg-white px-1.5 py-1 disabled:opacity-50"
+                />
+                <span>to</span>
+                <input
+                  type="number" min={0} max={nSlices - 1} value={trainRangeEnd} disabled={busy}
+                  onChange={(e) => setTrainRangeEnd(Number(e.target.value))}
+                  className="w-16 rounded border border-gray-300 bg-white px-1.5 py-1 disabled:opacity-50"
+                />
+              </div>
+            )}
+          </div>
+
+          <TrainDenoiseToggle
+            checked={trainOnDenoised}
+            onChange={setTrainOnDenoised}
+            disabled={busy}
+            variant="light"
+          />
+
           <div className="flex items-center gap-1.5">
             <button
               type="button"
@@ -243,7 +385,7 @@ export default function ApplyModelPanel({
               disabled={!hasOpenSample || !selectedRunId || busy || !!fineTuneBlocked}
               title={
                 fineTuneBlocked
-                ?? "Continues training the selected model on this image's current annotations (including your corrections), then applies the improved model here. Saves as a new run — the original is left untouched."
+                ?? "Continues training the selected model on this image's annotations (including your corrections) within the scope selected below, then applies the improved model here. Saves as a new run — the original is left untouched."
               }
               className="flex flex-1 items-center justify-center gap-2 px-3 py-2 rounded-md text-sm font-medium bg-violet-100 text-violet-700 hover:bg-violet-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >

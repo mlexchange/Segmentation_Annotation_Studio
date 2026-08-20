@@ -267,6 +267,81 @@ def tile_datasets(
 # ---------------------------------------------------------------------------
 
 
+def _blend_tiled_forward(
+    rgb: np.ndarray,
+    *,
+    forward_fn: Callable[[Any], Any],
+    to_tensor_fn: Callable[[np.ndarray], Any],
+    window: int,
+    device: str,
+    cancel_cb: Callable[[], bool] | None = None,
+    progress_cb: Callable[[str], None] | None = None,
+) -> Any | None:
+    """Blend per-window ``forward_fn`` output into a full-resolution canvas.
+
+    This is the shared core behind :func:`predict_label_map_tiled`
+    (classification: softmax/argmax/confidence-thresholding layered on top) and
+    :func:`denoise_image_tiled` (regression: the blended canvas IS the result,
+    no further post-processing) — anything that needs qlty's tiled-window
+    blending but differs only in what it does with the blended output.
+    *forward_fn* is fully generic here: nothing classification- or
+    regression-specific lives in this function, only the tiling/accumulation
+    machinery.
+
+    Windows are forwarded in small batches, so peak DEVICE memory depends on
+    :data:`INFER_TILE_BATCH` rather than on the image size — only one batch of
+    windows is ever on the GPU/MPS device at once. The weighted output canvas
+    they accumulate into lives on the host instead, precisely so it can scale
+    with image size x channel count without competing for device memory; for a
+    very large image or channel count that host allocation is still the actual
+    memory ceiling here, just not a device one. The accumulation is
+    arithmetically the same weighted mean ``NCYXQuilt.stitch`` computes.
+
+    Returns a ``(C, orig_h, orig_w)`` float32 CPU tensor — *C* is whatever
+    ``forward_fn`` emits per window (n_classes for segmentation logits, 1 for a
+    single-channel denoiser) — or ``None`` if *cancel_cb* asked to stop partway.
+    """
+    import torch  # noqa: PLC0415
+
+    orig_h, orig_w = rgb.shape[:2]
+    padded = pad_to_min(rgb, window, window, fill=0)
+    height, width = padded.shape[:2]
+
+    quilt = _quilt(height, width, window)
+    weight = quilt.weight  # (window, window): 1.0 interior, BORDER_WEIGHT ring
+    step = step_for(window)
+    origins = [(y, x) for y in tile_origins(height, window, step) for x in tile_origins(width, window, step)]
+
+    image = to_tensor_fn(padded)  # (3, H, W) float, CPU
+    canvas: Any = None  # (channels, H, W), allocated once the channel count is known
+    norm = torch.zeros((height, width), dtype=torch.float32)
+
+    if progress_cb is not None:
+        progress_cb(f"{len(origins)} window(s) of {window}px @ {step}px step")
+
+    for batch_start in range(0, len(origins), INFER_TILE_BATCH):
+        if cancel_cb is not None and cancel_cb():
+            return None
+        batch_origins = origins[batch_start : batch_start + INFER_TILE_BATCH]  # noqa: E203
+        batch = torch.stack([image[:, y : y + window, x : x + window] for y, x in batch_origins])  # noqa: E203
+
+        out = forward_fn(batch.to(device)).detach().to("cpu", torch.float32)
+        if canvas is None:
+            canvas = torch.zeros((out.shape[1], height, width), dtype=torch.float32)
+
+        for i, (y, x) in enumerate(batch_origins):
+            canvas[:, y : y + window, x : x + window] += out[i] * weight  # noqa: E203
+            norm[y : y + window, x : x + window] += weight  # noqa: E203
+
+    if canvas is None:  # unreachable for a real image (always ≥1 window)
+        raise RuntimeError("Tiled inference produced no windows")
+
+    # Every pixel is covered by ≥1 window, but clamp anyway so a zero can never
+    # turn into inf/NaN and poison whatever runs on top of this.
+    blended = canvas / norm.clamp(min=1e-8)
+    return blended[:, :orig_h, :orig_w]  # drop any padding
+
+
 def predict_label_map_tiled(
     rgb: np.ndarray,
     *,
@@ -280,14 +355,13 @@ def predict_label_map_tiled(
 ) -> np.ndarray | None:
     """Predict a full-resolution label map by blending per-window predictions.
 
-    Windows are forwarded in small batches, so peak DEVICE memory depends on
-    :data:`INFER_TILE_BATCH` rather than on the image size — only one batch of
-    windows is ever on the GPU/MPS device at once. The weighted logit canvas
-    they accumulate into lives on the host instead, precisely so it can scale
-    with image size x class count without competing for device memory; for a
-    very large image or class count that host allocation is still the actual
-    memory ceiling here, just not a device one. The accumulation is
-    arithmetically the same weighted mean ``NCYXQuilt.stitch`` computes.
+    The blending itself — streamed accumulation into a weighted canvas,
+    arithmetically identical to ``NCYXQuilt.stitch`` — lives in
+    :func:`_blend_tiled_forward`, shared with :func:`denoise_image_tiled`. This
+    function only adds what's specific to classification: softmax is applied
+    **after** recombining, never per window (averaging softmaxed patches is
+    not the softmax of averaged logits — qlty's own docs call this out), then
+    argmax and confidence-thresholding turn it into a label map.
 
     Returns a ``(H, W)`` uint8 map using the pipeline's convention —
     ``0`` = below ``min_confidence`` (background), ``1..n`` = class index + 1 —
@@ -296,43 +370,17 @@ def predict_label_map_tiled(
     import torch  # noqa: PLC0415
     import torch.nn.functional as F  # noqa: PLC0415
 
-    orig_h, orig_w = rgb.shape[:2]
-    padded = pad_to_min(rgb, window, window, fill=0)
-    height, width = padded.shape[:2]
-
-    quilt = _quilt(height, width, window)
-    weight = quilt.weight  # (window, window): 1.0 interior, BORDER_WEIGHT ring
-    step = step_for(window)
-    origins = [(y, x) for y in tile_origins(height, window, step) for x in tile_origins(width, window, step)]
-
-    image = to_tensor_fn(padded)  # (3, H, W) float, CPU
-    canvas: Any = None  # (n_classes, H, W), allocated once the class count is known
-    norm = torch.zeros((height, width), dtype=torch.float32)
-
-    if progress_cb is not None:
-        progress_cb(f"{len(origins)} window(s) of {window}px @ {step}px step")
-
-    for batch_start in range(0, len(origins), INFER_TILE_BATCH):
-        if cancel_cb is not None and cancel_cb():
-            return None
-        batch_origins = origins[batch_start : batch_start + INFER_TILE_BATCH]  # noqa: E203
-        batch = torch.stack([image[:, y : y + window, x : x + window] for y, x in batch_origins])  # noqa: E203
-
-        logits = forward_fn(batch.to(device)).detach().to("cpu", torch.float32)
-        if canvas is None:
-            canvas = torch.zeros((logits.shape[1], height, width), dtype=torch.float32)
-
-        for i, (y, x) in enumerate(batch_origins):
-            canvas[:, y : y + window, x : x + window] += logits[i] * weight  # noqa: E203
-            norm[y : y + window, x : x + window] += weight  # noqa: E203
-
-    if canvas is None:  # unreachable for a real image (always ≥1 window)
-        raise RuntimeError("Tiled inference produced no windows")
-
-    # Every pixel is covered by ≥1 window, but clamp anyway so a zero can never
-    # turn into inf/NaN and poison the argmax.
-    blended = canvas / norm.clamp(min=1e-8)
-    blended = blended[:, :orig_h, :orig_w]  # drop any padding
+    blended = _blend_tiled_forward(
+        rgb,
+        forward_fn=forward_fn,
+        to_tensor_fn=to_tensor_fn,
+        window=window,
+        device=device,
+        cancel_cb=cancel_cb,
+        progress_cb=progress_cb,
+    )
+    if blended is None:
+        return None
 
     probs = F.softmax(blended, dim=0)  # after stitching — never per window
     confidence, pred_class = probs.max(dim=0)
@@ -342,3 +390,44 @@ def predict_label_map_tiled(
         torch.zeros_like(pred_class, dtype=torch.uint8),
     )
     return label.numpy()
+
+
+def denoise_image_tiled(
+    rgb: np.ndarray,
+    *,
+    forward_fn: Callable[[Any], Any],
+    to_tensor_fn: Callable[[np.ndarray], Any],
+    window: int,
+    device: str,
+    cancel_cb: Callable[[], bool] | None = None,
+    progress_cb: Callable[[str], None] | None = None,
+) -> np.ndarray | None:
+    """Denoise a full-resolution image by blending per-window regression output.
+
+    Same tiled-window blending as :func:`predict_label_map_tiled` — see
+    :func:`_blend_tiled_forward`, which both share — but *forward_fn* here is a
+    regression model (continuous-valued output, e.g. a trained denoiser)
+    rather than a classifier, so blending is the END of the pipeline: no
+    softmax, argmax or confidence-thresholding, all of which are meaningless
+    on continuous output. The blended canvas IS the denoised image.
+
+    Used both for a live single-slice preview and (by a caller driving it once
+    per slice of a volume) a whole-volume "apply trained denoiser" bake job.
+
+    Returns a float32 array at *rgb*'s original resolution — ``(H, W)`` when
+    *forward_fn* emits a single channel (the expected case for a denoiser),
+    else ``(C, H, W)`` — or ``None`` if *cancel_cb* asked to stop partway.
+    """
+    blended = _blend_tiled_forward(
+        rgb,
+        forward_fn=forward_fn,
+        to_tensor_fn=to_tensor_fn,
+        window=window,
+        device=device,
+        cancel_cb=cancel_cb,
+        progress_cb=progress_cb,
+    )
+    if blended is None:
+        return None
+    out = blended.numpy()
+    return out[0] if out.shape[0] == 1 else out

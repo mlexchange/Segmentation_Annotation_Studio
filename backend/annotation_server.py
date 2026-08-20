@@ -26,7 +26,18 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi import APIRouter
+from fastapi.routing import APIRoute
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -34,6 +45,8 @@ from starlette.middleware.gzip import GZipMiddleware
 
 import annotation_thumbnails
 import arrays as arrays_mod
+import denoise as denoise_mod
+import denoise_bake as denoise_bake_mod
 import drafts as drafts_mod
 import export_jobs
 import guides as guides_mod
@@ -62,6 +75,7 @@ from coco_export import (
 )
 from schemas import (
     BatchProbeRequest,
+    DenoiseBakeRequest,
     DraftPayload,
     ExportRequest,
     ExportSourceItem,
@@ -163,9 +177,17 @@ _FIELD_MAPPING_TTL = float(os.getenv("BROWSE_FIELD_MAPPING_TTL_SECONDS", "300"))
 _column_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=256)
 _items_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=128)
 _field_mapping_cache: TTLCache = TTLCache(ttl_seconds=_FIELD_MAPPING_TTL, max_entries=32)
-# Each entry is up to 384**3 = ~56.6 MB (see volumes.build_volume); 4 entries
-# bounds worst-case memory to ~230 MB.
-_volume_cache: TTLCache = TTLCache(ttl_seconds=300.0, max_entries=4)
+# An entry is now bounded by volumes.MAX_VOLUME_VOXELS (192 MB) rather than the
+# old 384**3 (~56.6 MB), since the quality ladder goes to 1024 for thin stacks.
+# Entries dropped 4 -> 2 to keep the worst case in the same ballpark (~384 MB)
+# instead of quadrupling it.
+_volume_cache: TTLCache = TTLCache(ttl_seconds=300.0, max_entries=2)
+# Denoised slice PNGs only (the un-denoised path stays uncached, as before, and
+# is already cheap). Entries are compressed PNGs — a few MB each at 3232² — so
+# 32 covers scrubbing a stack back and forth without unbounded growth. Without
+# this, every parameter tweak or revisit re-pays the full filter cost, which for
+# NLM/TV is seconds, not milliseconds.
+_slice_cache: TTLCache = TTLCache(ttl_seconds=300.0, max_entries=32)
 
 
 def _require_tiled_server(server_uri: str | None) -> str:
@@ -749,6 +771,152 @@ async def image_meta(
         raise HTTPException(500, "Failed to read image metadata") from exc
 
 
+def _model_denoised_png(
+    source: str,
+    kind: str,
+    server_uri: Optional[str],
+    root: Optional[str],
+    slice_index: int,
+    run_id: str,
+    crop: int,
+) -> bytes:
+    """Render one slice through a trained Noise2Noise/Noise2Void run.
+
+    Preprocessing is delegated to ``denoise_train``'s own helpers rather than
+    reimplemented here: the network was trained on the display-mapped uint8
+    grayscale those produce (volume-global bounds, the run's saved render
+    options), so any divergence would feed it data unlike anything it saw in
+    training. Reusing the exact functions is what keeps the two halves of that
+    contract from drifting.
+
+    The output is therefore ALREADY in display space, which is why it goes
+    through ``images.apply_colormap`` instead of ``render_slice`` — normalizing
+    it again would apply the intensity mapping twice.
+
+    Takes ``ML_LOCK``: unlike the classical filters this is GPU work, and must
+    not run concurrently with a training job.
+    """
+    import denoise_train
+    import tiling
+    import train_common
+
+    config = train_common.load_run_config(run_id)
+    if config.get("model_family") != "dlsia_denoiser" or config.get("task") != "denoising":
+        raise HTTPException(
+            422,
+            f"Run {run_id!r} is not a denoiser — pick a trained denoiser run.",
+        )
+    # Which network this run is; defaults to TUNet for runs saved before the
+    # field existed. Only the TUNet architecture needs dlsia.
+    try:
+        fam = train_common.denoiser_runtime_for(config)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if train_common.denoiser_needs_dlsia(config) and not train_common.dlsia_available():
+        raise HTTPException(503, "dlsia is not installed on this server")
+    if not tiling.qlty_available():
+        raise HTTPException(503, "Applying a denoiser needs the 'qlty' package, which is missing")
+
+    device = train_common.pick_device()
+    if device is None:
+        raise HTTPException(503, "torch is not installed on this server")
+
+    node = arrays_mod.resolve_array(source, kind, server_uri, root)
+    meta = arrays_mod.array_shape_meta(node)
+    opts = denoise_train._render_opts(config.get("render") or {})
+    global_range = images_mod._sample_global_stats(node, meta)
+    gray = denoise_train._slice_to_gray_uint8(node, meta, slice_index, opts, global_range)
+    gray = _centre_crop(gray, crop)
+
+    # Non-blocking: a preview must report "busy" rather than queue behind a
+    # multi-minute training run holding the lock.
+    if not train_common.ML_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "The device is busy with another job — try again when it finishes.")
+    try:
+        import torch
+
+        state = train_common.load_adapter_state(run_id)
+        model = fam.load_model(state, device)
+        model.eval()
+        with torch.no_grad():
+            out = tiling.denoise_image_tiled(
+                gray,
+                forward_fn=fam.make_forward_fn(model),
+                to_tensor_fn=fam.make_to_tensor_fn(),
+                window=int(config["image_size"]),
+                device=device,
+            )
+    finally:
+        train_common.ML_LOCK.release()
+
+    if out is None:
+        raise HTTPException(500, "Denoising was interrupted")
+    unit = np.clip(np.asarray(out, dtype=np.float64), 0.0, 1.0)
+    return images_mod.encode_png(images_mod.apply_colormap(unit, opts.get("cmap", "gray")))
+
+
+def _centre_crop(arr: "np.ndarray", size: int) -> "np.ndarray":
+    """Centred square crop of *size*, or *arr* unchanged if it already fits."""
+    h, w = arr.shape[:2]
+    if size <= 0 or (h <= size and w <= size):
+        return arr
+    top = max(0, (h - size) // 2)
+    left = max(0, (w - size) // 2)
+    return arr[top : top + min(size, h), left : left + min(size, w)]
+
+
+def _denoised_slice(
+    node: object,
+    meta: dict,
+    slice_index: int,
+    method: str,
+    strength: float,
+    crop: int = 0,
+) -> "np.ndarray":
+    """Read *slice_index* and denoise it, pulling z-neighbours when the method
+    is a 3-D one.
+
+    The 3-D filters are the training-free way to exploit slice-to-slice
+    correlation (adjacent tomographic slices share structure, their noise is
+    independent), which is why this reads a window rather than one slice. The
+    window is clamped to the volume, and the target slice's position inside the
+    returned stack is tracked explicitly — it is NOT always the centre, since
+    the window is truncated at the first and last slice.
+
+    When *crop* > 0 the crop is taken BEFORE filtering (that's the whole point —
+    filtering 10.4 MP is what's slow). Consequence worth knowing: results near
+    the crop border, and NLM's patch search in particular, differ slightly from
+    the full-slice result, so a crop is a tuning aid rather than a byte-exact
+    preview of the bake.
+    """
+    radius = denoise_mod.z_radius_for(method)
+    if radius == 0:
+        sl = _centre_crop(np.asarray(arrays_mod.read_slice(node, meta, slice_index)), crop)
+        return denoise_mod.denoise_slice(sl, method, strength)
+
+    n_slices = int(meta["n_slices"])
+    lo = max(0, slice_index - radius)
+    hi = min(n_slices - 1, slice_index + radius)
+    frames = []
+    for idx in range(lo, hi + 1):
+        try:
+            frames.append(_centre_crop(np.asarray(arrays_mod.read_slice(node, meta, idx)), crop))
+        except Exception as exc:  # noqa: BLE001 — a bad neighbour must not fail the view
+            logger.warning("denoise: skipping unreadable neighbour slice %d: %s", idx, exc)
+            if idx == slice_index:
+                raise
+    if len(frames) < 2:
+        # Not enough usable z-context (single-slice source, or neighbours
+        # unreadable) — fall back to the 2-D sibling rather than erroring out.
+        fallback = "gaussian" if method == "gaussian3d" else "median"
+        sl = _centre_crop(np.asarray(arrays_mod.read_slice(node, meta, slice_index)), crop)
+        return denoise_mod.denoise_slice(sl, fallback, strength)
+
+    target_pos = min(slice_index - lo, len(frames) - 1)
+    stack = np.stack(frames, axis=0)
+    return denoise_mod.denoise_stack(stack, method, strength)[target_pos]
+
+
 @app.get("/api/image/slice")
 async def image_slice(
     source: str = Query(...),
@@ -761,10 +929,68 @@ async def image_slice(
     vmin_pct: float = Query(1.0),
     vmax_pct: float = Query(99.0),
     cmap: str = Query("gray"),
+    denoise_method: str = Query("none", description="Classical denoise filter (see denoise.ALL_METHODS)"),
+    denoise_strength: float = Query(0.5, ge=0.0, le=1.0),
+    denoise_run_id: Optional[str] = Query(
+        None,
+        description="Saved denoiser run to apply when denoise_method='model' (a trained "
+                    "Noise2Noise/Noise2Void run, not a classical filter).",
+    ),
+    denoise_crop: int = Query(
+        0, ge=0, le=2048,
+        description="If >0, denoise and return only a centred square crop of this size at 1:1 "
+                    "(fast tuning preview — measured 7.5s full-slice vs ~0.4s cropped for bilateral "
+                    "at 3232²). Denoising cannot be judged on a downscaled image, since downscaling "
+                    "is itself a denoiser, so this crops rather than resizes.",
+    ),
 ) -> Response:
-    """Render one slice of an image source as a PNG."""
+    """Render one slice of an image source as a PNG.
+
+    Denoising, when requested, runs on the RAW slice before normalization —
+    noise statistics live in the source's own intensity units, not the 8-bit
+    display range. It is deliberately applied HERE rather than inside
+    ``images.render_slice`` for two reasons: ``render_slice`` early-returns for
+    RGB inputs (so a hook at its normalize call would silently skip colour
+    sources), and ``volumes.build_volume`` normalizes independently — denoising
+    inside the shared helper would silently desynchronize the 3D tab from the
+    2D canvas. Keeping it in this route makes the 3D tab showing raw data an
+    explicit choice rather than an accident.
+
+    ``_sample_global_stats`` intentionally still samples RAW slices, so display
+    contrast doesn't jump when denoising is toggled on and off.
+    """
     if kind == "tiled":
         server_uri = _require_tiled_server(server_uri)
+
+    # "model" is not a classical filter — it applies a trained denoiser run and
+    # takes an entirely different path (see _model_denoised_png).
+    if denoise_method == "model":
+        if not denoise_run_id:
+            raise HTTPException(422, "denoise_method='model' needs a denoise_run_id")
+        try:
+            png = await asyncio.to_thread(
+                _model_denoised_png, source, kind, server_uri, root,
+                slice_index, denoise_run_id, denoise_crop,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("model denoise preview failed: %s", exc)
+            raise HTTPException(500, "Failed to apply the denoiser to this slice") from exc
+        return Response(
+            content=png,
+            media_type="image/png",
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+
+    if denoise_method not in denoise_mod.ALL_METHODS:
+        raise HTTPException(422, f"Unknown denoise method: {denoise_method}")
+    if denoise_method not in denoise_mod.available_methods():
+        raise HTTPException(
+            422,
+            f"Denoise method {denoise_method!r} is unavailable on this server "
+            "(missing optional dependency)",
+        )
 
     opts = {
         "norm": norm,
@@ -773,21 +999,52 @@ async def image_slice(
         "vmax_pct": vmax_pct,
         "cmap": cmap,
     }
+    # Full-parameter cache key. Deliberately NOT keyed on id(node) the way
+    # images._stats_cache is — that's a CPython object address, which can miss
+    # after a node is re-resolved and (worse) be reused by a different node
+    # after GC. Denoising is the expensive part of this route, and the route had
+    # no server-side cache at all before, so re-viewing a slice used to pay the
+    # full cost again.
+    cache_key = (
+        "slice", kind, source, server_uri or "", root or "", slice_index,
+        norm, scale, round(vmin_pct, 3), round(vmax_pct, 3), cmap,
+        denoise_method, round(denoise_strength, 3), denoise_crop,
+    )
 
     def _run() -> bytes:
+        if denoise_method != "none":
+            cached = _slice_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         node = arrays_mod.resolve_array(source, kind, server_uri, root)
         meta = arrays_mod.array_shape_meta(node)
-        sl = arrays_mod.read_slice(node, meta, slice_index)
         global_range = None
         if norm == "global":
+            # Deliberately sampled from RAW slices, and from the WHOLE volume
+            # even for a crop, so the crop preview's brightness matches the main
+            # canvas instead of auto-levelling to whatever is inside the crop.
             global_range = images_mod._sample_global_stats(node, meta)
+
+        if denoise_method == "none":
+            sl = arrays_mod.read_slice(node, meta, slice_index)
+        else:
+            sl = _denoised_slice(
+                node, meta, slice_index, denoise_method, denoise_strength, denoise_crop
+            )
+
         rgb = images_mod.render_slice(sl, opts, global_range)
-        return images_mod.encode_png(rgb)
+        png = images_mod.encode_png(rgb)
+        if denoise_method != "none":
+            _slice_cache.set(cache_key, png)
+        return png
 
     try:
         png = await asyncio.to_thread(_run)
     except HTTPException:
         raise
+    except ValueError as exc:  # denoise rejected the request (bad method/params)
+        raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
         logger.error("image_slice failed: %s", exc)
         raise HTTPException(500, "Failed to render image slice") from exc
@@ -799,13 +1056,89 @@ async def image_slice(
     )
 
 
+@app.get("/api/denoise/auto")
+async def denoise_auto(
+    source: str = Query(...),
+    kind: str = Query(...),
+    method: str = Query(...),
+    slice_index: int = Query(0),
+    server_uri: Optional[str] = None,
+    root: Optional[str] = Query(None, description="Server-configured root (kind=local)"),
+) -> dict:
+    """Suggest a denoise strength for one slice from its own measured noise.
+
+    Backs the panel's "Auto" button. Uses the same estimator the bake job does,
+    so an auto-picked strength previews and bakes identically. Cheap
+    (one convolution) and deliberately never takes ``ML_LOCK``.
+    """
+    if kind == "tiled":
+        server_uri = _require_tiled_server(server_uri)
+    if method not in denoise_mod.ALL_METHODS:
+        raise HTTPException(422, f"Unknown denoise method: {method}")
+
+    def _run() -> dict:
+        node = arrays_mod.resolve_array(source, kind, server_uri, root)
+        meta = arrays_mod.array_shape_meta(node)
+        sl = np.asarray(arrays_mod.read_slice(node, meta, slice_index))
+        return {
+            "method": method,
+            "strength": denoise_mod.auto_strength(sl, method),
+            "noise_sigma": denoise_mod.estimate_noise_sigma(sl),
+        }
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("denoise_auto failed: %s", exc)
+        raise HTTPException(500, "Failed to estimate a denoise strength") from exc
+
+
+@app.post("/api/denoise/bake")
+async def denoise_bake(payload: DenoiseBakeRequest) -> dict:
+    """Denoise a whole volume and save it as a new, annotatable Tiled dataset.
+
+    The Annotate-tab preview is display-only; this is how a denoised volume
+    becomes real data you can annotate, train on and export. Runs on a
+    background thread (no ``ML_LOCK`` — classical filters are CPU-only and must
+    not contend with training); poll ``/api/export/status/{job_id}``.
+    """
+    server_uri = _require_tiled_server(payload.server_uri)
+    if payload.method == "none":
+        raise HTTPException(422, "Pick a denoise method before saving a denoised copy.")
+    # "model" applies a trained denoiser run; it is validated against the run
+    # registry inside the job, not against the classical-filter menu.
+    if payload.method == "model":
+        if not payload.run_id:
+            raise HTTPException(422, "Applying a trained denoiser needs a run_id.")
+    else:
+        if payload.method not in denoise_mod.ALL_METHODS:
+            raise HTTPException(422, f"Unknown denoise method: {payload.method}")
+        if payload.method not in denoise_mod.available_methods():
+            raise HTTPException(
+                422,
+                f"Denoise method {payload.method!r} is unavailable on this server "
+                "(missing optional dependency)",
+            )
+
+    request = payload.model_copy(update={"server_uri": server_uri})
+    jid = export_jobs.new_job(f"denoise:{payload.source}")
+    threading.Thread(
+        target=denoise_bake_mod.run_denoise_bake_job,
+        args=(jid, request),
+        daemon=True,
+    ).start()
+    return {"job_id": jid}
+
+
 @app.get("/api/image/volume")
 async def image_volume(
     source: str = Query(...),
     kind: str = Query(...),
     server_uri: Optional[str] = None,
     root: Optional[str] = Query(None, description="Server-configured root (kind=local)"),
-    max_dim: int = Query(256, ge=32, le=384),
+    max_dim: int = Query(256, ge=32, le=1024),
     norm: str = Query("global"),
     scale: str = Query("linear"),
     vmin_pct: float = Query(1.0),
@@ -838,7 +1171,15 @@ async def image_volume(
         global_range = None
         if norm == "global":
             global_range = images_mod._sample_global_stats(node, meta)
-        result = volumes_mod.build_volume(node, meta, opts, max_dim, global_range)
+        # Clamp to what fits the voxel budget. The frontend applies the same
+        # ladder before rasterizing its label volume, so both land on the same
+        # grid; doing it here too means a hand-made request can't blow memory.
+        effective = volumes_mod.effective_max_dim(
+            int(meta["n_slices"]), int(meta["height"]), int(meta["width"]), max_dim
+        )
+        if effective != max_dim:
+            logger.info("volume quality %d reduced to %d to fit the voxel budget", max_dim, effective)
+        result = volumes_mod.build_volume(node, meta, opts, effective, global_range)
         _volume_cache.set(cache_key, result)
         return result
 
@@ -1632,7 +1973,56 @@ MAX_INGEST_FILE_BYTES = int(os.getenv("MAX_INGEST_FILE_BYTES", str(512 * 1024 * 
 MAX_INGEST_TOTAL_BYTES = int(os.getenv("MAX_INGEST_TOTAL_BYTES", str(16 * 1024 * 1024 * 1024)))
 
 
-@app.post("/api/ingest/upload")
+# Non-file form fields on the upload route (container_path, description,
+# on_conflict, grouping). max_fields counts these alongside files, so budgeting
+# the file quota alone would trip a batch of exactly MAX_INGEST_FILES.
+_INGEST_FORM_FIELDS = 16
+
+
+class _LargeUploadRoute(APIRoute):
+    """Route class that parses multipart bodies with OUR file-count quota.
+
+    Starlette's ``Request.form()`` defaults to ``max_files=1000`` and rejects
+    anything larger with "Too many files. Maximum number of files is 1000." —
+    so ``MAX_INGEST_FILES`` (5000) was unreachable, and the real ceiling was a
+    framework default nobody chose, reported in wording unlike this API's other
+    limits.
+
+    This has to be a route class rather than a dependency: FastAPI parses the
+    body at ``routing.py``'s ``body = await request.form()`` BEFORE it calls
+    ``solve_dependencies``, so a dependency always loses the race (verified —
+    the first attempt at this fix was a dependency and it changed nothing).
+    Pre-parsing here, before delegating to the normal handler, wins because
+    ``Request._get_form`` caches into ``request._form`` and returns that cache
+    on FastAPI's own later call.
+
+    Deliberately does NOT reject oversized batches itself: ``ingest_upload``
+    already does, with a clearer message and after closing the uploads it
+    accepted.
+    """
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handler(request: Request):
+            if request.headers.get("content-type", "").startswith("multipart/form-data"):
+                headroom = MAX_INGEST_FILES + 1  # +1 so OUR check reports the overflow
+                await request.form(
+                    max_files=headroom,
+                    max_fields=headroom + _INGEST_FORM_FIELDS,
+                )
+            return await original(request)
+
+        return handler
+
+
+# A one-route router purely to attach the route class above — `route_class` is
+# an APIRouter option, and `@app.post()` has no equivalent. Included at the
+# bottom of this module.
+_upload_router = APIRouter(route_class=_LargeUploadRoute)
+
+
+@_upload_router.post("/api/ingest/upload")
 async def ingest_upload(
     server_uri: Optional[str] = Query(None, description="Target Tiled server URI"),
     container_path: str = Form(..., description="Target container, e.g. 'browse/myset'"),
@@ -1714,6 +2104,12 @@ async def ingest_upload(
 
     threading.Thread(target=_run_and_invalidate, daemon=True).start()
     return {"job_id": jid, "total": len(saved), "container_path": container_path}
+
+
+# Registered here rather than via @app.post so the upload gets _LargeUploadRoute
+# (see its docstring — Starlette's 1000-file multipart default would otherwise
+# reject the batch before ingest_upload's own MAX_INGEST_FILES check runs).
+app.include_router(_upload_router)
 
 
 @app.get("/api/ingest/status/{job_id}")

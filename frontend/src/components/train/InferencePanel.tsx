@@ -3,9 +3,11 @@
  * an overlay preview, then import the predictions as editable annotations
  * and/or push them into Tiled as masks.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { API_BASE } from '@/config';
 import { useExportJob } from '@/hooks/useExportJob';
+import { buildSliceUrl } from '@/hooks/useImageSlice';
+import { useDatasetStore } from '@/stores/datasetStore';
 import type { RunClass } from '@/lib/importPredictions';
 import JobProgressBar from './JobProgressBar';
 
@@ -88,6 +90,19 @@ export default function InferencePanel({
   const previewUrl = job.status === 'done' && activePreviewSlice != null && job.jobId
     ? `${API_BASE}/api/train/infer/preview/${job.jobId}/${activePreviewSlice}`
     : null;
+
+  // The image UNDER the overlay must follow the preview-slice slider, not the
+  // slice open in the app. `baseImageUrl` is bound to the open slice, so on a
+  // multi-slice job the overlay advanced while the picture beneath it stayed
+  // put — predictions from slice N drawn over the pixels of slice 0. Rebuilt
+  // here from activePreviewSlice; the prop stays as the fallback for the
+  // single-slice case and before a job has produced any preview.
+  const { kind, renderOpts } = useDatasetStore();
+  const basePreviewUrl = useMemo(() => {
+    if (activePreviewSlice == null || activePreviewSlice === currentSlice) return baseImageUrl;
+    if (!source || !kind) return baseImageUrl;
+    return buildSliceUrl(source, kind, activePreviewSlice, renderOpts, serverUri);
+  }, [activePreviewSlice, currentSlice, source, kind, renderOpts, serverUri, baseImageUrl]);
 
   const totalShapes = typeof job.result?.n_shapes === 'number' ? job.result.n_shapes : 0;
 
@@ -172,10 +187,10 @@ export default function InferencePanel({
                 {totalShapes} predicted region{totalShapes !== 1 ? 's' : ''}
                 {job.result?.cancelled === true ? ' (cancelled — partial result)' : ''}.
               </p>
-              {previewSlices.length > 0 && baseImageUrl && (
+              {previewSlices.length > 0 && basePreviewUrl && (
                 <>
                   <div className="relative w-full overflow-hidden rounded border border-slate-700 bg-black">
-                    <img src={baseImageUrl} alt="" className="block w-full" />
+                    <img src={basePreviewUrl} alt="" className="block w-full" />
                     {previewUrl && (
                       <img src={previewUrl} alt="" className="absolute inset-0 w-full" style={{ opacity }} />
                     )}

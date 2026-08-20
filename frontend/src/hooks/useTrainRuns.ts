@@ -9,10 +9,24 @@ import type { AnnotationClass } from '@/stores/classStore';
 
 export interface TrainRun {
   run_id: string;
-  model_family: 'dinov3_lora' | 'dlsia_tunet';
+  // Discriminator literals from schemas.py's ModelConfig union; a saved
+  // Noise2Noise/Noise2Void run carries 'dlsia_denoiser' (see isDenoiserRun).
+  model_family: 'dinov3_lora' | 'dlsia_tunet' | 'dlsia_denoiser';
   model_config: Record<string, unknown>;
   classes: AnnotationClass[];
   render: Record<string, unknown>;
+  /**
+   * Denoising baked into this run's INPUT pixels at training time (see
+   * schemas.DenoiseTrainOpts). Null for a run trained on raw pixels, and
+   * absent entirely on runs saved before the option existed — hence optional
+   * as well as nullable, so `run.denoise &&` is the only safe test.
+   *
+   * Read-only from the frontend's side: inference reapplies it off the run
+   * itself, never off the request, so nothing in the app should offer it as a
+   * choice at predict time. It's surfaced (RunsPanel, ApplyModelPanel) purely
+   * so two runs that expect different input can't look identical.
+   */
+  denoise?: { method: string; strength: number } | null;
   image_size: number;
   hyperparams: Record<string, unknown>;
   source_keys: string[];

@@ -17,6 +17,7 @@ slice it was built from would be the exact bug this shared function prevents.
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -28,6 +29,51 @@ from arrays import _stack_keys, read_slice
 logger = logging.getLogger(__name__)
 
 _VOLUME_WORKERS = 8
+
+
+# Quality ladder offered by the 3-D tab, ascending. Mirrored EXACTLY by the
+# frontend's `QUALITY_LADDER` — `effective_max_dim` walks it, so the two must
+# agree or the client would rasterize its label volume onto a different grid
+# than the raw volume it overlays.
+QUALITY_LADDER = (128, 192, 256, 320, 384, 512, 640, 768, 1024)
+
+# Voxel budget for ONE volume, as uint8 bytes. The 3-D tab holds two (raw plus
+# the client-rasterized label volume), each also uploaded as a GL 3-D texture,
+# so the real footprint is roughly double this.
+#
+# The per-axis cap alone is the wrong constraint: it makes an anisotropic stack
+# needlessly coarse (63 x 3232^2 at max_dim=1024 is only 66 MB) while letting a
+# cubic source reach 1024^3 = 1 GB. Budgeting total voxels lets a thin stack go
+# to full quality and holds a cubic one to roughly 570^3.
+MAX_VOLUME_VOXELS = int(os.getenv("MAX_VOLUME_VOXELS", str(192 * 1024 * 1024)))
+
+
+def effective_max_dim(n_slices: int, height: int, width: int, requested: int) -> int:
+    """Largest ladder quality <= *requested* whose grid fits the voxel budget.
+
+    Mirrored byte-for-byte by the frontend's ``effectiveMaxDim``. Both sides
+    clamp identically so the client can show (and rasterize onto) the grid it
+    will actually receive, instead of discovering a silent server-side
+    downgrade as a dimension mismatch.
+
+    Only ever REDUCES: *requested* is returned untouched whenever it already
+    fits, so arbitrary values (the route accepts any int in 32..1024, not just
+    ladder entries) pass through unchanged and this can never hand back a
+    coarser-than-asked *or* finer-than-asked grid.
+
+    Falls back to the smallest of the ladder floor and *requested* when even
+    that exceeds the budget — a coarse volume beats refusing to render one.
+    """
+    def _fits(quality: int) -> bool:
+        d = volume_dims(n_slices, height, width, quality)
+        return d["nz"] * d["ny"] * d["nx"] <= MAX_VOLUME_VOXELS
+
+    if _fits(requested):
+        return requested
+    for quality in reversed([q for q in QUALITY_LADDER if q < requested]):
+        if _fits(quality):
+            return quality
+    return min(requested, QUALITY_LADDER[0])
 
 
 def volume_dims(n_slices: int, height: int, width: int, max_dim: int) -> dict[str, int]:

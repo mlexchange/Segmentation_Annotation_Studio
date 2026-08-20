@@ -13,6 +13,9 @@ build/
 # Secrets — never commit
 .env
 
+# Local Tiled server config (catalog paths are machine-specific)
+tiled/
+
 # Tiled catalog database (binary, regenerated on first run via start_all.sh)
 .tiled/catalog.db
 .tiled/catalog.db-shm
@@ -64,6 +67,7 @@ frontend/public/models/
 
 # DINOv3 checkpoints (large .pth files; see backend/.env's DINO_MODELS_DIR)
 backend/models/
+backend/models/dinov3/
 
 # MkDocs build output (regenerate with `mkdocs build`)
 site/
