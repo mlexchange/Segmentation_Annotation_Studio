@@ -42,6 +42,7 @@ import export_jobs
 import guides as guides_mod
 import images as images_mod
 import ingest as ingest_mod
+import zarr_source
 import local_fs
 from browse_helpers import (
     _SINGLE_VALUE_FACET_RAW_KEYS,
@@ -68,6 +69,7 @@ from schemas import (
     GuidePayload,
     ImageMeta,
     IngestPreflightRequest,
+    ZarrRegisterRequest,
     MeasureRequest,
     SaveVersionRequest,
 )
@@ -556,7 +558,8 @@ async def image_meta(
     """Return shape / dtype metadata for an image source."""
     def _run() -> ImageMeta:
         node = arrays_mod.resolve_array(source, kind, server_uri, root)
-        meta = arrays_mod.array_shape_meta(node)
+        pyramid = arrays_mod.pyramid_info(source, kind, server_uri, root)
+        meta = arrays_mod.array_shape_meta(node, pyramid)
         sl = arrays_mod.read_slice(node, meta, 0)
         flat = sl.ravel().astype(float)
         return ImageMeta(
@@ -567,6 +570,13 @@ async def image_meta(
             is_rgb=meta["is_rgb"],
             value_range=[float(flat.min()), float(flat.max())],
             keywords=arrays_mod.node_keywords(node),
+            level_key=meta.get("level_key"),
+            level_index=meta.get("level_index"),
+            level_count=meta.get("level_count"),
+            level_height=meta.get("level_height"),
+            level_width=meta.get("level_width"),
+            level_n_slices=meta.get("level_n_slices"),
+            z_downsample=meta.get("z_downsample"),
         )
 
     try:
@@ -602,10 +612,19 @@ async def image_slice(
 
     def _run() -> bytes:
         node = arrays_mod.resolve_array(source, kind, server_uri, root)
-        meta = arrays_mod.array_shape_meta(node)
+        pyramid = arrays_mod.pyramid_info(source, kind, server_uri, root)
+        meta = arrays_mod.array_shape_meta(node, pyramid)
         sl = arrays_mod.read_slice(node, meta, slice_index)
         global_range = None
         if norm == "global":
+            # NB: deriving this from the pyramid's coarsest level was tried and
+            # reverted. It is ~8x faster, but those levels are built by AVERAGING,
+            # which pulls the extremes in hard — on the reference volume the range
+            # came back (-20.7, 18.0) against (-73.0, 71.3) at full resolution.
+            # Since this range IS the contrast window, the cheap version visibly
+            # clips the image. The full-resolution sampler decimates instead of
+            # averaging, so it keeps the extremes; it costs ~3s once per volume
+            # and is then cached.
             global_range = images_mod._sample_global_stats(node, meta)
         rgb = images_mod.render_slice(sl, opts, global_range)
         return images_mod.encode_png(rgb)
@@ -1236,6 +1255,57 @@ async def ingest_status(job_id: str) -> dict:
     if job is None:
         raise HTTPException(404, "Unknown job_id")
     return job
+
+
+@app.get("/api/zarr/inspect")
+async def zarr_inspect(
+    path: str = Query(..., description="Absolute path to a .zarr directory on the server"),
+) -> dict:
+    """Describe a Zarr store's resolution pyramid without registering it.
+
+    Lets the Connect page show what was found — dimensions, dtype, voxel size and
+    the available levels — before the user commits to loading it.
+
+    Raises:
+        HTTPException: 4xx from :func:`zarr_source.inspect_zarr` with a
+            user-facing message (missing path, zipped archive, empty group…).
+    """
+    return await asyncio.to_thread(zarr_source.inspect_zarr, path)
+
+
+@app.post("/api/zarr/preflight")
+async def zarr_preflight(req: ZarrRegisterRequest) -> dict:
+    """Report whether loading this Zarr would collide with an existing node.
+
+    Distinguishes a previous Zarr registration (safe to replace — only catalog
+    rows are dropped) from internally-managed data such as an uploaded image
+    stack, where replacing would delete the files themselves.
+    """
+    return await asyncio.to_thread(
+        zarr_source.preflight_zarr, req.server_uri, req.path, req.container_path
+    )
+
+
+@app.post("/api/zarr/register")
+async def zarr_register(req: ZarrRegisterRequest) -> dict:
+    """Register an on-disk Zarr volume with Tiled, copying no data.
+
+    Unlike ``/api/ingest/upload`` this needs no background job: registration
+    writes catalog rows, not pixels, so it returns in well under a second even
+    for a 56 GB store.
+    """
+    if req.on_conflict not in ingest_mod.ON_CONFLICT_MODES:
+        raise HTTPException(
+            400, f"on_conflict must be one of {sorted(ingest_mod.ON_CONFLICT_MODES)}"
+        )
+    return await asyncio.to_thread(
+        zarr_source.register_zarr,
+        req.server_uri,
+        req.path,
+        req.container_path,
+        req.description,
+        req.on_conflict,
+    )
 
 
 @app.get("/health")

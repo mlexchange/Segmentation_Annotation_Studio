@@ -97,6 +97,44 @@ def _is_container_node(node: Any) -> bool:
     return str(getattr(sf, "value", sf)) == "container"
 
 
+def multiscale_levels(node: Any) -> list[str] | None:
+    """Ordered ``scale*`` child keys of a multiscale (pyramid) container.
+
+    Registered Zarr volumes are OME-NGFF groups: ``scale0/image``,
+    ``scale1/image``, … Returns the level keys finest-first, or None when *node*
+    is not a pyramid.
+    """
+    if not _is_container_node(node):
+        return None
+    try:
+        keys = [k for k in node if str(k).startswith("scale")]
+    except Exception:  # noqa: BLE001 — not enumerable → not a pyramid
+        return None
+    if len(keys) < 2:
+        return None
+
+    def _index(key: str) -> int:
+        digits = "".join(ch for ch in str(key) if ch.isdigit())
+        return int(digits) if digits else 0
+
+    return sorted(keys, key=_index)
+
+
+def _level_array(node: Any, level_key: str) -> Any | None:
+    """The array inside one pyramid level (``scaleN`` wraps a single array)."""
+    try:
+        level = node[level_key]
+    except Exception:  # noqa: BLE001
+        return None
+    if not _is_container_node(level):
+        return level
+    try:
+        first = next(iter(level))
+    except StopIteration:
+        return None
+    return level[first]
+
+
 def _descend_to_stack(node: Any, max_depth: int = 8) -> Any:
     """Resolve a Browse selection to the array/stack it should open.
 
@@ -105,7 +143,19 @@ def _descend_to_stack(node: Any, max_depth: int = 8) -> Any:
     itself a container) but STOPS at a container whose children are arrays —
     returning that container so it can be treated as a slice stack (one array
     node per slice). Array nodes (and non-Tiled inputs) are returned unchanged.
+
+    A multiscale Zarr volume is handled first and explicitly. The generic walk
+    below would descend into ``scale0``, find its single ``image`` child, and
+    return ``scale0`` as a one-element "stack" — presenting a whole 3-D volume as
+    a single slice. Selecting such a dataset resolves to the FINEST level's
+    array, which is the full-resolution volume the user expects to annotate.
     """
+    levels = multiscale_levels(node)
+    if levels:
+        array = _level_array(node, levels[0])
+        if array is not None:
+            return array
+
     depth = 0
     while _is_container_node(node) and depth < max_depth:
         try:
@@ -165,11 +215,98 @@ def node_keywords(node: Any) -> list[str]:
     return []
 
 
-def array_shape_meta(node: Any) -> dict[str, Any]:
+def pyramid_info(
+    source: str,
+    kind: str,
+    server_uri: str | None = None,
+    root: str | None = None,
+) -> dict[str, Any] | None:
+    """Describe the pyramid *source* belongs to, if it addresses one level.
+
+    Annotations are stored in FULL-RESOLUTION coordinates regardless of which
+    level is being viewed, so the caller needs the finest level's shape even when
+    a coarse level is open. Returns ``None`` for anything that is not a level of
+    a multiscale volume.
+
+    Returns:
+        ``{"level_key", "level_index", "level_count", "full_shape",
+        "z_downsample"}`` where ``z_downsample`` is finest-z / this-level-z — the
+        factor mapping a full-resolution slice index onto this level.
+    """
+    if kind != "tiled":
+        return None
+    parts = [p for p in source.strip("/").split("/") if p]
+    # A level is addressed as <volume>/scaleN or <volume>/scaleN/<array>.
+    for trim in (1, 2):
+        if len(parts) <= trim:
+            continue
+        level_key = parts[-trim]
+        if not str(level_key).startswith("scale"):
+            continue
+        try:
+            parent = resolve_container(("/".join(parts[:-trim])), kind, server_uri, root)
+        except HTTPException:
+            return None
+        levels = multiscale_levels(parent)
+        if not levels or level_key not in levels:
+            return None
+        finest = _level_array(parent, levels[0])
+        current = _level_array(parent, level_key)
+        if finest is None or current is None:
+            return None
+        full_shape = [int(v) for v in finest.shape]
+        cur_shape = [int(v) for v in current.shape]
+        if len(full_shape) != 3 or len(cur_shape) != 3:
+            return None
+        return {
+            "level_key": level_key,
+            "level_index": levels.index(level_key),
+            "level_count": len(levels),
+            "full_shape": full_shape,
+            # Ratio, not an integer factor: real pyramids are not always clean
+            # powers of two in z (690 -> 172 is 4.0116), so rounding a fixed
+            # factor would drift by whole slices at the end of the volume.
+            "z_downsample": (full_shape[0] / cur_shape[0]) if cur_shape[0] else 1.0,
+        }
+    return None
+
+
+def resolve_container(
+    source: str,
+    kind: str,
+    server_uri: str | None = None,
+    root: str | None = None,
+) -> Any:
+    """Resolve *source* to its node WITHOUT descending to an array/stack.
+
+    :func:`resolve_array` deliberately descends (a Browse selection should open
+    the data); this is for callers that need the container itself, such as
+    reading a volume's pyramid structure.
+    """
+    if kind != "tiled":
+        raise HTTPException(422, "Only tiled sources have containers")
+    client = get_tiled_client(server_uri, api_key_for_uri(server_uri))
+    node: Any = client
+    for part in source.strip("/").split("/"):
+        if not part:
+            continue
+        try:
+            node = node[part]
+        except KeyError as exc:
+            raise HTTPException(404, f"Tiled path not found: {source!r}") from exc
+    return node
+
+
+def array_shape_meta(node: Any, pyramid: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return shape-dispatch metadata for *node*.
 
     Args:
         node: A Tiled array node or NumPy array.
+        pyramid: Optional :func:`pyramid_info` result. When given, the reported
+            ``height``/``width``/``n_slices`` describe the FINEST level rather
+            than *node* — so annotation coordinates are full-resolution whichever
+            level is displayed — and ``z_downsample`` tells :func:`read_slice`
+            how to map a full-resolution slice index onto this level.
 
     Returns:
         Dict with keys: ``n_slices``, ``height``, ``width``, ``dtype``,
@@ -211,7 +348,7 @@ def array_shape_meta(node: Any) -> dict[str, Any]:
         }
     if len(shape) == 3:
         n, h, w = shape
-        return {
+        meta = {
             "n_slices": n,
             "height": h,
             "width": w,
@@ -219,6 +356,24 @@ def array_shape_meta(node: Any) -> dict[str, Any]:
             "is_rgb": False,
             "shape_kind": "NHW",
         }
+        if pyramid:
+            full_z, full_h, full_w = pyramid["full_shape"]
+            # Report the finest level's geometry. The canvas draws the (smaller)
+            # level image at these dimensions, so every annotation coordinate is
+            # full-resolution by construction — no rescaling on save or load.
+            meta.update(
+                n_slices=full_z,
+                height=full_h,
+                width=full_w,
+                z_downsample=pyramid["z_downsample"],
+                level_key=pyramid["level_key"],
+                level_index=pyramid["level_index"],
+                level_count=pyramid["level_count"],
+                level_height=h,
+                level_width=w,
+                level_n_slices=n,
+            )
+        return meta
     if len(shape) == 4 and shape[3] in (3, 4):
         n, h, w = shape[:3]
         return {
@@ -286,9 +441,15 @@ def read_slice(node: Any, meta: dict[str, Any], idx: int) -> np.ndarray:
         return np.asarray(node)
     if kind == "HWC":
         return np.asarray(node)
-    if kind == "NHW":
-        return np.asarray(node[idx])
-    if kind == "NHWC":
+    if kind in ("NHW", "NHWC"):
+        # `idx` is a FULL-RESOLUTION slice index when a pyramid level is open
+        # (see `array_shape_meta`); map it onto this level's own z range.
+        z_down = float(meta.get("z_downsample") or 1.0)
+        if z_down != 1.0:
+            limit = int(meta.get("level_n_slices") or 0)
+            idx = int(round(idx / z_down))
+            if limit:
+                idx = max(0, min(limit - 1, idx))
         return np.asarray(node[idx])
     if kind == "STACK":
         keys = meta.get("keys") or _stack_keys(node)

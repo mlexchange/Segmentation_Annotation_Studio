@@ -34,11 +34,26 @@ export default function SliceNavigator() {
   /** Steps forward one slice (clamped at the last slice); writes to the dataset store. */
   const next = () => setSlice(Math.min(n - 1, currentSlice + 1));
 
+  // For a multiscale volume the slider is in FULL-RESOLUTION slice indices even
+  // when a coarse level is displayed, so say which level is actually on screen —
+  // otherwise "slice 345 / 690" over a 345-slice level is quietly confusing.
+  const onCoarseLevel = !!meta.levelKey && (meta.levelIndex ?? 0) > 0;
+
   return (
     <div className="flex flex-col gap-2">
       <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">
         Slice {currentSlice + 1} / {n}
       </span>
+
+      {onCoarseLevel && (
+        <span
+          className="text-[11px] leading-snug text-amber-600"
+          title="Slice numbers and annotation coordinates are always full-resolution; the image shown is downsampled."
+        >
+          Viewing {meta.levelKey} ({meta.levelWidth}² px, {meta.levelNSlices} slices) — indices stay
+          full-resolution.
+        </span>
+      )}
 
       <DebouncedSlider
         min={0}

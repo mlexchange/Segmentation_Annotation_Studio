@@ -10,6 +10,18 @@ export interface ImageMeta {
   dtype: string;
   isRgb: boolean;
   valueRange: [number, number];
+  /** Multiscale (Zarr) volumes only — which pyramid level is being displayed.
+   *  `width`/`height`/`nSlices` above always describe the FINEST level, because
+   *  annotations are stored in full-resolution coordinates whichever level is
+   *  open; these describe the image actually drawn underneath them. */
+  levelKey?: string | null;
+  levelIndex?: number | null;
+  levelCount?: number | null;
+  levelWidth?: number | null;
+  levelHeight?: number | null;
+  levelNSlices?: number | null;
+  /** Finest-z / level-z. When > 1, only every f-th full-res slice is addressable. */
+  zDownsample?: number | null;
 }
 
 export interface RenderOpts {

@@ -27,6 +27,7 @@ import { API_BASE } from '@/config';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { useOpenInAnnotate } from '@/hooks/useOpenInAnnotate';
 import IngestDropzone from '@/components/Ingest/IngestDropzone';
+import ZarrLoader from '@/components/Ingest/ZarrLoader';
 
 interface ServerInfo {
   name: string;
@@ -146,6 +147,13 @@ export default function ConnectPage() {
    * one drillable sample; `focusPath` selects it so the user still lands on it.
    */
   const browseIngested = (containerPath: string) => connectTiled(null, true, containerPath);
+
+  /** Open a registered Zarr level (a full Tiled path) straight in Annotate. */
+  const annotateZarr = (tiledPath: string) => {
+    const containerPath = tiledPath.split('/').slice(0, -3).join('/') || 'browse';
+    connectTiled(containerPath, false);
+    void openTiledArray(tiledPath, selectedServerUri);
+  };
 
   // Jump straight from ingest to the Annotate tab for the first uploaded sample.
   const annotateIngested = (containerPath: string, firstKey: string) => {
@@ -367,11 +375,28 @@ export default function ConnectPage() {
               <h3 className="text-base font-semibold text-white">Load / Ingest Datasets</h3>
             </div>
             {selectedServerUri ? (
-              <IngestDropzone
-                serverUri={selectedServerUri}
-                onBrowse={browseIngested}
-                onAnnotate={annotateIngested}
-              />
+              <>
+                <IngestDropzone
+                  serverUri={selectedServerUri}
+                  onBrowse={browseIngested}
+                  onAnnotate={annotateIngested}
+                />
+
+                {/* Zarr volumes are too large to upload; they are registered in
+                    place instead, so this sits beside the dropzone rather than
+                    inside it. */}
+                <div className="border-t border-white/10 pt-4">
+                  <div className="mb-2 flex items-center gap-2">
+                    <Stack size={16} className="text-sky-300" />
+                    <h4 className="text-sm font-semibold text-white">Load a Zarr volume</h4>
+                  </div>
+                  <ZarrLoader
+                    serverUri={selectedServerUri}
+                    onBrowse={browseIngested}
+                    onAnnotate={annotateZarr}
+                  />
+                </div>
+              </>
             ) : (
               <p className="text-xs text-sky-300/90">Select a server above to ingest data.</p>
             )}

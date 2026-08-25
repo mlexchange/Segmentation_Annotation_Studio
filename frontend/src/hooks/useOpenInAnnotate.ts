@@ -86,6 +86,15 @@ export function useOpenInAnnotate() {
         dtype: meta.dtype,
         isRgb: meta.is_rgb,
         valueRange: meta.value_range,
+        // Multiscale volumes: width/height/nSlices above are the FINEST level's
+        // (annotations live in full-res coordinates); these say what is drawn.
+        levelKey: meta.level_key ?? null,
+        levelIndex: meta.level_index ?? null,
+        levelCount: meta.level_count ?? null,
+        levelWidth: meta.level_width ?? null,
+        levelHeight: meta.level_height ?? null,
+        levelNSlices: meta.level_n_slices ?? null,
+        zDownsample: meta.z_downsample ?? null,
       });
       // setDataset resets to slice 0; jump to the requested slice (clamped).
       if (initialSlice > 0) setSlice(Math.min(initialSlice, Math.max(0, meta.n_slices - 1)));

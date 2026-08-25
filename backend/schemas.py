@@ -281,6 +281,28 @@ class IngestPreflightRequest(BaseModel):
     server_uri: str | None = None
 
 
+class ZarrRegisterRequest(BaseModel):
+    """Request body for registering an on-disk Zarr volume with Tiled.
+
+    No bytes are uploaded: the volume stays where it is and Tiled reads it in
+    place, so this carries a server-side path rather than file content.
+
+    Attributes:
+        path: Absolute path to the ``.zarr`` directory on the server.
+        container_path: Target container, e.g. ``browse``.
+        description: Optional keyword(s) stored on the node (same treatment as
+            the drag-and-drop ingest, so the volume is filterable in Browse).
+        on_conflict: ``"fail"``, ``"replace"`` or ``"skip"`` when the key exists.
+        server_uri: Target Tiled server URI; ``None`` uses the default server.
+    """
+
+    path: str
+    container_path: str = "browse"
+    description: str = ""
+    on_conflict: str = "fail"
+    server_uri: str | None = None
+
+
 class GuideClass(BaseModel):
     """One class entry in an annotation guide.
 
@@ -321,6 +343,16 @@ class ImageMeta(BaseModel):
         value_range: ``[min, max]`` of the first slice.
         keywords: Dataset tags stored at ingest; each is pre-created as an
             annotation class in the Annotate tab.
+        level_key: For a multiscale Zarr volume, the pyramid level being read
+            (e.g. ``"scale2"``). ``height``/``width``/``n_slices`` always
+            describe the FINEST level, since annotations are stored in
+            full-resolution coordinates; these fields describe what is actually
+            being displayed underneath them.
+        level_index: Index of that level, finest = 0.
+        level_count: Number of levels in the pyramid.
+        level_height / level_width / level_n_slices: The open level's own shape.
+        z_downsample: Finest-z / level-z. When > 1 the level can only address
+            every f-th full-resolution slice.
     """
 
     n_slices: int
@@ -330,3 +362,10 @@ class ImageMeta(BaseModel):
     is_rgb: bool
     value_range: list[float]
     keywords: list[str] = Field(default_factory=list)
+    level_key: str | None = None
+    level_index: int | None = None
+    level_count: int | None = None
+    level_height: int | None = None
+    level_width: int | None = None
+    level_n_slices: int | None = None
+    z_downsample: float | None = None
