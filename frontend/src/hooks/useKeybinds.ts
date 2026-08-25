@@ -2,6 +2,7 @@
  * useKeybinds — keyboard shortcuts for the annotation workspace.
  *
  * Tools:   p=polygon  l=ellipse  e=rectangle  r=eraser  b=brush  h=threshold brush
+ *          k=sampler (fits the threshold band from a lassoed example)
  *          f=fill  g=magic  m=magnetic  s=select  (each key is a letter in the label)
  * Pan:     hold Space (reverts to the previous tool on release)
  * View:    x=next slice (forward)  t=fit image to screen  arrows=prev/next slice
@@ -24,6 +25,7 @@ const TOOL_KEYBINDS: Record<string, Tool> = {
   l: 'ellipse',     // eLlipse (e is taken by rect)
   b: 'brush',
   h: 'threshold',   // tHreshold brush (t is fit-to-screen)
+  k: 'sampler',     // eyedropper lasso that fits the threshold band
   f: 'fill',
   r: 'eraser',      // eRaser
 };

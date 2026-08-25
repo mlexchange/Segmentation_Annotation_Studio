@@ -28,6 +28,7 @@ import InsightsModal from '@/components/annotate/InsightsModal';
 import VersionHistoryModal from '@/components/annotate/VersionHistoryModal';
 import VersionPreviewBar from '@/components/annotate/VersionPreviewBar';
 import PerfOverlay from '@/components/annotate/PerfOverlay';
+import type { SamplerFit } from '@/components/annotate/AnnotationCanvas';
 import { initPerf } from '@/lib/perf';
 import SaveModal from '@/components/annotate/SaveModal';
 import type { SaveDraftPayload } from '@/hooks/useSave';
@@ -107,6 +108,17 @@ export default function AnnotatePage() {
 
   // Dev-only timing HUD (?perf=1). Read once — the flag is fixed for the session.
   const [perfOn] = useState(() => initPerf());
+
+  // Latest Sampler lasso fit — transient UI state, not persisted: only the band
+  // and blur it applies are durable.
+  const [samplerFit, setSamplerFit] = useState<SamplerFit | null>(null);
+  /** Put back the band and blur that were in force before the last fit. */
+  const revertSamplerFit = useCallback(() => {
+    if (!samplerFit) return;
+    useToolStore.getState().setThresholdBand(samplerFit.previousBand[0], samplerFit.previousBand[1]);
+    setBlur(samplerFit.previousBlur);
+    setSamplerFit(null);
+  }, [samplerFit]);
 
   // Crash-recovery autosave (local draft only, no Tiled sync)
   useDraftSync(sourceKey);
@@ -246,6 +258,8 @@ export default function AnnotatePage() {
             histogramBins={histogramBins}
             display={thresholdDisplay}
             upscale={upscale}
+            samplerFit={samplerFit}
+            onRevertSamplerFit={revertSamplerFit}
           />
           <hr />
           <DisplayControls
@@ -355,6 +369,8 @@ export default function AnnotatePage() {
             blur={blur}
             upscale={upscale}
             onHistogram={setHistogramBins}
+            onSamplerFit={setSamplerFit}
+            onBlurChange={setBlur}
             activeClassId={activeClassId}
             activeBrushShapeId={activeBrushShapeId}
             onNewBrushInstance={setActiveBrushShapeId}

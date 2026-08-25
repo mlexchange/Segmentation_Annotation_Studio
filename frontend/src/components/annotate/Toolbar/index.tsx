@@ -4,7 +4,7 @@
  *           f=fill, s=select, g=magic, m=magnetic, Space=pan (hold), x=next slice,
  *           t=fit to screen, Ctrl/Cmd+Z=undo
  */
-import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, PaintBrush, Drop, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight } from '@phosphor-icons/react';
+import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, PaintBrush, Drop, Eyedropper, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight, ArrowCounterClockwise } from '@phosphor-icons/react';
 import { useMemo } from 'react';
 import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
@@ -15,7 +15,20 @@ import DebouncedSlider from '@/components/common/DebouncedSlider';
 import HistogramControl from '@/components/annotate/HistogramControl';
 import { otsuThreshold } from '@/lib/magicwand';
 import { displayAffineFor, remapHistogramToDisplay } from '@/lib/displayTransform';
+import { describeFit } from '@/lib/thresholdFit';
+
+import type { SamplerFit } from '@/components/annotate/AnnotationCanvas';
 import { useSam } from '@/hooks/useSam';
+
+/** Channel names in the user's terms, for the projection readout. */
+const CHANNEL_LABELS: Record<string, string> = {
+  intensity: 'brightness',
+  dogFine: 'fine texture',
+  dogCoarse: 'coarse texture',
+  localStd: 'graininess',
+  meanRatio: 'local contrast',
+};
+
 
 // macOS labels the Alt key "Option" (⌥); the key name only differs on screen.
 const IS_MAC = typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent);
@@ -81,9 +94,83 @@ function ToolButton({ tool, label, icon, keybind, activeTool, disabled, onSelect
   );
 }
 
+/** Readout for one Sampler fit: what it chose, how well it did, and an undo. */
+function SamplerResult({ fit, onRevert }: { fit: SamplerFit; onRevert?: () => void }) {
+  const { label, quality } = describeFit(fit);
+  const tone =
+    quality === 'good' ? 'text-emerald-600' : quality === 'fair' ? 'text-amber-600' : 'text-red-600';
+
+  // The band could not be expressed at the current display settings — applying it
+  // would have selected nothing, so nothing was applied.
+  if (fit.collapsed) {
+    return (
+      <div className="flex flex-col gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-1.5">
+        <span className="text-[11px] font-medium text-amber-700">Band not applied</span>
+        <span className="text-[10px] leading-snug text-amber-700">
+          Your brightness/contrast/levels squash the fitted range ({fit.lo}–{fit.hi}) into a
+          single displayed value, so no band can express it. Reset Levels (or lower Contrast)
+          and sample again.
+        </span>
+      </div>
+    );
+  }
+
+  const projected = fit.mode === 'projected';
+  // Which channels the projection actually leaned on — the reason it beat plain
+  // brightness, in the user's terms rather than as a weight vector.
+  const topChannels = (fit.weights ?? [])
+    .map((w) => ({ ...w, mag: Math.abs(w.weight) }))
+    .sort((a, b) => b.mag - a.mag)
+    .filter((w) => w.mag > 0.15)
+    .slice(0, 2)
+    .map((w) => CHANNEL_LABELS[w.name] ?? w.name);
+
+  return (
+    <div className="flex flex-col gap-1 rounded border border-gray-200 bg-gray-50 px-2 py-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] text-gray-600">
+          Band <span className="tabular-nums font-medium">{fit.displayLo}–{fit.displayHi}</span>
+        </span>
+        {onRevert && (
+          <button
+            type="button"
+            onClick={onRevert}
+            title="Restore the band and blur from before this fit"
+            className="flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-gray-500 hover:bg-gray-200 hover:text-sky-700"
+          >
+            <ArrowCounterClockwise size={11} />
+            Revert
+          </button>
+        )}
+      </div>
+      <span className={`text-[10px] leading-snug ${tone}`}>{label}</span>
+      <span className="text-[10px] text-gray-500 tabular-nums">
+        match {(fit.dice * 100).toFixed(0)}% · skill {(fit.skill * 100).toFixed(0)}% ·{' '}
+        covers {(fit.coverage * 100).toFixed(0)}%
+        {fit.extraSigma > 0 && ` · blur ${fit.appliedBlur.toFixed(2)}`}
+      </span>
+      {projected && (
+        // The gate is no longer brightness, which changes how the rest of the
+        // panel behaves — say so rather than letting it be discovered.
+        <span className="text-[10px] leading-snug text-sky-700 border-t border-gray-200 pt-1">
+          Using a texture-aware score
+          {topChannels.length > 0 && ` (mostly ${topChannels.join(' + ')})`} — brightness alone
+          scored {((fit.intensitySkill ?? 0) * 100).toFixed(0)}%. The band below now applies to
+          that score, so the Display sliders no longer steer this brush. Sample a plain region
+          to go back to brightness.
+        </span>
+      )}
+    </div>
+  );
+}
+
 interface ToolbarProps {
   /** When true, drawing tools are greyed out (e.g. no class defined yet). */
   disabled?: boolean;
+  /** Latest Sampler lasso result, shown as a quality readout. */
+  samplerFit?: SamplerFit | null;
+  /** Restore the band/blur that were in force before the last fit. */
+  onRevertSamplerFit?: () => void;
   /** 256-bin luminance histogram of the current slice — drives the threshold band
    *  picker. Owned by AnnotatePage (the canvas emits it); null before load. It is
    *  sampled from the PREPROCESSED base, so it must be remapped through the display
@@ -96,7 +183,10 @@ interface ToolbarProps {
 }
 
 /** Renders the tool radiogroup, undo/redo, and the active tool's parameter controls. */
-export default function Toolbar({ disabled = false, histogramBins = null, display, upscale = 1 }: ToolbarProps) {
+export default function Toolbar({
+  disabled = false, histogramBins = null, display, upscale = 1,
+  samplerFit = null, onRevertSamplerFit,
+}: ToolbarProps) {
   const {
     tool, setTool, brushSize, setBrushSize, fillThreshold, setFillThreshold,
     thresholdLo, thresholdHi, setThresholdBand,
@@ -255,8 +345,33 @@ export default function Toolbar({ disabled = false, histogramBins = null, displa
         </div>
       )}
 
-      {tool === 'threshold' && (
+      {(tool === 'threshold' || tool === 'sampler') && (
         <div className="flex flex-col gap-2 mt-1">
+          {/* Sampling is a mode of this tool, not a tool of its own: its only
+              output is this panel's band (and blur), so it belongs here. */}
+          <div className="flex flex-col gap-1 rounded border border-sky-200 bg-sky-50 px-2 py-1.5">
+            <button
+              type="button"
+              onClick={() => setTool(tool === 'sampler' ? 'threshold' : 'sampler')}
+              aria-pressed={tool === 'sampler'}
+              className={cn(
+                'flex items-center justify-center gap-1.5 rounded-md py-1 text-xs font-medium border transition-colors',
+                tool === 'sampler'
+                  ? 'bg-sky-600 text-white border-sky-700'
+                  : 'bg-white text-sky-700 border-sky-300 hover:bg-sky-100',
+              )}
+            >
+              <Eyedropper size={14} />
+              {tool === 'sampler' ? 'Sampling — draw a loop' : 'Set band from a region'}
+            </button>
+            <p className="text-[10px] leading-snug text-sky-800/80">
+              Lasso one example of the feature. The band is fitted to match inside it and
+              avoid the ring just outside — which also highlights similar features elsewhere.
+              Nothing is annotated.
+            </p>
+            {samplerFit && <SamplerResult fit={samplerFit} onRevert={onRevertSamplerFit} />}
+          </div>
+
           <HistogramControl
             bins={bandHistogram}
             lo={thresholdLo}

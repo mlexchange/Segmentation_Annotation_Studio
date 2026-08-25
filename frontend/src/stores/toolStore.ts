@@ -3,7 +3,7 @@
  */
 import { create } from 'zustand';
 
-export type Tool = 'pan' | 'select' | 'polygon' | 'magnetic' | 'magic' | 'rectangle' | 'ellipse' | 'brush' | 'threshold' | 'fill' | 'eraser';
+export type Tool = 'pan' | 'select' | 'polygon' | 'magnetic' | 'magic' | 'rectangle' | 'ellipse' | 'brush' | 'threshold' | 'sampler' | 'fill' | 'eraser';
 
 export type MagicMode = 'contiguous' | 'global';
 /** Magic-selection engine: SAM (learned object prior) or the classic wand. */

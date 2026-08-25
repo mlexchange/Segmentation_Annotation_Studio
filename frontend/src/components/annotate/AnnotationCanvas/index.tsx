@@ -31,7 +31,7 @@ import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, type 
 import { useSam } from '@/hooks/useSam';
 import { renderAdjusted, renderPreprocessOnly } from '@/lib/sam/adjust';
 import { gridFor, fullResGridFor, rasterizeShapes, rasterizeUnion, stampStroke } from '@/lib/rasterize';
-import { keepComponentsAtPoints } from '@/lib/morphology';
+import { keepComponentsAtPoints, dilate, erode, removeSmallComponents } from '@/lib/morphology';
 import { unionShapesToPolygons, unionShapesToMultiPolygon, unionShapesChecked, eraseStampToMultiPolygon, subtractFromShape, regionsToMultiPolygon } from '@/lib/polybool';
 import { computeRegionOps, type RegionOp } from '@/lib/regionOps';
 import { clipShapesToOthers, clipShapesToOthersMask, hasOtherClass } from '@/lib/clipToClasses';
@@ -39,7 +39,15 @@ import { mergeNewWithSameClass, expandSameClassOverlap } from '@/lib/mergeSameCl
 import { useClipboardStore } from '@/stores/clipboardStore';
 import { colormapTables, type ColormapName } from '@/lib/colormaps';
 import ShapesLayer from './ShapesLayer';
-import { displayAffineFor, displayBandToBase } from '@/lib/displayTransform';
+import { displayAffineFor, displayBandToBase, baseToDisplay, displayToBase } from '@/lib/displayTransform';
+import {
+  backgroundRing, fitWithBlurSweep, combineSigma, BLUR_CANDIDATES, MAX_RING_WIDTH,
+  fitBand, sampleHistograms, type SweepResult,
+} from '@/lib/thresholdFit';
+import {
+  buildChannels, fitProjection, projectToScore, CHANNEL_NAMES,
+} from '@/lib/featureChannels';
+import { applyGaussianBlurGray } from '@/lib/blur';
 import { time } from '@/lib/perf';
 
 // macOS labels the Alt key "Option" (⌥). e.altKey is true for it either way,
@@ -49,6 +57,36 @@ const REMOVE_KEY_LABEL = IS_MAC ? 'Option' : 'Alt';
 
 /** Shared stable empty shape list — see `storeShapes` for why identity matters. */
 const EMPTY_SHAPES: Shape[] = [];
+
+/** Outcome of a Sampler lasso: the fitted band plus what it took to get there. */
+export interface SamplerFit extends SweepResult {
+  /** The band converted into the DISPLAYED space the threshold knobs use. */
+  displayLo: number;
+  displayHi: number;
+  /** True when the display transform squashes the fitted range to one value, so
+   *  the band cannot be expressed at the current brightness/contrast/levels. */
+  collapsed: boolean;
+  /** Band and blur in force before the fit, so the UI can offer Revert. */
+  previousBand: [number, number];
+  previousBlur: number;
+  /** Blur the fit settled on (current combined with the swept extra). */
+  appliedBlur: number;
+  /** Which signal the brush now gates on: raw displayed intensity, or a fitted
+   *  combination of intensity and texture channels. */
+  mode?: 'intensity' | 'projected';
+  /** Skill intensity alone managed, so the gain from projecting is visible. */
+  intensitySkill?: number;
+  /** Contribution of each channel to the projection, for the readout. */
+  weights?: Array<{ name: string; weight: number }>;
+}
+
+/** How far (image px) the cursor travels before the sampler lasso drops a new
+ *  live-wire anchor. Larger = fewer dijkstra runs but looser snapping. */
+const SAMPLER_ANCHOR_STEP = 40;
+
+/** Smallest island (grid cells) a threshold stroke keeps after regularization.
+ *  Below this a region is thresholding noise, not a feature. */
+const THRESHOLD_MIN_REGION = 12;
 
 /** Upscale budget: the working resolution is clamped back to 1x past this many
  *  pixels so a large slice at 4x can't exhaust memory (~64 MP ≈ 256 MB of RGBA). */
@@ -75,6 +113,10 @@ interface AnnotationCanvasProps {
   upscale?: number;
   /** Emits the current slice's 256-bin luminance histogram when it loads. */
   onHistogram?: (bins: number[]) => void;
+  /** Result of a Sampler lasso fit (null when it could not fit), for the Toolbar. */
+  onSamplerFit?: (fit: SamplerFit | null) => void;
+  /** Lets the Sampler apply the blur sigma it chose. */
+  onBlurChange?: (sigma: number) => void;
   activeClassId: number | null;
   activeBrushShapeId: string | null;
   onNewBrushInstance: (id: string) => void;
@@ -418,6 +460,8 @@ export default function AnnotationCanvas({
   blur = 0,
   upscale = 1,
   onHistogram,
+  onSamplerFit,
+  onBlurChange,
   activeClassId,
   activeBrushShapeId,
   onNewBrushInstance,
@@ -467,6 +511,27 @@ export default function AnnotationCanvas({
     imageData: ImageData;
   } | null>(null);
 
+  // Sampler lasso: a loop drawn to teach the Threshold Brush what to select.
+  // Buffered in a ref like the brush so dragging causes no re-renders, and purely
+  // a measurement gesture — it commits no shape and touches no history.
+  //
+  // It snaps to edges using the same live-wire machinery as the magnetic tool:
+  // an anchor is dropped every `SAMPLER_ANCHOR_STEP` image pixels and the segment
+  // between anchors is the least-cost path, so the sample follows the feature's
+  // real boundary instead of a shaky hand-drawn one. A tighter sample means a
+  // cleaner positive histogram, which is what the whole fit rests on.
+  const samplerLassoRef = useRef<{
+    /** Snapped points locked in so far (flat [x,y,…] image coords). */
+    committed: number[];
+    /** Where the current live-wire segment starts. */
+    anchor: { x: number; y: number };
+    /** First point, so the loop can be closed back to it. */
+    start: { x: number; y: number };
+    cm: CostMap | null;
+    /** Dijkstra predecessor map from `anchor`; null when snapping is unavailable. */
+    prev: Int32Array | null;
+  } | null>(null);
+
   const { kind, source, serverUri, meta, currentSlice, renderOpts } = useDatasetStore();
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
@@ -492,6 +557,7 @@ export default function AnnotationCanvas({
   const magicEdgeStop = useToolStore((s) => s.magicEdgeStop);
   const magicEngine = useToolStore((s) => s.magicEngine);
   const setMagicEngine = useToolStore((s) => s.setMagicEngine);
+  const setTool = useToolStore((s) => s.setTool);
   const samDetail = useToolStore((s) => s.samDetail);
   const samThreshold = useToolStore((s) => s.samThreshold);
   const samAvoidLabeled = useToolStore((s) => s.samAvoidLabeled);
@@ -847,6 +913,197 @@ export default function AnnotationCanvas({
     (underlyingTool === 'brush' || underlyingTool === 'eraser' || underlyingTool === 'threshold') &&
     !!meta && !isPreviewing;
 
+  /**
+   * Fit the Threshold Brush band from a lassoed example and apply it.
+   *
+   * Everything inside the loop is a positive example; a ring just outside it
+   * supplies negatives, so the result means "fill this and not what it touches"
+   * rather than "fill everything this bright". Work happens on a crop around the
+   * lasso, which keeps the blur sweep cheap on a full-resolution slice.
+   */
+  const runSamplerFit = (path: number[]): void => {
+    if (!meta || path.length < 6) { onSamplerFit?.(null); return; }
+    const field = ensureThresholdField();
+    if (!field) { onSamplerFit?.(null); return; }
+    const { gw, gh, scale } = field;
+
+    // Everything below works on a CROP around the lasso, never the whole slice.
+    // Rasterizing and especially dilating full-grid is what made a large sample
+    // crawl: dilation costs one pass over its grid per cell of ring width, so on
+    // a 2560² field that is billions of operations for a region a few hundred
+    // pixels across. Cropping first makes the cost scale with the sample.
+    let minGX = Infinity, minGY = Infinity, maxGX = -Infinity, maxGY = -Infinity;
+    for (let i = 0; i + 1 < path.length; i += 2) {
+      const gx = path[i] / scale;
+      const gy = path[i + 1] / scale;
+      if (gx < minGX) minGX = gx;
+      if (gx > maxGX) maxGX = gx;
+      if (gy < minGY) minGY = gy;
+      if (gy > maxGY) maxGY = gy;
+    }
+    if (!Number.isFinite(minGX) || maxGX < minGX) { onSamplerFit?.(null); return; }
+
+    // Margin: the ring, plus slack so the widest blur kernel is not distorted by
+    // the crop edge. Ring width is estimated from the lasso's area in cells.
+    const approxArea = Math.max(1, (maxGX - minGX) * (maxGY - minGY));
+    const ringWidth = Math.min(MAX_RING_WIDTH, Math.max(4, Math.round(Math.sqrt(approxArea) / 2)));
+    const margin = ringWidth + Math.ceil(3 * Math.max(...BLUR_CANDIDATES)) + 2;
+
+    const x0 = Math.max(0, Math.floor(minGX) - margin);
+    const y0 = Math.max(0, Math.floor(minGY) - margin);
+    const x1 = Math.min(gw - 1, Math.ceil(maxGX) + margin);
+    const y1 = Math.min(gh - 1, Math.ceil(maxGY) + margin);
+    const cw = x1 - x0 + 1;
+    const ch = y1 - y0 + 1;
+    if (cw < 2 || ch < 2) { onSamplerFit?.(null); return; }
+
+    // Rasterize the lasso directly into crop coordinates by shifting it into the
+    // crop's frame (image units), so no full-size mask is ever allocated.
+    const shifted = path.map((v, i) => (i % 2 === 0 ? v - x0 * scale : v - y0 * scale));
+    const lassoShape: Shape = { id: 'sampler', classId: 0, kind: 'polygon', points: shifted };
+    const cropPos = rasterizeShapes([lassoShape], cw, ch, scale);
+    const cropNeg = backgroundRing(cropPos, cw, ch, dilate, ringWidth);
+
+    const cropField = new Float32Array(cw * ch);
+    for (let y = 0; y < ch; y++) {
+      const src = (y0 + y) * gw + x0;
+      const dst = y * cw;
+      for (let x = 0; x < cw; x++) cropField[dst + x] = field.gray[src + x];
+    }
+
+    const result = fitWithBlurSweep(cropField, cw, ch, cropPos, cropNeg, applyGaussianBlurGray);
+    if (!result.ok) { onSamplerFit?.(null); return; }
+
+    // Phase 2: also try a texture-aware score. Intensity alone cannot separate
+    // materials that share a grey range but differ in grain, nor a material whose
+    // brightness drifts across the slice. Fitting a projection over intensity +
+    // band-pass + local-std + local-mean-ratio, then running the SAME band fitter
+    // on the projected score, handles both — and because the score is graded by
+    // the same skill number, the two options are directly comparable.
+    const channels = buildChannels(cropField, cw, ch);
+    const projection = fitProjection(channels, cropPos, cropNeg);
+    let projected: SweepResult | null = null;
+    if (projection) {
+      const score = projectToScore(channels, projection);
+      const { posHist, negHist } = sampleHistograms(score, cropPos, cropNeg);
+      const fit = fitBand(posHist, negHist);
+      if (fit.ok) projected = { ...fit, extraSigma: 0 };
+    }
+
+    // Only switch to the projected score when it is meaningfully better. Equal
+    // results should stay on plain intensity: it is the mode the display sliders
+    // steer and the histogram picker describes, so it is the one to prefer.
+    const useProjection =
+      projection !== null && projected !== null && projected.skill > result.skill + 0.05;
+
+    if (useProjection && projected && projection) {
+      projectionRef.current = { projection, key: baseKey };
+      scoreFieldRef.current = null; // rebuilt lazily for the whole slice
+      setThresholdBand(projected.lo, projected.hi);
+      onSamplerFit?.({
+        ...projected,
+        displayLo: projected.lo,
+        displayHi: projected.hi,
+        collapsed: false,
+        previousBand: [useToolStore.getState().thresholdLo, useToolStore.getState().thresholdHi],
+        previousBlur: blur,
+        appliedBlur: blur,
+        mode: 'projected',
+        intensitySkill: result.skill,
+        weights: CHANNEL_NAMES.map((name, i) => ({ name, weight: projection.weights[i] })),
+      });
+      setTool('threshold');
+      return;
+    }
+
+    // Plain intensity won — drop any projection left from an earlier sample so the
+    // brush goes back to gating on what the display shows.
+    projectionRef.current = null;
+    scoreFieldRef.current = null;
+
+    // The fit lives in the field's BASE space; the stored band is authored in
+    // DISPLAYED space. Rather than enumerate the ways that conversion can fail,
+    // do it and check it round-trips: convert to display, round as the store
+    // will, convert back, and require the original base band. That catches both
+    // failure modes at once —
+    //   * collapse (contrast squashing the range onto one displayed value), and
+    //   * saturation, where an endpoint lands on 0 or 255 and `displayBandToBase`
+    //     correctly reopens it to ∓Infinity — which would silently select far
+    //     MORE than was fitted.
+    const displayLo = Math.round(baseToDisplay(result.lo, displayAffine, gamma));
+    const displayHi = Math.round(baseToDisplay(result.hi, displayAffine, gamma));
+    const roundTrip = displayBandToBase(displayLo, displayHi, displayAffine, gamma);
+    // Storing the band as integers costs up to half a displayed level. How much
+    // that is in BASE units depends on the local slope, which gamma makes vary
+    // along the range — so measure it at the band edges rather than deriving it
+    // from the affine part alone.
+    const levelWidth = (d: number): number => {
+      const a = displayToBase(d - 0.5, displayAffine, gamma);
+      const b = displayToBase(d + 0.5, displayAffine, gamma);
+      return a === null || b === null ? Infinity : Math.abs(b - a);
+    };
+    const tolerance = Math.max(1.5, 1.5 * Math.max(levelWidth(displayLo), levelWidth(displayHi)));
+    const collapsed =
+      !Number.isFinite(roundTrip.lo) ||
+      !Number.isFinite(roundTrip.hi) ||
+      Math.abs(roundTrip.lo - result.lo) > tolerance ||
+      Math.abs(roundTrip.hi - result.hi) > tolerance;
+
+    onSamplerFit?.({
+      ...result,
+      displayLo,
+      displayHi,
+      collapsed,
+      previousBand: [useToolStore.getState().thresholdLo, useToolStore.getState().thresholdHi],
+      previousBlur: blur,
+      appliedBlur: combineSigma(blur, result.extraSigma),
+    });
+
+    if (collapsed) return; // leave the band alone; the UI explains why
+    setThresholdBand(displayLo, displayHi);
+    if (result.extraSigma > 0) onBlurChange?.(combineSigma(blur, result.extraSigma));
+    // Sampling is a means, not an end: hand the user straight back to the brush
+    // the band was just fitted for.
+    setTool('threshold');
+  };
+
+  /** Snapped path from the current anchor to `to`, or a straight line if the
+   *  live-wire is unavailable (no edge map yet, or an off-grid point). */
+  const samplerTraceTo = (to: { x: number; y: number }): number[] => {
+    const st = samplerLassoRef.current;
+    if (!st) return [];
+    if (!st.cm || !st.prev) return [to.x, to.y];
+    try {
+      // `.slice(2)` drops the anchor itself, which is already committed.
+      return tracePath(st.cm, st.prev, imageToGrid(st.cm, to.x, to.y)).slice(2);
+    } catch {
+      return [to.x, to.y];
+    }
+  };
+
+  /** Re-seed the live-wire at `at` so subsequent segments trace from there. */
+  const samplerReseed = (at: { x: number; y: number }): void => {
+    const st = samplerLassoRef.current;
+    if (!st) return;
+    st.anchor = at;
+    st.prev = st.cm ? dijkstra(st.cm, imageToGrid(st.cm, at.x, at.y)) : null;
+  };
+
+  /** Close the sampler lasso, run the fit, and clear the transient state. */
+  const finishSamplerLasso = (): void => {
+    const st = samplerLassoRef.current;
+    samplerLassoRef.current = null;
+    if (draftLineRef.current) {
+      draftLineRef.current.visible(false);
+      draftLineRef.current.closed(false);
+      draftStrokeLayerRef.current?.batchDraw();
+    }
+    if (!st) return;
+    // Close the loop along the edge too, rather than cutting straight across it.
+    const path = [...st.committed, ...samplerTraceTo(st.start)];
+    runSamplerFit(path);
+  };
+
   /** Current pointer position mapped from stage/display coords to image pixels. */
   const getPointerImagePos = () => {
     const stage = stageRef.current;
@@ -921,6 +1178,16 @@ export default function AnnotationCanvas({
   // pixel set; see lib/displayTransform.ts), which turns a per-tick full-image
   // re-render into a couple of `Math.pow` calls. Only blur/CLAHE/sharpen, the
   // slice, and the working scale invalidate this field.
+  // Phase 2: when a sample shows texture beats brightness, the brush gates on a
+  // fitted projection of several channels instead of raw intensity. Held in refs
+  // (not state) so activating it does not re-render the canvas.
+  const projectionRef = useRef<{
+    projection: { weights: number[]; centers: number[]; scales: number[] };
+    key: string;
+  } | null>(null);
+  /** Whole-slice projected score, built lazily from `projectionRef`. */
+  const scoreFieldRef = useRef<GrayField | null>(null);
+
   const thresholdFieldRef = useRef<GrayField | null>(null);
   const thresholdFieldForRef = useRef<string | null>(null);
   const ensureThresholdField = useCallback((): GrayField | null => {
@@ -952,14 +1219,52 @@ export default function AnnotationCanvas({
     };
   }, [sourceKey, currentSlice]);
 
+  /**
+   * The field the Threshold Brush gates on.
+   *
+   * Normally the intensity field. Once a sample shows that texture separates the
+   * feature better, this becomes the fitted projection of all channels, computed
+   * across the whole slice and cached — the brush, the overlay and the band all
+   * read it, so they cannot disagree about what is selected.
+   */
+  const ensureGateField = useCallback((): GrayField | null => {
+    const base = ensureThresholdField();
+    const active = projectionRef.current;
+    if (!base || !active) return base;
+    // A projection is only valid for the field it was fitted on; a slice or
+    // preprocessing change invalidates it rather than silently misapplying it.
+    if (active.key !== baseKey) {
+      projectionRef.current = null;
+      scoreFieldRef.current = null;
+      return base;
+    }
+    if (scoreFieldRef.current) return scoreFieldRef.current;
+    const channels = buildChannels(base.gray, base.gw, base.gh);
+    const gray = projectToScore(channels, active.projection);
+    const score: GrayField = { gw: base.gw, gh: base.gh, scale: base.scale, gray };
+    scoreFieldRef.current = score;
+    return score;
+  }, [ensureThresholdField, baseKey]);
+
+  /** True while the brush is gating on a fitted score rather than brightness. */
+  const usingProjection = (): boolean =>
+    projectionRef.current !== null && projectionRef.current.key === baseKey;
+
   /** The threshold band, mapped from the DISPLAYED intensities the user authored
    *  it in into the base space the cached fields live in. Brightness/contrast/
    *  levels/gamma therefore steer the brush exactly as they steer the image —
    *  without any of them invalidating a field or touching a pixel. */
   const bandInBaseSpace = useCallback(() => {
     const { thresholdLo, thresholdHi } = useToolStore.getState();
+    // With a projection active the gate field is a fitted score, not displayed
+    // brightness, so inverting the display transform would be meaningless — the
+    // band is already in the score's own units. (A consequence worth knowing:
+    // in that mode the display sliders no longer steer the brush.)
+    if (projectionRef.current && projectionRef.current.key === baseKey) {
+      return { lo: thresholdLo, hi: thresholdHi };
+    }
     return displayBandToBase(thresholdLo, thresholdHi, displayAffine, gamma);
-  }, [displayAffine, gamma]);
+  }, [displayAffine, gamma, baseKey]);
 
   /** Binary gate over a field: 1 where the pixel reads as in-band on screen. This
    *  is what the brush may paint. Reads the band from the store rather than a
@@ -1005,6 +1310,12 @@ export default function AnnotationCanvas({
 
   const ensureOverlayField = useCallback((): GrayField | null => {
     if (!imageEl || !meta) return null;
+    // With a projection active the overlay must show the PROJECTED selection, or
+    // it would advertise a different set of pixels than the brush paints. The
+    // gate field is already cached, so reuse it rather than fitting a second one.
+    if (projectionRef.current && projectionRef.current.key === baseKey) {
+      return ensureGateField();
+    }
     if (overlayFieldRef.current && overlayFieldForRef.current === baseKey) return overlayFieldRef.current;
     // Same preprocessed source as the brush field (see above), so the overlay shows
     // exactly what the brush would paint — including as the display sliders move,
@@ -1013,7 +1324,7 @@ export default function AnnotationCanvas({
     overlayFieldRef.current = f;
     overlayFieldForRef.current = baseKey;
     return f;
-  }, [imageEl, meta, displayBase, baseKey]);
+  }, [imageEl, meta, displayBase, baseKey, ensureGateField]);
 
   /** Repaint the overlay canvas for the current band and push it to Konva. */
   const paintThresholdOverlay = useCallback(() => time('overlay-paint', () => {
@@ -1289,7 +1600,7 @@ export default function AnnotationCanvas({
 
   /** Begin a threshold stroke at `pos`, priming the mask, gate, and preview canvas. */
   const startThresholdStroke = (pos: { x: number; y: number }, erase: boolean): void => {
-    const field = ensureThresholdField();
+    const field = ensureGateField();
     if (!field || !meta) return;
     const { gw, gh, scale } = field;
     const canvas = document.createElement('canvas');
@@ -1362,12 +1673,30 @@ export default function AnnotationCanvas({
     }
     if (!st || !sourceKey || !meta || activeClassId === null) return;
 
-    const { gw, gh, scale, mask } = st;
+    const { gw, gh, scale } = st;
     let any = false;
-    for (let i = 0; i < mask.length; i++) if (mask[i]) { any = true; break; }
+    for (let i = 0; i < st.mask.length; i++) if (st.mask[i]) { any = true; break; }
     if (!any) return;
 
-    const regions = maskToPolygonsWithHoles(mask, gw, gh, { minRegion: 4, scale })
+    // Regularize before vectorizing. A per-pixel gate speckles, and every speck
+    // becomes its own polygon: that is what made one stroke commit hundreds of
+    // shapes and dominate clip cost. A morphological opening (erode then dilate)
+    // drops isolated pixels and pinholes while leaving real regions intact, and
+    // the small-component pass clears what survives. Better geometry AND a much
+    // cheaper commit, from the same step.
+    const mask = removeSmallComponents(
+      dilate(erode(st.mask, gw, gh, 1), gw, gh, 1),
+      gw,
+      gh,
+      THRESHOLD_MIN_REGION,
+    );
+    let survives = false;
+    for (let i = 0; i < mask.length; i++) if (mask[i]) { survives = true; break; }
+    // A thin stroke can be erased entirely by the opening; keep the raw mask
+    // rather than silently discarding what the user just painted.
+    const finalMask = survives ? mask : st.mask;
+
+    const regions = maskToPolygonsWithHoles(finalMask, gw, gh, { minRegion: 4, scale })
       .filter((p) => p.points.length >= 6);
     if (regions.length === 0) return;
 
@@ -1389,7 +1718,7 @@ export default function AnnotationCanvas({
         if (!bboxNear(shapeBBox(s), strokeBounds, scale + 1)) return false;
         scratch.fill(0);
         rasterizeShapes([s], gw, gh, scale, scratch);
-        for (let i = 0; i < mask.length; i++) if (mask[i] && scratch[i]) return true;
+        for (let i = 0; i < finalMask.length; i++) if (finalMask[i] && scratch[i]) return true;
         return false;
       };
       const stampMP = regionsToMultiPolygon(regions);
@@ -1775,11 +2104,34 @@ export default function AnnotationCanvas({
         draftLineRef.current.visible(true);
         draftStrokeLayerRef.current?.batchDraw();
       }
+    } else if (tool === 'sampler') {
+      // Magnetic lasso: seed the live-wire here, then snap each dragged segment
+      // to the strongest edge between anchors. No store writes and no undo entry
+      // — this measures, it does not annotate.
+      setIsDrawing(true);
+      const cm = ensureCostMap();
+      samplerLassoRef.current = {
+        committed: [pos.x, pos.y],
+        anchor: pos,
+        start: pos,
+        cm,
+        prev: cm ? dijkstra(cm, imageToGrid(cm, pos.x, pos.y)) : null,
+      };
+      if (draftLineRef.current) {
+        draftLineRef.current.stroke('#38bdf8');
+        draftLineRef.current.strokeWidth(2 / transform.scaleX);
+        draftLineRef.current.points([pos.x, pos.y]);
+        draftLineRef.current.closed(false);
+        draftLineRef.current.visible(true);
+        draftStrokeLayerRef.current?.batchDraw();
+      }
     } else if (tool === 'threshold') {
       // Shift-click samples instead of painting: re-center the band on the pixel
       // under the cursor, keeping the configured sample width.
       if (e.evt.shiftKey) {
-        const field = ensureThresholdField();
+        // Sample from the GATE field so the picked value is in the same units as
+        // the band — with a projection active those are score units, not greys.
+        const field = ensureGateField();
         if (field) {
           const gx = Math.max(0, Math.min(field.gw - 1, Math.floor(pos.x / field.scale)));
           const gy = Math.max(0, Math.min(field.gh - 1, Math.floor(pos.y / field.scale)));
@@ -1875,6 +2227,26 @@ export default function AnnotationCanvas({
       return;
     }
 
+    // Sampler lasso: preview the snapped segment from the anchor to the cursor,
+    // dropping a new anchor once the cursor has travelled far enough. Anchoring
+    // periodically (rather than per pixel) is what keeps the live-wire honest —
+    // one dijkstra per anchor, and the locked-in path stops re-flowing behind you.
+    if (tool === 'sampler' && e.evt.buttons === 1 && samplerLassoRef.current) {
+      const st = samplerLassoRef.current;
+      const traced = samplerTraceTo(pos);
+      if (draftLineRef.current) {
+        draftLineRef.current.points([...st.committed, ...traced]);
+        draftStrokeLayerRef.current?.batchDraw();
+      }
+      const dx = pos.x - st.anchor.x;
+      const dy = pos.y - st.anchor.y;
+      if (dx * dx + dy * dy >= SAMPLER_ANCHOR_STEP * SAMPLER_ANCHOR_STEP) {
+        st.committed = [...st.committed, ...traced];
+        samplerReseed(pos);
+      }
+      return;
+    }
+
     // Threshold brush: stamp into the in-band mask and repaint the preview. Like
     // the brush, this writes nothing to the store until mouseup.
     if (tool === 'threshold' && e.evt.buttons === 1 && thresholdStrokeRef.current) {
@@ -1939,6 +2311,7 @@ export default function AnnotationCanvas({
     if (isDrawing) {
       commitDraftStroke();
       commitThresholdStroke();
+      finishSamplerLasso();
       setIsDrawing(false);
     }
     if (!sourceKey || !meta || activeClassId === null) return;
@@ -2002,6 +2375,7 @@ export default function AnnotationCanvas({
     if (isDrawing) {
       commitDraftStroke();
       commitThresholdStroke();
+      finishSamplerLasso();
       setIsDrawing(false);
     }
     setDragStart(null);
@@ -2594,7 +2968,7 @@ export default function AnnotationCanvas({
     <div
       ref={containerRef}
       className="relative w-full h-full bg-gray-900 overflow-hidden"
-      style={{ cursor: showBrushCursor ? 'none' : (tool === 'magnetic' || tool === 'magic' || tool === 'fill') ? 'crosshair' : undefined }}
+      style={{ cursor: showBrushCursor ? 'none' : (tool === 'magnetic' || tool === 'magic' || tool === 'fill' || tool === 'sampler') ? 'crosshair' : undefined }}
     >
       <Stage
         ref={stageRef}

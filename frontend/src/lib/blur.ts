@@ -84,6 +84,58 @@ function boxBlurV(
 }
 
 /**
+ * Blur a single-channel float field in place, same Gaussian approximation as the
+ * RGBA version above.
+ *
+ * The Threshold Brush's field is already grayscale, so the sampler's blur sweep
+ * can work on it directly instead of round-tripping through RGBA — which also
+ * means a candidate sigma is evaluated on exactly the values the brush gates on.
+ */
+export function applyGaussianBlurGray(
+  data: Float32Array,
+  width: number,
+  height: number,
+  sigma: number,
+): void {
+  if (!(sigma > 0) || width === 0 || height === 0) return;
+  const scratch = new Float32Array(data.length);
+
+  const boxH = (src: Float32Array, dst: Float32Array, r: number) => {
+    const norm = 1 / (r + r + 1);
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      const first = src[row];
+      let sum = (r + 1) * first;
+      for (let i = 0; i < r; i++) sum += src[row + Math.min(i, width - 1)];
+      for (let x = 0; x < width; x++) {
+        sum += src[row + Math.min(x + r, width - 1)];
+        sum -= x - r - 1 < 0 ? first : src[row + x - r - 1];
+        dst[row + x] = sum * norm;
+      }
+    }
+  };
+  const boxV = (src: Float32Array, dst: Float32Array, r: number) => {
+    const norm = 1 / (r + r + 1);
+    for (let x = 0; x < width; x++) {
+      const first = src[x];
+      let sum = (r + 1) * first;
+      for (let i = 0; i < r; i++) sum += src[Math.min(i, height - 1) * width + x];
+      for (let y = 0; y < height; y++) {
+        sum += src[Math.min(y + r, height - 1) * width + x];
+        sum -= y - r - 1 < 0 ? first : src[(y - r - 1) * width + x];
+        dst[y * width + x] = sum * norm;
+      }
+    }
+  };
+
+  for (const r of boxRadiiForGaussian(sigma, 3)) {
+    if (r <= 0) continue;
+    boxH(data, scratch, r);
+    boxV(scratch, data, r);
+  }
+}
+
+/**
  * Blur `data` (RGBA, row-major `width × height`) in place by a Gaussian of the
  * given sigma in pixels. No-op for sigma ≤ 0 or an empty image.
  */
