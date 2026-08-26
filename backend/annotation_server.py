@@ -26,7 +26,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
@@ -37,6 +37,8 @@ from starlette.middleware.gzip import GZipMiddleware
 
 import annotation_thumbnails
 import arrays as arrays_mod
+import denoise as denoise_mod
+import denoise_bake as denoise_bake_mod
 import drafts as drafts_mod
 import export_jobs
 import guides as guides_mod
@@ -66,6 +68,7 @@ from coco_export import (
     write_lightly_split,
 )
 from schemas import (
+    DenoiseBakeRequest,
     DraftPayload,
     ExportRequest,
     ExportSourceItem,
@@ -143,6 +146,10 @@ _FIELD_MAPPING_TTL = float(os.getenv("BROWSE_FIELD_MAPPING_TTL_SECONDS", "300"))
 _column_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=256)
 _items_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=128)
 _field_mapping_cache: TTLCache = TTLCache(ttl_seconds=_FIELD_MAPPING_TTL, max_entries=32)
+# Denoised slice PNGs only — the plain render path stays uncached because it is
+# already cheap. Entries are a few MB each at full resolution, so 32 covers
+# scrubbing a stack back and forth without unbounded growth.
+_denoised_slice_cache: TTLCache = TTLCache(ttl_seconds=300.0, max_entries=32)
 
 
 def _resolve_field_mapping(
@@ -605,6 +612,14 @@ async def image_slice(
     vmin_pct: float = Query(1.0),
     vmax_pct: float = Query(99.0),
     cmap: str = Query("gray"),
+    denoise_method: str = Query("none", description="Classical denoise filter (see denoise.ALL_METHODS)"),
+    denoise_strength: float = Query(0.5, ge=0.0, le=1.0),
+    denoise_crop: int = Query(
+        0,
+        ge=0,
+        description="If >0, denoise and return only a centred square crop of this size at 1:1. "
+                    "For tuning: filtering a full slice costs seconds for NLM/TV.",
+    ),
 ) -> Response:
     """Render one slice of an image source as a PNG."""
     opts = {
@@ -614,12 +629,32 @@ async def image_slice(
         "vmax_pct": vmax_pct,
         "cmap": cmap,
     }
+    if denoise_method not in denoise_mod.ALL_METHODS:
+        raise HTTPException(400, f"Unknown denoise method {denoise_method!r}")
+    denoising = denoise_method != "none"
+
+    # Denoised renders are cached; the plain path stays uncached because it is
+    # already cheap. Without this, every slider tweak or revisit re-pays the full
+    # filter cost — seconds, not milliseconds, for NLM and TV.
+    cache_key = (
+        source, kind, slice_index, server_uri, root, norm, scale, vmin_pct, vmax_pct, cmap,
+        denoise_method, round(denoise_strength, 4), denoise_crop,
+    )
+    if denoising:
+        cached = _denoised_slice_cache.get(cache_key)
+        if cached is not None:
+            return Response(content=cached, media_type="image/png")
 
     def _run() -> bytes:
         node = arrays_mod.resolve_array(source, kind, server_uri, root)
         pyramid = arrays_mod.pyramid_info(source, kind, server_uri, root)
         meta = arrays_mod.array_shape_meta(node, pyramid)
-        sl = arrays_mod.read_slice(node, meta, slice_index)
+        # Denoise the RAW slice, before normalization: noise statistics live in
+        # the source's own intensity units, not in the 8-bit display range.
+        if denoising:
+            sl = _denoised_slice(node, meta, slice_index, denoise_method, denoise_strength, denoise_crop)
+        else:
+            sl = arrays_mod.read_slice(node, meta, slice_index)
         global_range = None
         if norm == "global":
             # NB: deriving this from the pyramid's coarsest level was tried and
@@ -641,6 +676,9 @@ async def image_slice(
     except Exception as exc:
         logger.error("image_slice failed: %s", exc)
         raise HTTPException(500, f"Failed to render slice: {exc}") from exc
+
+    if denoising:
+        _denoised_slice_cache.set(cache_key, png)
 
     return Response(
         content=png,
@@ -1120,6 +1158,19 @@ def _run_export_job(
         export_jobs.update(jid, state="error", phase="error", error=str(exc))
 
 
+@app.post("/api/export/cancel/{job_id}")
+async def export_cancel(job_id: str) -> dict:
+    """Ask a running job to stop at its next clean boundary.
+
+    Cooperative rather than immediate: a job that stops mid-write would leave a
+    partial dataset that looks complete. Jobs that honour it discard their
+    partial output; those that do not simply run to completion.
+    """
+    if not export_jobs.request_cancel(job_id):
+        raise HTTPException(404, "Unknown job_id")
+    return {"cancelled": True}
+
+
 @app.get("/api/export/status/{job_id}")
 async def export_status(job_id: str) -> dict:
     """Poll an export job's progress (state, phase, done/total, log, result)."""
@@ -1311,6 +1362,136 @@ async def zarr_register(req: ZarrRegisterRequest) -> dict:
         req.description,
         req.on_conflict,
     )
+
+
+def _centre_crop(arr: np.ndarray, size: int) -> np.ndarray:
+    """Centred square crop of *size*, or *arr* unchanged if it already fits."""
+    h, w = arr.shape[:2]
+    if size <= 0 or (h <= size and w <= size):
+        return arr
+    top = max(0, (h - size) // 2)
+    left = max(0, (w - size) // 2)
+    return arr[top: top + min(size, h), left: left + min(size, w)]
+
+
+def _denoised_slice(
+    node: Any,
+    meta: dict,
+    slice_index: int,
+    method: str,
+    strength: float,
+    crop: int = 0,
+) -> np.ndarray:
+    """Read *slice_index* and denoise it, pulling z-neighbours for 3-D methods.
+
+    The 3-D filters are the training-free way to exploit slice-to-slice
+    correlation — adjacent tomographic slices share structure while their noise
+    is independent — which is why this reads a window rather than one slice. The
+    window is clamped to the volume, and the target's position inside the stack
+    is tracked explicitly: it is NOT always the centre, since the window is
+    truncated at the first and last slice.
+
+    When *crop* > 0 the crop is taken BEFORE filtering — filtering a full 6.5 MP
+    slice is what's slow. Worth knowing: results near the crop border, and NLM's
+    patch search in particular, differ slightly from the full-slice result, so a
+    crop is a tuning aid rather than a byte-exact preview of the bake.
+    """
+    radius = denoise_mod.z_radius_for(method)
+    if radius == 0:
+        sl = _centre_crop(np.asarray(arrays_mod.read_slice(node, meta, slice_index)), crop)
+        return denoise_mod.denoise_slice(sl, method, strength)
+
+    n_slices = int(meta["n_slices"])
+    lo = max(0, slice_index - radius)
+    hi = min(n_slices - 1, slice_index + radius)
+    frames = []
+    for idx in range(lo, hi + 1):
+        try:
+            frames.append(_centre_crop(np.asarray(arrays_mod.read_slice(node, meta, idx)), crop))
+        except Exception as exc:  # noqa: BLE001 — a bad neighbour must not fail the view
+            logger.warning("denoise: skipping unreadable neighbour slice %d: %s", idx, exc)
+            if idx == slice_index:
+                raise
+    if len(frames) < 2:
+        # Not enough usable z-context (single-slice source, or unreadable
+        # neighbours) — fall back to the 2-D sibling rather than erroring out.
+        fallback = "gaussian" if method == "gaussian3d" else "median"
+        sl = _centre_crop(np.asarray(arrays_mod.read_slice(node, meta, slice_index)), crop)
+        return denoise_mod.denoise_slice(sl, fallback, strength)
+
+    target_pos = min(slice_index - lo, len(frames) - 1)
+    return denoise_mod.denoise_stack(np.stack(frames, axis=0), method, strength)[target_pos]
+
+
+@app.get("/api/denoise/methods")
+async def denoise_methods() -> dict:
+    """Denoise filters available in this environment, with cost hints.
+
+    ``available`` is probed rather than assumed: ``denoise_wavelet`` imports
+    fine without PyWavelets and only fails when called.
+    """
+    return {"methods": denoise_mod.describe_methods()}
+
+
+@app.get("/api/denoise/auto")
+async def denoise_auto(
+    source: str = Query(...),
+    kind: str = Query(...),
+    slice_index: int = Query(0),
+    method: str = Query("tv"),
+    server_uri: Optional[str] = None,
+    root: Optional[str] = Query(None),
+) -> dict:
+    """Suggest a strength for this slice, from its own measured noise level."""
+    if method not in denoise_mod.ALL_METHODS:
+        raise HTTPException(400, f"Unknown denoise method {method!r}")
+
+    def _run() -> dict:
+        node = arrays_mod.resolve_array(source, kind, server_uri, root)
+        pyramid = arrays_mod.pyramid_info(source, kind, server_uri, root)
+        meta = arrays_mod.array_shape_meta(node, pyramid)
+        sl = np.asarray(arrays_mod.read_slice(node, meta, slice_index))
+        unit, _, span = denoise_mod._to_unit(sl)
+        return {
+            "strength": denoise_mod.auto_strength(sl, method),
+            # Noise as a fraction of the slice's own dynamic range, so the UI can
+            # say how noisy this is rather than only what to do about it.
+            "noise_sigma": denoise_mod.estimate_noise_sigma(unit) if span > 0 else 0.0,
+        }
+
+    return await asyncio.to_thread(_run)
+
+
+@app.post("/api/denoise/bake")
+async def denoise_bake(payload: DenoiseBakeRequest) -> dict:
+    """Denoise a whole volume and save it as a new, annotatable Tiled dataset.
+
+    The Annotate preview is display-only; this is how a denoised volume becomes
+    real data you can annotate and export. Runs on a background thread; poll
+    ``GET /api/export/status/{job_id}``.
+    """
+    if payload.method == "none":
+        raise HTTPException(422, "Pick a denoise method before saving a denoised copy.")
+    if payload.method not in denoise_mod.ALL_METHODS:
+        raise HTTPException(422, f"Unknown denoise method: {payload.method}")
+    if payload.method not in denoise_mod.available_methods():
+        raise HTTPException(
+            422,
+            f"Denoise method {payload.method!r} is unavailable on this server "
+            "(missing optional dependency).",
+        )
+
+    target = payload.target_path or denoise_bake_mod.default_target_path(payload.source)
+    try:
+        ingest_mod.validate_container_path(target)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    jid = export_jobs.new_job(target)
+    threading.Thread(
+        target=denoise_bake_mod.run_denoise_bake_job, args=(jid, payload), daemon=True
+    ).start()
+    return {"job_id": jid, "target_path": target}
 
 
 @app.get("/api/volume/resolve")

@@ -39,6 +39,11 @@ export interface DisplayControlsProps {
   onUpscaleChange: (v: number) => void;
   /** Highest upscale this slice can afford before the guard clamps it. */
   maxUpscale?: number;
+  /** Slot rendered above the pre-blur slider, for server-side denoising.
+   *  A slot rather than props so this component stays free of data-fetching
+   *  concerns — denoising needs the dataset identity and a network round trip,
+   *  neither of which any other control here does. */
+  denoiseSlot?: React.ReactNode;
 }
 
 const UPSCALES = [1, 2, 4] as const;
@@ -68,6 +73,7 @@ export default function DisplayControls({
   upscale,
   onUpscaleChange,
   maxUpscale = 4,
+  denoiseSlot,
 }: DisplayControlsProps) {
   return (
     <div className="flex flex-col gap-2">
@@ -151,6 +157,13 @@ export default function DisplayControls({
           allowLog
         />
       </div>
+
+      {/* Server-side denoising, applied to the RAW slice before normalization —
+          unlike the pre-blur below, which is a client-side filter on the already
+          8-bit display image. Placed first because it is the upstream stage. */}
+      {denoiseSlot && (
+        <div className="border-t border-sky-900/60 pt-2">{denoiseSlot}</div>
+      )}
 
       {/* Gaussian pre-blur — denoises so threshold/wand/fill see coherent regions. */}
       <div className="flex flex-col gap-0.5">

@@ -30,8 +30,37 @@ def new_job(dataset_path: str) -> str:
             "error": None,
             "dataset_path": dataset_path,
             "zip_path": None,     # internal; surfaced as result.zip_available
+            "cancel_requested": False,
         }
     return jid
+
+
+def request_cancel(jid: str) -> bool:
+    """Ask a running job to stop; returns False if the job is unknown.
+
+    Cooperative: this only sets a flag. Long-running jobs poll
+    :func:`cancel_requested` between units of work and stop at a clean boundary,
+    which is what lets a half-finished dataset be discarded rather than left
+    looking complete.
+    """
+    with _lock:
+        job = _jobs.get(jid)
+        if not job:
+            return False
+        job["cancel_requested"] = True
+        return True
+
+
+def cancel_requested(jid: str) -> bool:
+    """True if cancellation was requested for *jid*.
+
+    Reads the flag directly under the lock rather than through :func:`get_job`,
+    which copies the whole job dict (log lines included) just to read one bool —
+    and this is polled on every slice of a running job.
+    """
+    with _lock:
+        job = _jobs.get(jid)
+        return bool(job and job.get("cancel_requested"))
 
 
 def get_job(jid: str) -> dict | None:

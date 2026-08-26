@@ -316,6 +316,36 @@ class TiffStackRegisterRequest(ZarrRegisterRequest):
     """
 
 
+class DenoiseBakeRequest(BaseModel):
+    """Request body to denoise a whole volume into a new Tiled dataset.
+
+    The Annotate preview is non-destructive — it changes what you see, not the
+    data, and exports still use the original pixels. This is the other half: it
+    writes a denoised copy as a first-class dataset you can open, annotate and
+    export.
+
+    Attributes:
+        source: Tiled path of the volume to denoise.
+        server_uri: Tiled server URI; ``None`` uses the default server.
+        method: A ``denoise.ALL_METHODS`` entry other than ``"none"``.
+        strength: 0..1, mapped onto the method's native parameter.
+        target_path: Destination Tiled path; defaults to ``<source>_denoised``, a
+            sibling so it lands next to its source in Browse. Must sit beneath
+            the configured ingest root.
+        description: Optional comma-separated tags, treated exactly as ingest
+            treats them — searchable in Browse.
+    """
+
+    source: str
+    server_uri: str | None = None
+    method: str
+    strength: float = Field(default=0.5, ge=0.0, le=1.0)
+    target_path: str | None = None
+    description: str = ""
+    run_id: str | None = None
+    """Saved denoiser run, for the trained-model path. Not yet wired up here."""
+
+
 class VolumeBuildRequest(BaseModel):
     """Request body for building a 3-D volume from a stack already in Tiled.
 

@@ -23,6 +23,10 @@ dependencies = [
   "matplotlib>=3.8",
   "pycocotools>=2.0.7",
   "scikit-image>=0.22",
+  # denoise.py imports scipy.ndimage directly (gaussian/median filters, and the
+  # convolution behind its noise estimator). scikit-image pulls scipy in
+  # transitively, but a direct import earns a direct pin.
+  "scipy>=1.11",
   "tifffile>=2024.0",
   "imagecodecs",
 ]

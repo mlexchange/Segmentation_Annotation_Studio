@@ -8,7 +8,7 @@
  */
 import { useQuery, type QueryClient } from '@tanstack/react-query';
 import { API_BASE } from '@/config';
-import { RenderOpts } from '@/stores/datasetStore';
+import { RenderOpts, type DenoiseOpts } from '@/stores/datasetStore';
 
 const SLICE_QUERY_KEY = 'imageSlice';
 
@@ -16,13 +16,25 @@ export interface SliceResult {
   url: string;
 }
 
-/** Build the /api/image/slice URL encoding source, slice index, and render options. */
+/** Build the /api/image/slice URL encoding source, slice index, and render options.
+ *
+ * `denoise` is optional and omitted from the URL entirely when off, so the
+ * un-denoised request stays byte-identical to what it has always been — the
+ * backend only pays (and caches) the filter cost when a method is actually set.
+ *
+ * `crop`, when set, asks the backend to filter and return only a centred square
+ * of that size at 1:1. Filtering a full slice costs seconds for NLM and TV;
+ * cropping keeps slider-dragging interactive (measured: 7.3s -> 0.49s for
+ * bilateral on a 2560² slice).
+ */
 export function buildSliceUrl(
   source: string,
   kind: string,
   sliceIndex: number,
   renderOpts: RenderOpts,
-  serverUri: string | null
+  serverUri: string | null,
+  denoise?: DenoiseOpts | null,
+  crop?: number
 ): string {
   const params = new URLSearchParams({
     source,
@@ -35,6 +47,11 @@ export function buildSliceUrl(
     cmap: renderOpts.cmap,
   });
   if (serverUri) params.set('server_uri', serverUri);
+  if (denoise && denoise.method !== 'none') {
+    params.set('denoise_method', denoise.method);
+    params.set('denoise_strength', String(denoise.strength));
+    if (crop && crop > 0) params.set('denoise_crop', String(crop));
+  }
   return `${API_BASE}/api/image/slice?${params.toString()}`;
 }
 
@@ -47,15 +64,22 @@ export function useImageSlice(
   kind: string | null,
   sliceIndex: number,
   renderOpts: RenderOpts,
-  serverUri: string | null
+  serverUri: string | null,
+  denoise?: DenoiseOpts | null
 ) {
   const enabled = Boolean(source && kind);
   const url = enabled
-    ? buildSliceUrl(source!, kind!, sliceIndex, renderOpts, serverUri)
+    ? buildSliceUrl(source!, kind!, sliceIndex, renderOpts, serverUri, denoise)
+    : null;
+
+  // Denoise is keyed only when active, so switching it off returns to the exact
+  // cache entry the un-denoised view already had rather than refetching.
+  const denoiseKey = denoise && denoise.method !== 'none'
+    ? [denoise.method, denoise.strength]
     : null;
 
   return useQuery({
-    queryKey: [SLICE_QUERY_KEY, source, kind, sliceIndex, renderOpts, serverUri],
+    queryKey: [SLICE_QUERY_KEY, source, kind, sliceIndex, renderOpts, serverUri, denoiseKey],
     queryFn: async () => {
       const res = await fetch(url!);
       if (!res.ok) throw new Error(`Slice fetch failed: ${res.status}`);

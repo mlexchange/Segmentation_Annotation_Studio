@@ -18,6 +18,8 @@ import type { ColormapName } from '@/lib/colormaps';
 import Toolbar from '@/components/annotate/Toolbar';
 import ClassManager from '@/components/annotate/ClassManager';
 import DisplayControls from '@/components/annotate/DisplayControls';
+import DenoisePanel from '@/components/annotate/DenoisePanel';
+import DenoiseBakeModal from '@/components/annotate/DenoiseBakeModal';
 import SliceNavigator from '@/components/annotate/SliceNavigator';
 import MaskToolsPanel from '@/components/annotate/MaskToolsPanel';
 import MeasurementPanel from '@/components/annotate/MeasurementPanel';
@@ -36,7 +38,7 @@ import type { SaveDraftPayload } from '@/hooks/useSave';
 /** Renders the annotation workspace: tool sidebar, canvas, and save/version/export flows. */
 export default function AnnotatePage() {
   const navigate = useNavigate();
-  const { source, kind, serverUri, meta } = useDatasetStore();
+  const { source, kind, serverUri, meta, denoise, setDenoise } = useDatasetStore();
   const { removeShapes } = useAnnotationStore();
   const { selectedShapeIds, setSelectedShapeId, fillOpacity, setFillOpacity } = useToolStore();
   const { classes } = useClassStore();
@@ -73,6 +75,7 @@ export default function AnnotatePage() {
   const [clahe, setClahe] = useState(false);
   const [sharpen, setSharpen] = useState(false);
   const [blur, setBlur] = useState(0);
+  const [bakeOpen, setBakeOpen] = useState(false);
   // Working resolution for the drawing tools (1x, 2x, 4x). Annotation coordinates
   // stay native; upscaling only buys sub-pixel precision on small features.
   const [upscale, setUpscale] = useState(1);
@@ -286,6 +289,17 @@ export default function AnnotatePage() {
             upscale={upscale}
             onUpscaleChange={setUpscale}
             maxUpscale={maxUpscale}
+            denoiseSlot={
+              <DenoisePanel
+                denoise={denoise}
+                onChange={setDenoise}
+                source={source}
+                kind={kind}
+                serverUri={serverUri}
+                sliceIndex={currentSlice}
+                onBake={source ? () => setBakeOpen(true) : undefined}
+              />
+            }
           />
           <hr />
           <SliceNavigator />
@@ -423,6 +437,17 @@ export default function AnnotatePage() {
           onPreview={(v) => { setPreviewVersion(v); setShowVersionHistory(false); }}
           onRestore={restoreVersion}
           onClose={() => setShowVersionHistory(false)}
+        />
+      )}
+      {source && (
+        <DenoiseBakeModal
+          open={bakeOpen}
+          onClose={() => setBakeOpen(false)}
+          source={source}
+          serverUri={serverUri}
+          denoise={denoise}
+          nSlices={meta?.nSlices ?? 1}
+          methodLabel={denoise.method}
         />
       )}
     </>

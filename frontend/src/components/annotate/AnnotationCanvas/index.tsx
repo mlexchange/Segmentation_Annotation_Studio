@@ -532,7 +532,7 @@ export default function AnnotationCanvas({
     prev: Int32Array | null;
   } | null>(null);
 
-  const { kind, source, serverUri, meta, currentSlice, renderOpts } = useDatasetStore();
+  const { kind, source, serverUri, meta, currentSlice, renderOpts, denoise } = useDatasetStore();
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
@@ -623,7 +623,12 @@ export default function AnnotationCanvas({
   // (expensive) layer re-cache so we don't rebuild the shapes bitmap mid-stroke.
   const [isDrawing, setIsDrawing] = useState(false);
 
-  const { data: sliceUrl } = useImageSlice(source, kind, currentSlice, renderOpts, serverUri);
+  // Denoising is applied server-side, before normalization — so the PNG this
+  // returns is already denoised, and everything downstream that samples it
+  // (displayBase, the Threshold Brush field, the Sampler's fit, magic wand,
+  // livewire) sees the denoised data with no extra plumbing. That is the point:
+  // an intensity tool should act on the image the user is actually looking at.
+  const { data: sliceUrl } = useImageSlice(source, kind, currentSlice, renderOpts, serverUri, denoise);
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
 
   useEffect(() => {
