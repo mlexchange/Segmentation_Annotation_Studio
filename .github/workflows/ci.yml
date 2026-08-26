@@ -26,7 +26,11 @@ jobs:
       run:
         working-directory: frontend
     steps:
+      # The volume renderer lives in a submodule (frontend/vendor/); without it
+      # typecheck and build fail on an unresolved import.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

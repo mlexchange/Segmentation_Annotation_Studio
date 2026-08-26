@@ -303,6 +303,40 @@ class ZarrRegisterRequest(BaseModel):
     server_uri: str | None = None
 
 
+class TiffStackRegisterRequest(ZarrRegisterRequest):
+    """Request body for registering a TIFF directory as a 3-D volume.
+
+    Same fields as :class:`ZarrRegisterRequest` — ``path`` is a directory of 2-D
+    TIFF slices rather than a ``.zarr`` store. Kept as its own type so the two
+    endpoints document themselves and can diverge without a breaking change.
+
+    Unlike the Zarr path this does real work: the full-resolution slices are
+    registered in place, but the downsampled pyramid levels the 3-D viewer
+    actually renders have to be computed, so registration runs as a job.
+    """
+
+
+class VolumeBuildRequest(BaseModel):
+    """Request body for building a 3-D volume from a stack already in Tiled.
+
+    Deliberately minimal: the slices are already in the catalog, so the only
+    thing needed is which dataset. No source path, because requiring one would
+    mean asking the user to re-supply data the app already holds.
+
+    Attributes:
+        source: Tiled path of the per-slice dataset.
+        kind: Source kind; only ``"tiled"`` has a catalog to register into.
+        container_path: Where to place the volume sidecar; defaults to the
+            dataset's own parent container.
+        server_uri: Target Tiled server URI; ``None`` uses the default server.
+    """
+
+    source: str
+    kind: str = "tiled"
+    container_path: str | None = None
+    server_uri: str | None = None
+
+
 class GuideClass(BaseModel):
     """One class entry in an annotation guide.
 

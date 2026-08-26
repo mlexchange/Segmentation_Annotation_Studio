@@ -58,5 +58,9 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
+    // Scoped to src/ so the vendored renderer's own suite (which needs WebGPU and
+    // its own runner config) isn't swept into ours by the default glob. Upstream
+    // tests are upstream's to run.
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
   },
 });

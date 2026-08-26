@@ -468,6 +468,11 @@ ensure_sam_model
 # resolved server-side by backend/tiled_config.py. Keys are never sent to the
 # frontend. (Port must match backend/tiled_config.py default: 8010.)
 # ---------------------------------------------------------------------------
+# Generated 3-D volume pyramids (backend/tiff_stack_source.py) are served by
+# Tiled in place, from a path listed in tiled/config.yml's readable_storage.
+# Created BEFORE Tiled starts, since that is when readable_storage is resolved.
+mkdir -p "$SCRIPT_DIR/.tiled/volumes"
+
 echo -e "${CYAN}==> Starting Tiled (port ${TILED_PORT})...${NC}"
 
 # Repair catalog asset paths in case the repo was moved or cloned to a new location.
@@ -526,6 +531,23 @@ done
 if [ "$TILED_READY" != 1 ]; then
   echo -e "${RED}    Tiled did not become ready in time (http code: ${code:-unknown}).${NC}"
   exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Git submodules: the WebGPU volume renderer that powers the 3D tab lives in
+# frontend/vendor/view_tomography_recon_app. A clone without --recurse-submodules
+# leaves it empty, which otherwise shows up as an unresolved import halfway
+# through a Vite build. Initialise it here so that never happens.
+# ---------------------------------------------------------------------------
+ZARR_VIEWER_ENTRY="$FRONTEND_DIR/vendor/view_tomography_recon_app/src/zarr-viewer/src/ome-zarr-viewer.ts"
+if [ ! -f "$ZARR_VIEWER_ENTRY" ]; then
+  echo -e "${CYAN}==> Initialising git submodules (3D volume renderer)...${NC}"
+  if git -C "$SCRIPT_DIR" submodule update --init --recursive; then
+    echo -e "${GREEN}    Submodules ready.${NC}"
+  else
+    echo -e "${YELLOW}    Could not initialise submodules — the 3D tab will not build.${NC}"
+    echo -e "${YELLOW}    Fix with: git submodule update --init --recursive${NC}"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

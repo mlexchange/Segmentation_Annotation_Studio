@@ -23,6 +23,10 @@ build/
 # ingested locally are ignored. To commit a new demo dataset, use `git add -f`.
 .tiled/data/
 
+# Generated 3-D volume pyramids (backend/tiff_stack_source.py). Derived data —
+# rebuildable from the source TIFFs by re-registering, and large.
+.tiled/volumes/
+
 # Runtime Tiled thumbnail containers created on save
 **/*__v_thumbs/
 

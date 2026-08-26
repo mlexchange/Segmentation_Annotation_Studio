@@ -9,6 +9,13 @@ WORKDIR /web
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
+# The WebGPU volume renderer is a git submodule under frontend/vendor/. Docker
+# copies the working tree as-is, so an uninitialised submodule arrives as an
+# empty directory and the build fails deep inside Vite with an unresolved
+# import. Fail here instead, with the fix in the message.
+RUN test -f vendor/view_tomography_recon_app/src/zarr-viewer/src/ome-zarr-viewer.ts \
+    || (echo "ERROR: submodule frontend/vendor/view_tomography_recon_app is missing." \
+        && echo "Run: git submodule update --init --recursive" && exit 1)
 RUN npm run build   # → /web/dist
 
 # --- Stage 2: backend + built SPA ---

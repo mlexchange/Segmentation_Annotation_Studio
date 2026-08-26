@@ -42,8 +42,11 @@ import export_jobs
 import guides as guides_mod
 import images as images_mod
 import ingest as ingest_mod
-import zarr_source
 import local_fs
+import tiff_stack_source
+import volume_build
+import volume_nodes
+import zarr_source
 from browse_helpers import (
     _SINGLE_VALUE_FACET_RAW_KEYS,
     FieldMapping,
@@ -69,9 +72,11 @@ from schemas import (
     GuidePayload,
     ImageMeta,
     IngestPreflightRequest,
-    ZarrRegisterRequest,
     MeasureRequest,
     SaveVersionRequest,
+    TiffStackRegisterRequest,
+    VolumeBuildRequest,
+    ZarrRegisterRequest,
 )
 from source_keys import parse_source_key
 from thumbnails import render_thumbnail
@@ -1306,6 +1311,148 @@ async def zarr_register(req: ZarrRegisterRequest) -> dict:
         req.description,
         req.on_conflict,
     )
+
+
+@app.get("/api/volume/resolve")
+async def volume_resolve(
+    source: str = Query(..., description="Tiled path of the open dataset"),
+    server_uri: Optional[str] = Query(None),
+) -> dict:
+    """Locate the renderable 3-D volume for the open dataset.
+
+    Which node holds it depends on how the dataset was catalogued — a registered
+    Zarr volume is one already, a TIFF stack's lives in its ``__volume`` sidecar,
+    and a stack nobody has built one for has none. The frontend cannot tell these
+    apart from the path, and guessing produces
+    ``missing multiscales in root .zattrs`` at the viewer instead of an answer.
+    """
+    return await asyncio.to_thread(volume_nodes.resolve_volume, server_uri, source)
+
+
+@app.get("/api/volume/build/inspect")
+async def volume_build_inspect(
+    source: str = Query(..., description="Tiled path of the per-slice dataset"),
+    kind: str = Query("tiled"),
+    server_uri: Optional[str] = Query(None),
+) -> dict:
+    """Describe the 3-D volume that would be built for this dataset."""
+    return await asyncio.to_thread(
+        volume_build.inspect_volume_build, source, kind, server_uri
+    )
+
+
+@app.post("/api/volume/build")
+async def volume_build_start(req: VolumeBuildRequest) -> dict:
+    """Build a 3-D volume from a slice stack already in the catalog.
+
+    Needs nothing but the open dataset: the slices are already in Tiled, so
+    asking for a source directory would be asking the user to re-supply data the
+    app has. Returns a ``job_id``; poll ``GET /api/export/status/{job_id}``.
+    """
+    info = await asyncio.to_thread(
+        volume_build.inspect_volume_build, req.source, req.kind, req.server_uri
+    )
+    jid = export_jobs.new_job(req.source)
+    export_jobs.set_total(jid, max(info["slices_to_read"], 1))
+
+    def _run() -> None:
+        try:
+            export_jobs.update(jid, state="running", phase="building")
+
+            def _progress(message: str, done: int, total: int) -> None:
+                export_jobs.update(jid, phase=message, done=done, total=max(total, 1))
+
+            result = volume_build.build_volume(
+                req.source, req.kind, req.server_uri, req.container_path, progress=_progress
+            )
+            export_jobs.update(jid, state="done", phase="done", result=result)
+            export_jobs.log(jid, f"Built 3-D volume {result['key']!r}.")
+        except HTTPException as exc:
+            export_jobs.update(jid, state="error", phase="error", error=str(exc.detail))
+        except Exception as exc:  # noqa: BLE001 — surfaced to the UI via the job
+            logger.exception("volume build failed")
+            export_jobs.update(jid, state="error", phase="error", error=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": jid, **info}
+
+
+@app.get("/api/tiff-stack/inspect")
+async def tiff_stack_inspect(
+    path: str = Query(..., description="Absolute path to a directory of TIFF slices"),
+) -> dict:
+    """Describe a TIFF directory and the pyramid that would be built for it.
+
+    Reads only the first file, so this is cheap enough to call while the user is
+    still typing a path. ``slices_to_read`` lets the UI say up front how much
+    work registration will be, rather than appearing to hang.
+
+    Raises:
+        HTTPException: 4xx from :func:`tiff_stack_source.inspect_tiff_stack` with
+            a user-facing message (missing path, no TIFFs, inconsistent
+            numbering…).
+    """
+    return await asyncio.to_thread(tiff_stack_source.inspect_tiff_stack, path)
+
+
+@app.post("/api/tiff-stack/preflight")
+async def tiff_stack_preflight(req: TiffStackRegisterRequest) -> dict:
+    """Report whether registering this TIFF stack would collide, changing nothing."""
+    return await asyncio.to_thread(
+        tiff_stack_source.preflight_tiff_stack, req.server_uri, req.path, req.container_path
+    )
+
+
+@app.post("/api/tiff-stack/register")
+async def tiff_stack_register(req: TiffStackRegisterRequest) -> dict:
+    """Register a TIFF directory as a 3-D multiscale volume, copying no slices.
+
+    Returns a ``job_id`` immediately; poll ``GET /api/export/status/{job_id}``.
+    A job rather than a straight call because — unlike Zarr registration, which
+    only writes catalog rows — the downsampled levels the 3-D viewer renders have
+    to be computed, and that means reading every source slice once.
+
+    The full-resolution slices themselves are registered in place: no pixels are
+    copied, and the existing per-slice nodes the 2-D canvas reads are untouched.
+    """
+    if req.on_conflict not in ingest_mod.ON_CONFLICT_MODES:
+        raise HTTPException(
+            400, f"on_conflict must be one of {sorted(ingest_mod.ON_CONFLICT_MODES)}"
+        )
+    # Validate before returning a job id, so a bad path is a 4xx the user sees
+    # immediately rather than a job that fails a second later.
+    info = await asyncio.to_thread(tiff_stack_source.inspect_tiff_stack, req.path)
+
+    jid = export_jobs.new_job(req.path)
+    # Every source slice is read exactly once: the finest generated level comes
+    # from the TIFFs, the coarser ones cascade from it in memory.
+    export_jobs.set_total(jid, max(info["slices_to_read"], 1))
+
+    def _run() -> None:
+        try:
+            export_jobs.update(jid, state="running", phase="registering")
+
+            def _progress(message: str, done: int, total: int) -> None:
+                export_jobs.update(jid, phase=message, done=done, total=max(total, 1))
+
+            result = tiff_stack_source.register_tiff_stack(
+                req.server_uri,
+                req.path,
+                req.container_path,
+                req.description,
+                req.on_conflict,
+                progress=_progress,
+            )
+            export_jobs.update(jid, state="done", phase="done", result=result)
+            export_jobs.log(jid, f"Registered {result['key']!r} as a 3-D volume.")
+        except HTTPException as exc:
+            export_jobs.update(jid, state="error", phase="error", error=str(exc.detail))
+        except Exception as exc:  # noqa: BLE001 — surfaced to the UI via the job
+            logger.exception("tiff stack registration failed")
+            export_jobs.update(jid, state="error", phase="error", error=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": jid, **info}
 
 
 @app.get("/health")
