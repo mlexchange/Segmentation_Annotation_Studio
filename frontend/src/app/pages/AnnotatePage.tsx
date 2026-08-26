@@ -4,6 +4,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router';
 import { DownloadSimple, FloppyDisk, ClockCounterClockwise, CircleDashed, ChartBar } from '@phosphor-icons/react';
+import { cn } from '@/lib/utils';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
@@ -17,6 +18,7 @@ import { useKeybinds } from '@/hooks/useKeybinds';
 import type { ColormapName } from '@/lib/colormaps';
 import Toolbar from '@/components/annotate/Toolbar';
 import ClassManager from '@/components/annotate/ClassManager';
+import LayersPanel from '@/components/annotate/LayersPanel';
 import DisplayControls from '@/components/annotate/DisplayControls';
 import DenoisePanel from '@/components/annotate/DenoisePanel';
 import DenoiseBakeModal from '@/components/annotate/DenoiseBakeModal';
@@ -34,6 +36,44 @@ import type { SamplerFit } from '@/components/annotate/AnnotationCanvas';
 import { initPerf } from '@/lib/perf';
 import SaveModal from '@/components/annotate/SaveModal';
 import type { SaveDraftPayload } from '@/hooks/useSave';
+
+type AnnotateStage = 'draw' | 'assist' | 'predict';
+
+const STAGES: { id: AnnotateStage; label: string }[] = [
+  { id: 'draw', label: 'Draw' },
+  { id: 'assist', label: 'Assist' },
+  { id: 'predict', label: 'Predict' },
+];
+
+function StageSwitcher({ stage, onChange }: { stage: AnnotateStage; onChange: (s: AnnotateStage) => void }) {
+  return (
+    <div className="flex rounded-md border border-gray-200 bg-gray-50 p-0.5" role="tablist" aria-label="Annotate stage">
+      {STAGES.map((s) => (
+        <button
+          key={s.id}
+          type="button"
+          role="tab"
+          aria-selected={stage === s.id}
+          onClick={() => onChange(s.id)}
+          className={cn(
+            'flex-1 rounded px-2 py-1 text-xs font-medium transition-colors',
+            stage === s.id ? 'bg-white text-sky-800 shadow-sm' : 'text-gray-500 hover:text-gray-800',
+          )}
+        >
+          {s.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function StagePlaceholder({ text }: { text: string }) {
+  return (
+    <p className="rounded-md border border-dashed border-gray-300 bg-gray-50 p-2 text-[11px] leading-snug text-gray-500">
+      {text}
+    </p>
+  );
+}
 
 /** Renders the annotation workspace: tool sidebar, canvas, and save/version/export flows. */
 export default function AnnotatePage() {
@@ -111,6 +151,7 @@ export default function AnnotatePage() {
 
   // Dev-only timing HUD (?perf=1). Read once — the flag is fixed for the session.
   const [perfOn] = useState(() => initPerf());
+  const [stage, setStage] = useState<AnnotateStage>('draw');
 
   // Latest Sampler lasso fit — transient UI state, not persisted: only the band
   // and blur it applies are durable.
@@ -256,58 +297,74 @@ export default function AnnotatePage() {
             onChange={(v) => setFillOpacity(v / 100)}
           />
           <hr />
-          <Toolbar
-            disabled={classes.length === 0}
-            histogramBins={histogramBins}
-            display={thresholdDisplay}
-            upscale={upscale}
-            samplerFit={samplerFit}
-            onRevertSamplerFit={revertSamplerFit}
-          />
+          <StageSwitcher stage={stage} onChange={setStage} />
+          <LayersPanel />
           <hr />
-          <DisplayControls
-            brightness={brightness}
-            contrast={contrast}
-            onBrightnessChange={setBrightness}
-            onContrastChange={setContrast}
-            onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); setClahe(false); setSharpen(false); setBlur(0); setUpscale(1); }}
-            histogramBins={histogramBins}
-            levelsLo={levelsLo}
-            levelsHi={levelsHi}
-            onLevelsChange={(lo, hi) => { setLevelsLo(lo); setLevelsHi(hi); }}
-            onLevelsReset={() => { setLevelsLo(0); setLevelsHi(255); }}
-            colormap={colormap}
-            gamma={gamma}
-            onColormapChange={setColormap}
-            onGammaChange={setGamma}
-            clahe={clahe}
-            sharpen={sharpen}
-            onClaheChange={setClahe}
-            onSharpenChange={setSharpen}
-            blur={blur}
-            onBlurChange={setBlur}
-            upscale={upscale}
-            onUpscaleChange={setUpscale}
-            maxUpscale={maxUpscale}
-            denoiseSlot={
-              <DenoisePanel
-                denoise={denoise}
-                onChange={setDenoise}
-                source={source}
-                kind={kind}
-                serverUri={serverUri}
-                sliceIndex={currentSlice}
-                onBake={source ? () => setBakeOpen(true) : undefined}
+
+          {stage === 'draw' && (
+            <>
+              <Toolbar
+                disabled={classes.length === 0}
+                histogramBins={histogramBins}
+                display={thresholdDisplay}
+                upscale={upscale}
+                samplerFit={samplerFit}
+                onRevertSamplerFit={revertSamplerFit}
               />
-            }
-          />
-          <hr />
-          <SliceNavigator />
-          <hr />
-          <MaskToolsPanel sourceKey={sourceKey} activeClassId={activeClassId} />
-          <hr />
-          <MeasurementPanel sourceKey={sourceKey} />
-          <hr />
+              <hr />
+              <DisplayControls
+                brightness={brightness}
+                contrast={contrast}
+                onBrightnessChange={setBrightness}
+                onContrastChange={setContrast}
+                onReset={() => { setBrightness(0); setContrast(0); setLevelsLo(0); setLevelsHi(255); setColormap('gray'); setGamma(1); setClahe(false); setSharpen(false); setBlur(0); setUpscale(1); }}
+                histogramBins={histogramBins}
+                levelsLo={levelsLo}
+                levelsHi={levelsHi}
+                onLevelsChange={(lo, hi) => { setLevelsLo(lo); setLevelsHi(hi); }}
+                onLevelsReset={() => { setLevelsLo(0); setLevelsHi(255); }}
+                colormap={colormap}
+                gamma={gamma}
+                onColormapChange={setColormap}
+                onGammaChange={setGamma}
+                clahe={clahe}
+                sharpen={sharpen}
+                onClaheChange={setClahe}
+                onSharpenChange={setSharpen}
+                blur={blur}
+                onBlurChange={setBlur}
+                upscale={upscale}
+                onUpscaleChange={setUpscale}
+                maxUpscale={maxUpscale}
+                denoiseSlot={
+                  <DenoisePanel
+                    denoise={denoise}
+                    onChange={setDenoise}
+                    source={source}
+                    kind={kind}
+                    serverUri={serverUri}
+                    sliceIndex={currentSlice}
+                    onBake={source ? () => setBakeOpen(true) : undefined}
+                  />
+                }
+              />
+              <hr />
+              <SliceNavigator />
+              <hr />
+              <MaskToolsPanel sourceKey={sourceKey} activeClassId={activeClassId} />
+              <hr />
+              <MeasurementPanel sourceKey={sourceKey} />
+              <hr />
+            </>
+          )}
+
+          {stage === 'assist' && (
+            <StagePlaceholder text="Feature channels, the pixel classifier, and manifold suggestions land here in a later phase." />
+          )}
+
+          {stage === 'predict' && (
+            <StagePlaceholder text="Model training and inference panels land here in a later phase." />
+          )}
 
           {/* Save button + status */}
           <div className="flex flex-col gap-1.5">

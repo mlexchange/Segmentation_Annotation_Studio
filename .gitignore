@@ -67,3 +67,7 @@ site/
 peter/
 
 .reset-backups/
+
+.claude/
+
+CLAUDE.md

@@ -23,6 +23,7 @@ import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore, type Shape, type PolygonShape, type BrushStroke } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
 import { useClassStore, type AnnotationClass } from '@/stores/classStore';
+import { useLayerVisibilityStore } from '@/stores/layerVisibilityStore';
 import { toImage, normalizeRect, normalizeEllipse, shapeBBox, unionBBox, bboxNear, bboxIntersects, type BBox } from '@/lib/geometry';
 import { buildCostMap, dijkstra, tracePath, imageToGrid, simplifyPath, type CostMap } from '@/lib/livewire';
 import { useImageSlice } from '@/hooks/useImageSlice';
@@ -533,6 +534,10 @@ export default function AnnotationCanvas({
   } | null>(null);
 
   const { kind, source, serverUri, meta, currentSlice, renderOpts, denoise } = useDatasetStore();
+  const layerGroups = useLayerVisibilityStore((s) => s.groups);
+  // The Denoise layer toggle mutes the configured method without discarding it,
+  // so switching it back on doesn't lose the user's method/strength choice.
+  const effectiveDenoise = layerGroups.denoise ? denoise : null;
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
@@ -628,7 +633,7 @@ export default function AnnotationCanvas({
   // (displayBase, the Threshold Brush field, the Sampler's fit, magic wand,
   // livewire) sees the denoised data with no extra plumbing. That is the point:
   // an intensity tool should act on the image the user is actually looking at.
-  const { data: sliceUrl } = useImageSlice(source, kind, currentSlice, renderOpts, serverUri, denoise);
+  const { data: sliceUrl } = useImageSlice(source, kind, currentSlice, renderOpts, serverUri, effectiveDenoise);
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
 
   useEffect(() => {
@@ -3002,7 +3007,7 @@ export default function AnnotationCanvas({
         {/* Layer 0: image — preprocessed base (CLAHE/Sharpen baked); linear
             brightness/contrast/levels/gamma/colormap applied via the GPU SVG filter below. */}
         <Layer ref={imageLayerRef}>
-          {imageEl && meta && (
+          {layerGroups.image && imageEl && meta && (
             <KonvaImage
               ref={imageRef}
               image={displayBase ?? imageEl}
@@ -3033,7 +3038,7 @@ export default function AnnotationCanvas({
             layer so overlapping same-class shapes render a uniform class color.
             Clipped to the image frame so strokes never render past the edges.
             Memoized (see ShapesLayer) so display-slider ticks don't reconcile it. */}
-        {meta && (
+        {meta && layerGroups.annotations && (
           <ShapesLayer
             layerRef={shapesLayerRef}
             shapes={displayShapes}
