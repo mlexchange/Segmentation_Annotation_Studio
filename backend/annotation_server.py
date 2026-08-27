@@ -8,6 +8,7 @@ Endpoints
 * ``GET /api/browse/items``     — sample records matching a filter set
 * ``GET /api/browse/thumbnail`` — PNG thumbnail for a Tiled array path
 * ``GET /health``               — liveness check
+* ``/api/ipred/*``              — proxy to the standalone iPred service (see ``ipred_routes.py``)
 
 Run with
 --------
@@ -44,6 +45,7 @@ import export_jobs
 import guides as guides_mod
 import images as images_mod
 import ingest as ingest_mod
+import ipred_routes
 import local_fs
 import tiff_stack_source
 import volume_build
@@ -122,6 +124,11 @@ app.add_middleware(
 # FastAPI serves the built SPA + API from one origin; PNGs are already compressed so
 # the ~500-byte floor skips tiny/binary payloads. (Dev uses the Vite server instead.)
 app.add_middleware(GZipMiddleware, minimum_size=500)
+
+# iPred (interactive segmentation) proxy — see ipred_routes.py. iPred is an
+# optional, separately-run service (port 8003 by default); a down/missing
+# service surfaces as 503 from these routes rather than breaking the app.
+app.include_router(ipred_routes.router)
 
 
 # ---------------------------------------------------------------------------

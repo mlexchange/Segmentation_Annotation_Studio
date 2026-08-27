@@ -29,6 +29,10 @@ dependencies = [
   "scipy>=1.11",
   "tifffile>=2024.0",
   "imagecodecs",
+  # ipred_client.py talks to the standalone iPred service over plain HTTP —
+  # pulled in transitively today via tiled[client], but the direct import
+  # (ipred_client.py, ipred_routes.py) earns a direct pin.
+  "httpx>=0.27",
 ]
 
 [project.optional-dependencies]

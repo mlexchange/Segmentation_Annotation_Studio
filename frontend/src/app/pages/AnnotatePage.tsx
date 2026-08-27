@@ -25,7 +25,13 @@ import DenoiseBakeModal from '@/components/annotate/DenoiseBakeModal';
 import SliceNavigator from '@/components/annotate/SliceNavigator';
 import MaskToolsPanel from '@/components/annotate/MaskToolsPanel';
 import MeasurementPanel from '@/components/annotate/MeasurementPanel';
+import FeatureChannelsPanel from '@/components/annotate/FeatureChannelsPanel';
+import PixelClassifierPanel from '@/components/annotate/PixelClassifierPanel';
 import AnnotationCanvas from '@/components/annotate/AnnotationCanvas';
+import { useFeatureChannels } from '@/hooks/useFeatureChannels';
+import { usePixelClassifier } from '@/hooks/usePixelClassifier';
+import { useFeatureManifold } from '@/hooks/useFeatureManifold';
+import { loadLabelPng, labelMapToPolygonShapes } from '@/lib/pixelClf';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import DownloadModal from '@/components/annotate/DownloadModal';
 import InsightsModal from '@/components/annotate/InsightsModal';
@@ -67,19 +73,11 @@ function StageSwitcher({ stage, onChange }: { stage: AnnotateStage; onChange: (s
   );
 }
 
-function StagePlaceholder({ text }: { text: string }) {
-  return (
-    <p className="rounded-md border border-dashed border-gray-300 bg-gray-50 p-2 text-[11px] leading-snug text-gray-500">
-      {text}
-    </p>
-  );
-}
-
 /** Renders the annotation workspace: tool sidebar, canvas, and save/version/export flows. */
 export default function AnnotatePage() {
   const navigate = useNavigate();
   const { source, kind, serverUri, meta, denoise, setDenoise } = useDatasetStore();
-  const { removeShapes } = useAnnotationStore();
+  const { removeShapes, addShapes, byImage } = useAnnotationStore();
   const { selectedShapeIds, setSelectedShapeId, fillOpacity, setFillOpacity } = useToolStore();
   const { classes } = useClassStore();
 
@@ -187,6 +185,68 @@ export default function AnnotatePage() {
     setSlice(slice);
     setFocusRegion(bbox ? { ...bbox, nonce: Date.now() } : null);
   }, [setSlice]);
+
+  const sliceShapes = sourceKey ? (byImage[sourceKey]?.[String(currentSlice)] ?? []) : [];
+
+  const features = useFeatureChannels({
+    source,
+    kind,
+    sliceIndex: currentSlice,
+    serverUri,
+  });
+
+  const clf = usePixelClassifier({
+    featureJobId: features.job?.jobId ?? null,
+    resetKey: sourceKey ? `${sourceKey}:${currentSlice}` : null,
+    source,
+    kind,
+    serverUri,
+    sliceIndex: currentSlice,
+    onFeatureJobExpired: features.invalidateJob,
+    onFeatureReady: (info) => features.adoptFeatureBank(info),
+  });
+
+  const manifold = useFeatureManifold({
+    featureJobId: features.job?.jobId ?? null,
+    onFeatureJobExpired: features.invalidateJob,
+  });
+
+  const handleClfTrain = useCallback(() => {
+    void clf.train(sliceShapes);
+  }, [clf, sliceShapes]);
+
+  const handleClfPredict = useCallback(() => {
+    void clf.predict(sliceShapes);
+  }, [clf, sliceShapes]);
+
+  const handleClfCommit = useCallback(async () => {
+    if (!sourceKey || !clf.commitUrl || !clf.model) return;
+    try {
+      const { data, width, height } = await loadLabelPng(clf.commitUrl);
+      const shapes = labelMapToPolygonShapes(data, width, height, clf.model.classIds, {
+        minRegion: 64,
+        preserveShapes: sliceShapes,
+      });
+      if (shapes.length) addShapes(sourceKey, currentSlice, shapes);
+      clf.dismiss();
+    } catch {
+      /* keep overlay; error surfaces via clf.error if needed */
+    }
+  }, [sourceKey, clf, addShapes, currentSlice, sliceShapes]);
+
+  const classLabelForId = useCallback(
+    (classId: number) => {
+      const c = classes.find((x) => x.classId === classId);
+      return c?.label?.trim() || `class ${classId}`;
+    },
+    [classes],
+  );
+
+  const predictionClassColorById = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const c of classes) m.set(c.classId, c.color);
+    return m;
+  }, [classes]);
 
   // Load the previewed version's payload (cached) whenever the slider moves.
   useEffect(() => {
@@ -298,7 +358,13 @@ export default function AnnotatePage() {
           />
           <hr />
           <StageSwitcher stage={stage} onChange={setStage} />
-          <LayersPanel />
+          <LayersPanel
+            hasFeatures={!!features.job && features.channelIndex !== null}
+            hasProba={!!clf.probaUrl}
+            hasPredictions={!!clf.commitUrl}
+            predictionClassIds={clf.model?.classIds ?? []}
+            hasManifold={manifold.hasSample || !!manifold.heatmapUrl}
+          />
           <hr />
 
           {stage === 'draw' && (
@@ -359,11 +425,72 @@ export default function AnnotatePage() {
           )}
 
           {stage === 'assist' && (
-            <StagePlaceholder text="Feature channels, the pixel classifier, and manifold suggestions land here in a later phase." />
+            <>
+              <FeatureChannelsPanel
+                job={features.job}
+                channelIndex={features.channelIndex}
+                computing={features.computing}
+                error={features.error}
+                onCompute={features.compute}
+                onSelectChannel={features.selectChannel}
+                onCycle={features.cycleChannel}
+                onOriginal={features.clearSelection}
+              />
+              <hr />
+            </>
           )}
 
           {stage === 'predict' && (
-            <StagePlaceholder text="Model training and inference panels land here in a later phase." />
+            <>
+              <PixelClassifierPanel
+                hasFeatureJob={!!features.job}
+                canAutoPreprocess={clf.canTrainWithoutJob}
+                hasShapes={sliceShapes.length > 0}
+                training={clf.training}
+                predicting={clf.predicting}
+                params={clf.params}
+                onParamsChange={clf.setParams}
+                model={clf.model}
+                hasPrediction={!!clf.commitUrl}
+                predictCounts={clf.predictCounts}
+                probaClassIndex={clf.probaClassIndex}
+                activeProbaClassId={clf.activeProbaClassId}
+                activeProbaThreshold={clf.activeProbaThreshold}
+                classLabelForId={classLabelForId}
+                onCycleProbaClass={clf.cycleProbaClass}
+                onProbaThresholdChange={clf.setProbaThreshold}
+                error={clf.error}
+                onTrain={handleClfTrain}
+                onPredict={handleClfPredict}
+                onCommit={() => { void handleClfCommit(); }}
+                onDismiss={clf.dismiss}
+                commitLabel="Commit singletons"
+                featureSetupId={features.job?.setupId ?? null}
+                trainerId={clf.trainerId}
+                manifoldParams={manifold.params}
+                onManifoldParamsChange={manifold.setParams}
+                manifoldSampling={manifold.sampling}
+                manifoldHasSample={manifold.hasSample}
+                manifoldShowHeatmap={manifold.showHeatmap}
+                onManifoldShowHeatmapChange={manifold.setShowHeatmap}
+                manifoldShowMarkers={manifold.showMarkers}
+                onManifoldShowMarkersChange={manifold.setShowMarkers}
+                manifoldHeatmapOpacity={manifold.heatmapOpacity}
+                onManifoldHeatmapOpacityChange={manifold.setHeatmapOpacity}
+                manifoldMeta={manifold.meta}
+                manifoldError={manifold.error}
+                onManifoldSample={() => { void manifold.sample(); }}
+                onManifoldDismiss={manifold.dismiss}
+                manifoldRoiShapeCount={manifold.placementMask?.length ?? 0}
+                canCaptureManifoldRoi={selectedShapeIds.length > 0}
+                onCaptureManifoldRoi={() => {
+                  const selected = sliceShapes.filter((s) => selectedShapeIds.includes(s.id));
+                  manifold.setPlacementMaskFromShapes(selected);
+                }}
+                onClearManifoldRoi={manifold.clearPlacementMask}
+              />
+              <hr />
+            </>
           )}
 
           {/* Save button + status */}
@@ -448,6 +575,17 @@ export default function AnnotatePage() {
             previewShapes={previewShapes}
             previewClasses={previewPayload?.classes ?? null}
             focusRegion={focusRegion}
+            featureChannelUrl={features.channelUrl}
+            probaOverlayUrl={clf.probaUrl}
+            clfCommitUrl={clf.commitUrl}
+            clfStatusUrl={clf.statusUrl}
+            predictionClassColorById={predictionClassColorById}
+            manifoldHeatmapUrl={manifold.heatmapUrl}
+            manifoldHeatmapOpacity={manifold.heatmapOpacity}
+            manifoldShowHeatmap={manifold.showHeatmap}
+            manifoldMarkers={manifold.points}
+            manifoldShowMarkers={manifold.showMarkers}
+            manifoldBoxSize={manifold.meta?.boxSize ?? 64}
           />
           {previewVersion !== null && (
             <VersionPreviewBar

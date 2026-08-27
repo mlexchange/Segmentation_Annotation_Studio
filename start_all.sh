@@ -21,6 +21,7 @@ TILED_CONFIG="$SCRIPT_DIR/tiled/config.yml"
 MKDOCS_CONFIG="$SCRIPT_DIR/mkdocs.yml"
 TILED_PORT="${TILED_PORT:-8010}"
 BACKEND_PORT="${BACKEND_PORT:-8002}"
+IPRED_PORT="${IPRED_PORT:-8003}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 DOCS_PORT="${DOCS_PORT:-8000}"
 # PROD=1 (or SERVE_MODE=prod): build the optimized SPA and have the backend serve
@@ -30,6 +31,7 @@ STATIC_DIR="$BACKEND_DIR/static"
 RUN_DIR="$SCRIPT_DIR/.run"
 TILED_PID_FILE="$RUN_DIR/tiled.pid"
 BACKEND_PID_FILE="$RUN_DIR/backend.pid"
+IPRED_PID_FILE="$RUN_DIR/ipred.pid"
 FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
 DOCS_PID_FILE="$RUN_DIR/docs.pid"
 ENV_DIR=""
@@ -126,6 +128,7 @@ cleanup_managed_processes() {
   stop_managed_process "$DOCS_PID_FILE" "docs"
   stop_managed_process "$FRONTEND_PID_FILE" "frontend"
   stop_managed_process "$BACKEND_PID_FILE" "backend"
+  stop_managed_process "$IPRED_PID_FILE" "iPred"
   stop_managed_process "$TILED_PID_FILE" "Tiled"
 }
 
@@ -222,6 +225,7 @@ reclaim_orphaned_repo_ports() {
   fi
   stop_repo_listener_on_port "$FRONTEND_PORT" "frontend" "$FRONTEND_DIR" "vite" ""
   stop_repo_listener_on_port "$BACKEND_PORT" "backend" "$BACKEND_DIR" "annotation_server:app" "uvicorn"
+  stop_repo_listener_on_port "$IPRED_PORT" "iPred" "$SCRIPT_DIR/ipred" "ipred.api:app" "uvicorn"
   stop_repo_listener_on_port "$DOCS_PORT" "docs" "$SCRIPT_DIR" "mkdocs" ""
   # Repo-scoped: only reclaim OUR own stale Tiled (its command line contains this
   # repo's config path). A foreign Tiled on the port is left alone — we coexist by
@@ -283,6 +287,18 @@ ensure_backend_env() {
   fi
 }
 
+ensure_ipred_env() {
+  # NOTE: probe "ipred.api", not bare "ipred" — the repo's top-level ipred/
+  # directory (sibling of ipred/src/) is itself an importable namespace package
+  # from cwd, so "import ipred" can silently succeed even when the real
+  # editable install (ipred/src/ipred) was never pip-installed.
+  if ! "$PYTHON" -c "import ipred.api" >/dev/null 2>&1; then
+    echo -e "${YELLOW}    Installing iPred (interactive segmentation service) via uv...${NC}"
+    uv pip install --python "$PYTHON" -e "$SCRIPT_DIR/ipred" >/dev/null 2>&1 || return 1
+  fi
+  "$PYTHON" -c "import ipred.api" >/dev/null 2>&1
+}
+
 ensure_frontend_runtime() {
   if command -v npm >/dev/null 2>&1 && can_run_npm "$(command -v npm)"; then
     NPM_CMD=("$(command -v npm)")
@@ -325,10 +341,11 @@ tiled_cmd() {
 cleanup() {
   echo ""
   echo -e "${YELLOW}Shutting down...${NC}"
-  kill "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
-  wait "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
+  kill "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${IPRED_PID:+"$IPRED_PID"} ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
+  wait "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${IPRED_PID:+"$IPRED_PID"} ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
   cleanup_pid_file "$TILED_PID_FILE"
   cleanup_pid_file "$BACKEND_PID_FILE"
+  cleanup_pid_file "$IPRED_PID_FILE"
   cleanup_pid_file "$FRONTEND_PID_FILE"
   cleanup_pid_file "$DOCS_PID_FILE"
   echo -e "${GREEN}Done.${NC}"
@@ -358,6 +375,15 @@ if [ "$BACKEND_PORT" != "$_orig_backend_port" ]; then
   echo -e "${YELLOW}    Backend port ${_orig_backend_port} is in use — using ${BACKEND_PORT} instead.${NC}"
 fi
 export API_PROXY_TARGET="http://127.0.0.1:${BACKEND_PORT}"
+
+# iPred: fall back to the next free port if busy. Exported as IPRED_URL before
+# the backend starts, so ipred_client.py picks up the chosen port.
+_orig_ipred_port="$IPRED_PORT"
+IPRED_PORT="$(pick_free_port "$IPRED_PORT" "iPred")"
+if [ "$IPRED_PORT" != "$_orig_ipred_port" ]; then
+  echo -e "${YELLOW}    iPred port ${_orig_ipred_port} is in use — using ${IPRED_PORT} instead.${NC}"
+fi
+export IPRED_URL="http://127.0.0.1:${IPRED_PORT}"
 
 # Frontend: fall back to the next free port if busy (Vite serves on --port below).
 _orig_frontend_port="$FRONTEND_PORT"
@@ -574,6 +600,41 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# iPred — standalone interactive-segmentation service (CatBoost + conformal
+# prediction on composable feature banks). Optional: the Assist/Predict stages
+# show a clear "not running" state when this is down, and everything else in
+# the app works regardless (backend/ipred_routes.py returns 503 rather than
+# erroring). Startup failures here are warnings, never fatal.
+# ---------------------------------------------------------------------------
+IPRED_PID=""
+if ensure_ipred_env; then
+  echo -e "${CYAN}==> Starting iPred (port ${IPRED_PORT})...${NC}"
+  (cd "$SCRIPT_DIR" && "$ENV_DIR/bin/uvicorn" ipred.api:app --host 127.0.0.1 --port "$IPRED_PORT") &
+  IPRED_PID=$!
+  echo "$IPRED_PID" > "$IPRED_PID_FILE"
+  echo -e "${GREEN}    iPred PID: $IPRED_PID${NC}"
+
+  echo -e "${CYAN}    Waiting for iPred...${NC}"
+  IPRED_READY=0
+  for i in $(seq 1 20); do
+    if curl -sf "http://127.0.0.1:${IPRED_PORT}/health" >/dev/null 2>&1; then
+      echo -e "${GREEN}    iPred ready at http://127.0.0.1:${IPRED_PORT}${NC}"
+      IPRED_READY=1
+      break
+    fi
+    if ! kill -0 "$IPRED_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  if [ "$IPRED_READY" != 1 ]; then
+    echo -e "${YELLOW}    iPred did not come up in time — Assist/Predict will show a 'not running' state until it does.${NC}"
+  fi
+else
+  echo -e "${YELLOW}==> Skipping iPred (install failed) — Assist/Predict will show a 'not running' state.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
 # Backend
 # ---------------------------------------------------------------------------
 echo -e "${CYAN}==> Starting backend (port ${BACKEND_PORT})...${NC}"
@@ -654,6 +715,11 @@ else
   echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
 fi
 echo -e "${GREEN}  Backend  : http://127.0.0.1:${BACKEND_PORT}${NC}"
+if [ "$IPRED_READY" = "1" ]; then
+  echo -e "${GREEN}  iPred    : http://127.0.0.1:${IPRED_PORT}${NC}"
+else
+  echo -e "${YELLOW}  iPred    : not running (Assist/Predict disabled)${NC}"
+fi
 if [ -n "$DOCS_PID" ]; then
   echo -e "${GREEN}  Docs     : http://127.0.0.1:${DOCS_PORT}${NC}"
 fi

@@ -40,6 +40,8 @@ import { mergeNewWithSameClass, expandSameClassOverlap } from '@/lib/mergeSameCl
 import { useClipboardStore } from '@/stores/clipboardStore';
 import { colormapTables, type ColormapName } from '@/lib/colormaps';
 import ShapesLayer from './ShapesLayer';
+import OverlaysLayer from './OverlaysLayer';
+import type { ManifoldPoint } from '@/lib/featureManifold';
 import { displayAffineFor, displayBandToBase, baseToDisplay, displayToBase } from '@/lib/displayTransform';
 import {
   backgroundRing, fitWithBlurSweep, combineSigma, BLUR_CANDIDATES, MAX_RING_WIDTH,
@@ -58,6 +60,8 @@ const REMOVE_KEY_LABEL = IS_MAC ? 'Option' : 'Alt';
 
 /** Shared stable empty shape list — see `storeShapes` for why identity matters. */
 const EMPTY_SHAPES: Shape[] = [];
+const EMPTY_MANIFOLD_MARKERS: ManifoldPoint[] = [];
+const EMPTY_CLASS_COLOR_BY_ID = new Map<number, string>();
 
 /** Outcome of a Sampler lasso: the fitted band plus what it took to get there. */
 export interface SamplerFit extends SweepResult {
@@ -128,6 +132,23 @@ interface AnnotationCanvasProps {
   /** Zoom to + highlight this image-coord region (e.g. from an Insights QA flag).
    *  `nonce` changes to re-trigger the same region. */
   focusRegion?: { x: number; y: number; w: number; h: number; nonce: number } | null;
+
+  // iPred overlays (additive; each gated by its layerVisibilityStore group).
+  /** Selected feature-channel PNG (grayscale), from useFeatureChannels. */
+  featureChannelUrl?: string | null;
+  /** Colorized softmax probability PNG for the active class, from usePixelClassifier. */
+  probaOverlayUrl?: string | null;
+  /** Conformal commit (argmax classId) + status (abstain/singleton/multi) PNGs. */
+  clfCommitUrl?: string | null;
+  clfStatusUrl?: string | null;
+  /** classId → hex color, for the conformal overlay and manifold markers. */
+  predictionClassColorById?: Map<number, string>;
+  manifoldHeatmapUrl?: string | null;
+  manifoldHeatmapOpacity?: number;
+  manifoldShowHeatmap?: boolean;
+  manifoldMarkers?: ManifoldPoint[];
+  manifoldShowMarkers?: boolean;
+  manifoldBoxSize?: number;
 }
 
 // ---- Point-in-shape hit testing (used by the eraser to pick a target) ----
@@ -469,6 +490,17 @@ export default function AnnotationCanvas({
   previewShapes = null,
   previewClasses = null,
   focusRegion = null,
+  featureChannelUrl = null,
+  probaOverlayUrl = null,
+  clfCommitUrl = null,
+  clfStatusUrl = null,
+  predictionClassColorById,
+  manifoldHeatmapUrl = null,
+  manifoldHeatmapOpacity = 0.45,
+  manifoldShowHeatmap = true,
+  manifoldMarkers = EMPTY_MANIFOLD_MARKERS,
+  manifoldShowMarkers = true,
+  manifoldBoxSize = 64,
 }: AnnotationCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<Konva.Image>(null);
@@ -538,6 +570,11 @@ export default function AnnotationCanvas({
   // The Denoise layer toggle mutes the configured method without discarding it,
   // so switching it back on doesn't lose the user's method/strength choice.
   const effectiveDenoise = layerGroups.denoise ? denoise : null;
+  const probaOpacity = useLayerVisibilityStore((s) => s.probaOpacity);
+  const predictionsOpacity = useLayerVisibilityStore((s) => s.predictionsOpacity);
+  const predictionClassVisible = useLayerVisibilityStore((s) => s.predictionClassVisible);
+  const showPredictionMulti = useLayerVisibilityStore((s) => s.showPredictionMulti);
+  const showPredictionAbstain = useLayerVisibilityStore((s) => s.showPredictionAbstain);
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
@@ -3032,6 +3069,36 @@ export default function AnnotationCanvas({
               perfectDrawEnabled={false}
             />
           </Layer>
+        )}
+
+        {/* iPred overlays: probability heatmap / conformal predictions / manifold
+            suggestions. Sits above the image, below annotations — see OverlaysLayer. */}
+        {meta && (
+          <OverlaysLayer
+            width={meta.width}
+            height={meta.height}
+            imageClip={imageClip}
+            showFeatures={layerGroups.features}
+            featureChannelUrl={featureChannelUrl}
+            showProba={layerGroups.proba}
+            probaOverlayUrl={probaOverlayUrl}
+            probaOpacity={probaOpacity}
+            showPredictions={layerGroups.predictions}
+            clfCommitUrl={clfCommitUrl}
+            clfStatusUrl={clfStatusUrl}
+            predictionsOpacity={predictionsOpacity}
+            classColorById={predictionClassColorById ?? EMPTY_CLASS_COLOR_BY_ID}
+            predictionClassVisible={predictionClassVisible}
+            showPredictionMulti={showPredictionMulti}
+            showPredictionAbstain={showPredictionAbstain}
+            showManifold={layerGroups.manifold}
+            manifoldHeatmapUrl={manifoldHeatmapUrl}
+            manifoldHeatmapOpacity={manifoldHeatmapOpacity}
+            manifoldShowHeatmap={manifoldShowHeatmap}
+            manifoldMarkers={manifoldMarkers}
+            manifoldShowMarkers={manifoldShowMarkers}
+            manifoldBoxSize={manifoldBoxSize}
+          />
         )}
 
         {/* Layer 1: committed shapes — cached + opacity applied once at the
