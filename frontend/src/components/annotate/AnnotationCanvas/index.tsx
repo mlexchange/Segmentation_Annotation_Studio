@@ -575,6 +575,7 @@ export default function AnnotationCanvas({
   const predictionClassVisible = useLayerVisibilityStore((s) => s.predictionClassVisible);
   const showPredictionMulti = useLayerVisibilityStore((s) => s.showPredictionMulti);
   const showPredictionAbstain = useLayerVisibilityStore((s) => s.showPredictionAbstain);
+  const annotationOriginVisible = useLayerVisibilityStore((s) => s.annotationOriginVisible);
   const sourceKey = source && kind
     ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri)
     : null;
@@ -3117,6 +3118,7 @@ export default function AnnotationCanvas({
             activeClassId={activeClassId}
             imageWidth={meta.width}
             imageHeight={meta.height}
+            originVisible={annotationOriginVisible}
           />
         )}
 

@@ -13,6 +13,7 @@ import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useToolStore } from '@/stores/toolStore';
 import { measureRegion } from '@/lib/measure';
+import CollapsibleSection from '@/components/common/CollapsibleSection';
 
 interface MeasurementPanelProps {
   sourceKey: string | null;
@@ -87,11 +88,7 @@ export default function MeasurementPanel({ sourceKey }: MeasurementPanelProps) {
   const len = (v: number) => (cal ? `${(v * px).toPrecision(4)} ${unit}` : `${v.toFixed(1)} px`);
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
-        <Ruler size={14} /> Measure
-      </div>
-
+    <CollapsibleSection title="Measure" icon={<Ruler size={14} />}>
       {!geom || geom.count === 0 ? (
         <p className="text-xs text-gray-500">Select one or more regions to measure.</p>
       ) : (
@@ -141,7 +138,7 @@ export default function MeasurementPanel({ sourceKey }: MeasurementPanelProps) {
           </div>
         </div>
       )}
-    </div>
+    </CollapsibleSection>
   );
 }
 

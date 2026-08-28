@@ -15,6 +15,7 @@ import {
   isPredictionClassVisible,
 } from '@/stores/layerVisibilityStore';
 import { cn } from '@/lib/utils';
+import CollapsibleSection from '@/components/common/CollapsibleSection';
 
 const GROUP_ORDER: LayerGroupId[] = [
   'image',
@@ -98,6 +99,8 @@ export default function LayersPanel({
   const setShowPredictionMulti = useLayerVisibilityStore((s) => s.setShowPredictionMulti);
   const setShowPredictionAbstain = useLayerVisibilityStore((s) => s.setShowPredictionAbstain);
   const ensurePredictionClasses = useLayerVisibilityStore((s) => s.ensurePredictionClasses);
+  const annotationOriginVisible = useLayerVisibilityStore((s) => s.annotationOriginVisible);
+  const setAnnotationOriginVisible = useLayerVisibilityStore((s) => s.setAnnotationOriginVisible);
 
   useEffect(() => {
     if (predictionClassIds.length) ensurePredictionClasses(predictionClassIds);
@@ -118,14 +121,11 @@ export default function LayersPanel({
   };
 
   return (
+    <CollapsibleSection title="Layers" icon={<Stack size={13} />}>
     <div
       className="flex flex-col gap-1.5 rounded-md border border-gray-200 bg-white p-2"
       data-testid="layers-panel"
     >
-      <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
-        <Stack size={13} /> Layers
-      </div>
-
       <div className="flex flex-col gap-0.5">
         {GROUP_ORDER.map((id) => (
           <GroupToggle key={id} id={id} disabled={disabledFor(id)} />
@@ -148,6 +148,37 @@ export default function LayersPanel({
             className="w-full accent-sky-600"
           />
         </label>
+      )}
+
+      {groups.annotations && classes.length > 0 && (
+        <div className="flex flex-wrap gap-1 border-t border-gray-100 pt-1.5">
+          <button
+            type="button"
+            onClick={() => setAnnotationOriginVisible('human', !annotationOriginVisible.human)}
+            title="Hand-drawn shapes"
+            className={cn(
+              'rounded border px-1.5 py-0.5 text-[9px]',
+              annotationOriginVisible.human
+                ? 'border-gray-300 bg-gray-100 text-gray-800'
+                : 'border-gray-200 bg-gray-50 text-gray-400',
+            )}
+          >
+            Human
+          </button>
+          <button
+            type="button"
+            onClick={() => setAnnotationOriginVisible('predicted', !annotationOriginVisible.predicted)}
+            title="Shapes committed from an iPred prediction (dashed outline)"
+            className={cn(
+              'rounded border px-1.5 py-0.5 text-[9px]',
+              annotationOriginVisible.predicted
+                ? 'border-sky-300 bg-sky-50 text-sky-900'
+                : 'border-gray-200 bg-gray-50 text-gray-400',
+            )}
+          >
+            Predicted
+          </button>
+        </div>
       )}
 
       {groups.predictions && hasPredictions && (
@@ -221,5 +252,6 @@ export default function LayersPanel({
         </div>
       )}
     </div>
+    </CollapsibleSection>
   );
 }

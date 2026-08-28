@@ -193,6 +193,30 @@ def train(
         return r.json()
 
 
+def train_multi(
+    *,
+    session_id: str,
+    slices: dict[str, list[dict[str, Any]]],
+    feature_ids: dict[str, str],
+    trainer_id: str = "catboost",
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """POST /train/multi — pool labeled pixels across multiple slices into one model."""
+    with _client() as client:
+        r = client.post(
+            "/train/multi",
+            json={
+                "session_id": session_id,
+                "slices": slices,
+                "feature_ids": feature_ids,
+                "trainer_id": trainer_id,
+                "config": config or {},
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+
 def infer(
     *,
     session_id: str,

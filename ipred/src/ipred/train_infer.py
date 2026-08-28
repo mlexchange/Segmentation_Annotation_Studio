@@ -134,16 +134,17 @@ def _stratified_sample(
     return np.concatenate(chosen) if chosen else np.arange(0)
 
 
-def _pixel_features(
+def _raw_pixel_features(
     bank: dict[str, Any],
     yy: np.ndarray,
     xx: np.ndarray,
-    *,
-    sam_pca_mean: np.ndarray | None = None,
-    sam_pca_components: np.ndarray | None = None,
-    fit_pca: bool = False,
-    sam_pca_dims: int = 32,
-) -> tuple[np.ndarray, list[str], np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray, list[str], np.ndarray | None]:
+    """Skimage feature columns + raw (pre-PCA) SAM embedding columns, if any.
+
+    Split out of ``_pixel_features`` so multi-slice training can pool raw SAM
+    pixels across slices and fit ONE PCA over the pooled set — fitting PCA
+    per-slice would make the reduced columns incomparable slice-to-slice.
+    """
     float_stack = bank["float_stack"]
     h, w, _ = float_stack.shape
     ys_i = np.clip(yy.astype(np.int64), 0, h - 1)
@@ -154,9 +155,9 @@ def _pixel_features(
     sam_meta = bank.get("sam_meta")
     # Preprocess may already bake encoder PCA into float_stack channels.
     if sam_meta and sam_meta.get("baked_into_float_stack"):
-        return x_sk, labels, None, None
+        return x_sk, labels, None
     if sam_emb is None or sam_meta is None:
-        return x_sk, labels, None, None
+        return x_sk, labels, None
     oh, ow = sam_meta["orig_hw"]
     rh, rw = sam_meta["reshaped_hw"]
     x_sam = sam_embed.bilinear_sample_emb(
@@ -168,6 +169,22 @@ def _pixel_features(
         reshaped_h=int(rh),
         reshaped_w=int(rw),
     )
+    return x_sk, labels, x_sam
+
+
+def _pixel_features(
+    bank: dict[str, Any],
+    yy: np.ndarray,
+    xx: np.ndarray,
+    *,
+    sam_pca_mean: np.ndarray | None = None,
+    sam_pca_components: np.ndarray | None = None,
+    fit_pca: bool = False,
+    sam_pca_dims: int = 32,
+) -> tuple[np.ndarray, list[str], np.ndarray | None, np.ndarray | None]:
+    x_sk, labels, x_sam = _raw_pixel_features(bank, yy, xx)
+    if x_sam is None:
+        return x_sk, labels, None, None
     mean, comp = sam_pca_mean, sam_pca_components
     if fit_pca:
         mean, comp = sam_embed.fit_pca(x_sam, n_components=sam_pca_dims)
@@ -253,12 +270,47 @@ def run_train(
         feature_labels=feat_labels,
         config=cfg,
     )
+    return _save_trained_model(
+        catalog,
+        session=session,
+        session_id=session_id,
+        fid=fid,
+        trainer_id=trainer_id,
+        arts=arts,
+        uses_sam=uses_sam,
+        train_frac=train_frac,
+        pca_mean=pca_mean,
+        pca_comp=pca_comp,
+    )
+
+
+def _save_trained_model(
+    catalog: Catalog,
+    *,
+    session: Any,
+    session_id: str,
+    fid: str,
+    trainer_id: str,
+    arts: Any,
+    uses_sam: bool,
+    train_frac: float,
+    pca_mean: np.ndarray | None,
+    pca_comp: np.ndarray | None,
+    extra_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist a trained ``ModelArtifacts`` to blob storage + the catalog.
+
+    Shared tail of ``run_train`` and ``run_train_multi_slice`` — the only
+    difference between single- and multi-slice training is how ``arts`` (and
+    the pooled SAM PCA, if any) got built; saving/cataloging is identical.
+    """
     arts.params["uses_sam"] = uses_sam
     arts.params["train_frac"] = train_frac
 
     model_id = uuid.uuid4().hex
     blob = project_blob_dir(session.project_id) / "models" / model_id
     blob.mkdir(parents=True, exist_ok=True)
+    trainer = get_trainer(trainer_id)
     trainer.save(arts.model_handle, blob)
     feature_importances = list(arts.extras.get("feature_importances") or [])
     meta = {
@@ -275,6 +327,7 @@ def run_train(
         "params": arts.params,
         "uses_sam": uses_sam,
         "feature_importances": feature_importances,
+        **(extra_meta or {}),
     }
     if pca_mean is not None and pca_comp is not None:
         np.savez(blob / "sam_pca.npz", mean=pca_mean, components=pca_comp)
@@ -307,7 +360,164 @@ def run_train(
         "n_samples": arts.n_samples,
         "params": arts.params,
         "feature_importances": feature_importances,
+        **(extra_meta or {}),
     }
+
+
+def run_train_multi_slice(
+    catalog: Catalog,
+    *,
+    session_id: str,
+    per_slice_shapes: dict[int, list[dict[str, Any]]],
+    feature_ids: dict[int, str],
+    trainer_id: str = "catboost",
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Train one model pooling labeled pixels across multiple slices.
+
+    Each slice keeps its own feature bank (its own composition run against
+    that slice), but SAM PCA — when in play — is fit ONCE on pixels pooled
+    across every slice's training split, so the reduced columns mean the same
+    thing regardless of which slice a pixel came from. A per-slice PCA fit
+    (naively looping ``run_train``) would make them incomparable.
+    """
+    session = catalog.get_session(session_id)
+    if session is None:
+        raise KeyError(f"unknown session {session_id}")
+    if not per_slice_shapes:
+        raise ValueError("no slices with shapes to train on")
+
+    cfg = dict(config or {})
+    rng = np.random.default_rng(int(cfg.get("random_seed", 0)))
+    max_samples = int(cfg.get("max_samples", 200_000))
+    train_frac = float(cfg.get("train_frac", 0.8))
+    per_slice_cap = max(1, max_samples // max(1, len(per_slice_shapes)))
+
+    banks: dict[int, dict[str, Any]] = {}
+    train_parts: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]] = []
+    cal_parts: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]] = []
+    uses_sam = False
+    summaries: list[str] = []
+
+    for slice_index, shapes in sorted(per_slice_shapes.items()):
+        fid = feature_ids.get(slice_index)
+        if not fid:
+            raise ValueError(f"no feature_id for slice {slice_index}")
+        bank_row = catalog.get_feature_bank(fid)
+        if bank_row is None:
+            raise KeyError(f"unknown feature bank {fid}")
+        bank = load_feature_bank_arrays(bank_row["blob_dir"])
+        banks[slice_index] = bank
+        h, w, _ = bank["float_stack"].shape
+        label_map = build_label_map(shapes, h, w)
+        if not np.any(label_map > 0):
+            summaries.append(f"slice {slice_index}: no labeled pixels")
+            continue
+        yy, xx = np.nonzero(label_map)
+        y_all = label_map[yy, xx].astype(np.int32)
+        cap_idx = _stratified_sample(y_all, per_slice_cap, rng)
+        yy_c, xx_c, y_c = yy[cap_idx], xx[cap_idx], y_all[cap_idx]
+        train_idx, cal_idx = stratified_train_cal_split(y_c, train_frac=train_frac, rng=rng)
+        train_parts.append((slice_index, yy_c[train_idx], xx_c[train_idx], y_c[train_idx]))
+        cal_parts.append((slice_index, yy_c[cal_idx], xx_c[cal_idx], y_c[cal_idx]))
+        uses_sam = uses_sam or (
+            bank.get("sam_emb") is not None
+            and not (bank.get("sam_meta") or {}).get("baked_into_float_stack")
+        )
+        summaries.append(
+            f"slice {slice_index}: {y_all.size} labeled px, "
+            f"classes {sorted(int(c) for c in np.unique(y_all))}"
+        )
+
+    if not train_parts:
+        raise ValueError(
+            "no labeled pixels across the given slices — " + "; ".join(summaries)
+        )
+
+    all_y_train = np.concatenate([p[3] for p in train_parts])
+    all_y_cal = (
+        np.concatenate([p[3] for p in cal_parts])
+        if cal_parts
+        else np.array([], dtype=np.int32)
+    )
+    if len(np.unique(np.concatenate([all_y_train, all_y_cal]))) < 2:
+        raise ValueError(
+            "need at least two classes with labeled pixels across the selected "
+            "slices — " + "; ".join(summaries)
+        )
+
+    # Raw (pre-PCA) extraction per slice, pooled before any PCA fit.
+    x_sk_train_parts, x_sam_train_parts = [], []
+    x_sk_cal_parts, x_sam_cal_parts = [], []
+    feat_labels: list[str] | None = None
+    for slice_index, yy, xx, _y in train_parts:
+        x_sk, labels, x_sam = _raw_pixel_features(banks[slice_index], yy, xx)
+        feat_labels = feat_labels or labels
+        x_sk_train_parts.append(x_sk)
+        if x_sam is not None:
+            x_sam_train_parts.append(x_sam)
+    for slice_index, yy, xx, _y in cal_parts:
+        x_sk, _labels, x_sam = _raw_pixel_features(banks[slice_index], yy, xx)
+        x_sk_cal_parts.append(x_sk)
+        if x_sam is not None:
+            x_sam_cal_parts.append(x_sam)
+
+    x_sk_train = np.concatenate(x_sk_train_parts, axis=0)
+    x_sk_cal = (
+        np.concatenate(x_sk_cal_parts, axis=0)
+        if x_sk_cal_parts
+        else np.empty((0, x_sk_train.shape[1]), dtype=np.float32)
+    )
+
+    pca_mean = pca_comp = None
+    if uses_sam and x_sam_train_parts:
+        x_sam_train_raw = np.concatenate(x_sam_train_parts, axis=0)
+        x_sam_cal_raw = (
+            np.concatenate(x_sam_cal_parts, axis=0)
+            if x_sam_cal_parts
+            else np.empty((0, x_sam_train_raw.shape[1]), dtype=x_sam_train_raw.dtype)
+        )
+        pca_mean, pca_comp = sam_embed.fit_pca(
+            x_sam_train_raw, n_components=int(cfg.get("sam_pca_dims", 32))
+        )
+        x_sam_train = sam_embed.transform_pca(x_sam_train_raw, pca_mean, pca_comp)
+        x_sam_cal = (
+            sam_embed.transform_pca(x_sam_cal_raw, pca_mean, pca_comp)
+            if x_sam_cal_raw.shape[0]
+            else np.empty((0, pca_comp.shape[0]), dtype=np.float32)
+        )
+        x_tr = np.concatenate([x_sk_train, x_sam_train], axis=1)
+        x_cal = (
+            np.concatenate([x_sk_cal, x_sam_cal], axis=1)
+            if x_sk_cal.shape[0]
+            else np.empty((0, x_tr.shape[1]), dtype=np.float32)
+        )
+        feat_labels = (feat_labels or []) + [f"sam{i}" for i in range(x_sam_train.shape[1])]
+    else:
+        x_tr = x_sk_train
+        x_cal = x_sk_cal
+
+    trainer = get_trainer(trainer_id)
+    arts = trainer.train(
+        x_tr, all_y_train, x_cal, all_y_cal, feature_labels=feat_labels or [], config=cfg
+    )
+    trained_slices = sorted(slice_index for slice_index, *_ in train_parts)
+    # The default feature_id is only an infer-time fallback when a caller doesn't
+    # pass one explicitly — real infer calls always target one specific slice.
+    default_feature_id = feature_ids[trained_slices[0]]
+    return _save_trained_model(
+        catalog,
+        session=session,
+        session_id=session_id,
+        fid=default_feature_id,
+        trainer_id=trainer_id,
+        arts=arts,
+        uses_sam=uses_sam,
+        train_frac=train_frac,
+        pca_mean=pca_mean,
+        pca_comp=pca_comp,
+        extra_meta={"trained_slice_indices": trained_slices},
+    )
 
 
 def run_infer(

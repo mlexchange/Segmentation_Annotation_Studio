@@ -8,6 +8,7 @@ frontend can show a clear "not running" state.
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Optional
 
 import httpx
@@ -15,6 +16,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+import export_jobs
+import ipred_batch_jobs
 import ipred_client as ipred_client_mod
 
 router = APIRouter(prefix="/api/ipred")
@@ -114,6 +117,28 @@ class IpredManifoldSampleRequest(BaseModel):
 class IpredThresholdClassRequest(BaseModel):
     class_id: int
     threshold: float = 0.5
+
+
+class IpredBatchTrainRequest(BaseModel):
+    """Train one model pooling labeled pixels across multiple slices."""
+
+    session_id: str
+    slices: dict[str, list[dict[str, Any]]]
+    composition_id: Optional[str] = None
+    feature_setup_id: Optional[str] = None
+    trainer_id: str = "catboost"
+    config: Optional[dict[str, Any]] = None
+
+
+class IpredBatchApplyRequest(BaseModel):
+    """Run inference across a set of slices (e.g. the whole volume)."""
+
+    session_id: str
+    model_id: str
+    slice_indices: list[int]
+    composition_id: Optional[str] = None
+    feature_setup_id: Optional[str] = None
+    alpha: float = 0.05
 
 
 def _ipred_http_error(exc: Exception) -> HTTPException:
@@ -368,6 +393,54 @@ async def ipred_run_proba(run_id: str, class_index: int) -> Response:
         )
     except Exception as exc:
         raise _ipred_http_error(exc) from exc
+
+
+@router.post("/batch/train")
+async def ipred_batch_train(body: IpredBatchTrainRequest) -> dict:
+    """Train across multiple slices in the background; poll via export_jobs.
+
+    Mirrors the `/api/denoise/bake` job-spawning pattern: create the job,
+    hand it to a daemon thread, return its id immediately.
+    """
+    if not body.slices:
+        raise HTTPException(422, "at least one slice with shapes is required")
+    jid = export_jobs.new_job(body.session_id)
+    threading.Thread(
+        target=ipred_batch_jobs.run_ipred_multi_train_job,
+        kwargs=dict(
+            jid=jid,
+            session_id=body.session_id,
+            per_slice_shapes={int(k): v for k, v in body.slices.items()},
+            composition_id=body.composition_id,
+            feature_setup_id=body.feature_setup_id,
+            trainer_id=body.trainer_id,
+            config=body.config,
+        ),
+        daemon=True,
+    ).start()
+    return {"job_id": jid}
+
+
+@router.post("/batch/apply")
+async def ipred_batch_apply(body: IpredBatchApplyRequest) -> dict:
+    """Run inference across many slices in the background; poll via export_jobs."""
+    if not body.slice_indices:
+        raise HTTPException(422, "at least one slice_index is required")
+    jid = export_jobs.new_job(body.session_id)
+    threading.Thread(
+        target=ipred_batch_jobs.run_ipred_volume_apply_job,
+        kwargs=dict(
+            jid=jid,
+            session_id=body.session_id,
+            model_id=body.model_id,
+            slice_indices=list(body.slice_indices),
+            composition_id=body.composition_id,
+            feature_setup_id=body.feature_setup_id,
+            alpha=body.alpha,
+        ),
+        daemon=True,
+    ).start()
+    return {"job_id": jid}
 
 
 @router.post("/runs/{run_id}/threshold-class")

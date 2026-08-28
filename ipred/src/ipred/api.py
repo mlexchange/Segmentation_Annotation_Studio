@@ -90,6 +90,16 @@ class TrainBody(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class TrainMultiBody(BaseModel):
+    """Multi-slice train request — pools labeled pixels across slices."""
+
+    session_id: str
+    slices: dict[str, list[dict[str, Any]]]
+    feature_ids: dict[str, str]
+    trainer_id: str = "catboost"
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
 class InferBody(BaseModel):
     """Infer request."""
 
@@ -356,6 +366,27 @@ def api_train(body: TrainBody) -> dict[str, Any]:
     except Exception as exc:
         logger.exception("train failed")
         raise HTTPException(500, f"train failed: {exc}") from exc
+
+
+@app.post("/train/multi")
+def api_train_multi(body: TrainMultiBody) -> dict[str, Any]:
+    """Train one model pooling labeled pixels across multiple slices."""
+    try:
+        return train_infer.run_train_multi_slice(
+            get_catalog(),
+            session_id=body.session_id,
+            per_slice_shapes={int(k): v for k, v in body.slices.items()},
+            feature_ids={int(k): v for k, v in body.feature_ids.items()},
+            trainer_id=body.trainer_id,
+            config=body.config,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("multi-slice train failed")
+        raise HTTPException(500, f"multi-slice train failed: {exc}") from exc
 
 
 @app.post("/infer")

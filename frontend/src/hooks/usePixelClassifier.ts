@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { useIpredStore } from '@/stores/ipredStore';
 import type { Shape } from '@/stores/annotationStore';
+import { useExportJob } from '@/hooks/useExportJob';
 import {
   ipredInfer,
   ipredPreprocess,
@@ -15,6 +16,7 @@ import {
   ipredTrain,
   openIpredSession,
   type IpredThresholdClassResult,
+  type IpredTrainResult,
 } from '@/lib/ipredApi';
 import { thresholdProbaPngBlob } from '@/lib/pixelClf';
 
@@ -63,6 +65,8 @@ export interface ClfTrainResult {
 export interface UsePixelClassifierArgs {
   /** Current ipred feature bank id (from Preprocess compute), if any. */
   featureJobId: string | null;
+  /** Sample/composition identity ONLY (e.g. sourceKey) — must NOT include the
+   *  slice index, or a trained model gets wiped on every slice change. */
   resetKey: string | null;
   source: string | null;
   kind: string | null;
@@ -82,6 +86,34 @@ export interface UsePixelClassifierArgs {
 }
 
 const DEFAULT_PROBA_THRESHOLD = 0.5;
+
+/** Maps an ipred train response (single- or multi-slice — same shape, plus an
+ *  optional `trained_slice_indices`) into the UI's ClfTrainResult. Shared so
+ *  the multi-slice path doesn't duplicate `train()`'s mapping. */
+function toClfTrainResult(
+  data: IpredTrainResult,
+  params: ClfParams,
+  compositionId: string | null,
+): ClfTrainResult {
+  return {
+    modelId: data.model_id,
+    featureId: data.feature_id,
+    nSamples: data.n_samples,
+    nTrain: data.n_train,
+    nCal: data.n_cal,
+    classIds: data.class_ids,
+    trainAccuracy: data.train_accuracy,
+    params: { ...params },
+    nTrees: Number(data.params?.iterations ?? params.iterations),
+    usesSam: !!(data.params as { uses_sam?: boolean } | undefined)?.uses_sam,
+    featureImportances: (data.feature_importances ?? []).map((fi) => ({
+      label: fi.label,
+      importance: fi.importance,
+    })),
+    trainerId: data.trainer_id,
+    compositionId,
+  };
+}
 
 export function usePixelClassifier({
   featureJobId,
@@ -177,11 +209,24 @@ export function usePixelClassifier({
     revokeProba();
   }, [revokeProba]);
 
+  // Sample or composition identity changed — the trained model no longer applies.
+  // `resetKey` is the sample's sourceKey alone (no slice index baked in), so a
+  // plain slice change does NOT land here; see the effect below for that case.
   useEffect(() => {
     setModel(null);
     revokePredict();
     setError(null);
-  }, [featureJobId, resetKey, preferredCompositionId, revokePredict]);
+  }, [resetKey, preferredCompositionId, revokePredict]);
+
+  // Feature bank changed (new slice, or a recompute) — any in-flight prediction
+  // preview is tied to the OLD bank and must go, but the trained model itself
+  // stays valid: it can be applied to whichever slice is on screen now (see
+  // `predict()`, which always resolves the CURRENT slice's bank via
+  // `ensureFeatureBank()` rather than the model's original training bank).
+  useEffect(() => {
+    revokePredict();
+    setError(null);
+  }, [featureJobId, revokePredict]);
 
   useEffect(
     () => () => {
@@ -273,25 +318,7 @@ export function usePixelClassifier({
             learning_rate: params.learningRate,
           },
         });
-        const result: ClfTrainResult = {
-          modelId: data.model_id,
-          featureId: data.feature_id,
-          nSamples: data.n_samples,
-          nTrain: data.n_train,
-          nCal: data.n_cal,
-          classIds: data.class_ids,
-          trainAccuracy: data.train_accuracy,
-          params: { ...params },
-          nTrees: Number(data.params?.iterations ?? params.iterations),
-          usesSam: !!(data.params as { uses_sam?: boolean } | undefined)?.uses_sam,
-          featureImportances: (data.feature_importances ?? []).map((fi) => ({
-            label: fi.label,
-            importance: fi.importance,
-          })),
-          trainerId: data.trainer_id,
-          compositionId: preferredCompositionId,
-        };
-        setModel(result);
+        setModel(toClfTrainResult(data, params, preferredCompositionId));
       } catch (e) {
         setModel(null);
         const msg = e instanceof Error ? e.message : String(e);
@@ -316,6 +343,98 @@ export function usePixelClassifier({
     ],
   );
 
+  // ---- Batch operations: multi-slice train, whole-volume apply ----
+  const multiTrainJobHook = useExportJob();
+  const volumeApplyJobHook = useExportJob();
+  // Guards against re-applying an already-handled job result on every render
+  // (the job's `state` object is recreated each poll tick even once done).
+  const multiTrainHandledRef = useRef<string | null>(null);
+  const volumeApplyHandledRef = useRef<string | null>(null);
+
+  /** Train one model pooling labeled pixels across every slice in `perSliceShapes`. */
+  const trainAcrossSlices = useCallback(
+    async (perSliceShapes: Record<number, Shape[]>) => {
+      if (Object.keys(perSliceShapes).length === 0) {
+        setError('No annotated slices to train on.');
+        return;
+      }
+      if (!preferredCompositionId) {
+        setError('Select a composition first.');
+        return;
+      }
+      setError(null);
+      revokePredict();
+      const sessionId = await ensureSession();
+      multiTrainHandledRef.current = null;
+      await multiTrainJobHook.startIpredBatchTrain({
+        session_id: sessionId,
+        slices: perSliceShapes,
+        composition_id: preferredCompositionId,
+        trainer_id: preferredTrainerId,
+        config: {
+          iterations: params.iterations,
+          depth: params.depth,
+          learning_rate: params.learningRate,
+        },
+      });
+    },
+    [
+      preferredCompositionId,
+      preferredTrainerId,
+      params,
+      revokePredict,
+      ensureSession,
+      multiTrainJobHook,
+    ],
+  );
+
+  // Adopt the completed multi-train job's result the same way `train()` does.
+  useEffect(() => {
+    const { status, result, error: jobError, jobId } = multiTrainJobHook.state;
+    if (!jobId || multiTrainHandledRef.current === jobId) return;
+    if (status === 'done' && result) {
+      multiTrainHandledRef.current = jobId;
+      setModel(toClfTrainResult(result as unknown as IpredTrainResult, params, preferredCompositionId));
+    } else if (status === 'error') {
+      multiTrainHandledRef.current = jobId;
+      setModel(null);
+      setError(jobError ?? 'Multi-slice training failed.');
+    }
+  }, [multiTrainJobHook.state, params, preferredCompositionId]);
+
+  /** Run inference across many slices (e.g. the whole volume). Does not commit —
+   *  turning the result's per-slice runs into shapes stays client-side in
+   *  AnnotatePage, reusing the same PNG-vectorize path as the single-slice commit. */
+  const applyAcrossVolume = useCallback(
+    async (sliceIndices: number[]) => {
+      if (!model) {
+        setError('Train a model first.');
+        return;
+      }
+      if (sliceIndices.length === 0) return;
+      setError(null);
+      const sessionId = await ensureSession();
+      volumeApplyHandledRef.current = null;
+      await volumeApplyJobHook.startIpredBatchApply({
+        session_id: sessionId,
+        model_id: model.modelId,
+        slice_indices: sliceIndices,
+        composition_id: preferredCompositionId,
+        alpha: params.alpha,
+      });
+    },
+    [model, preferredCompositionId, params.alpha, ensureSession, volumeApplyJobHook],
+  );
+
+  useEffect(() => {
+    const { status, error: jobError, jobId } = volumeApplyJobHook.state;
+    if (!jobId || volumeApplyHandledRef.current === jobId) return;
+    if (status === 'error') {
+      volumeApplyHandledRef.current = jobId;
+      setError(jobError ?? 'Volume apply failed.');
+    }
+  }, [volumeApplyJobHook.state]);
+
   const predict = useCallback(
     async (_shapes: Shape[]) => {
       if (!model || predicting) return;
@@ -323,7 +442,10 @@ export function usePixelClassifier({
       setError(null);
       try {
         const sessionId = await ensureSession();
-        const featureId = model.featureId || (await ensureFeatureBank());
+        // Always the CURRENT slice's bank, not model.featureId (the slice the model
+        // happened to be trained on) — the model persists across slices, so predict
+        // must target whichever slice is on screen, computing a bank if missing.
+        const featureId = await ensureFeatureBank();
         const run = await ipredInfer({
           session_id: sessionId,
           model_id: model.modelId,
@@ -458,5 +580,14 @@ export function usePixelClassifier({
     compositionId: preferredCompositionId,
     trainerId: preferredTrainerId,
     canTrainWithoutJob: !!preferredCompositionId && !!source && !!kind,
+    // ---- Batch operations ----
+    trainAcrossSlices,
+    multiTrainJob: multiTrainJobHook.state,
+    multiTraining: multiTrainJobHook.state.status === 'running',
+    resetMultiTrainJob: multiTrainJobHook.reset,
+    applyAcrossVolume,
+    volumeApplyJob: volumeApplyJobHook.state,
+    volumeApplying: volumeApplyJobHook.state.status === 'running',
+    resetVolumeApplyJob: volumeApplyJobHook.reset,
   };
 }

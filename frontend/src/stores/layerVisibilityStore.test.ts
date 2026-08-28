@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import {
   isPredictionClassVisible,
+  isShapeOriginVisible,
   useLayerVisibilityStore,
 } from '@/stores/layerVisibilityStore';
 
@@ -19,6 +20,7 @@ describe('layerVisibilityStore', () => {
       predictionClassVisible: {},
       showPredictionMulti: true,
       showPredictionAbstain: true,
+      annotationOriginVisible: { human: true, predicted: true },
     });
   });
 
@@ -42,5 +44,15 @@ describe('layerVisibilityStore', () => {
     s.toggleGroup('denoise');
     expect(useLayerVisibilityStore.getState().groups.denoise).toBe(false);
     expect(useLayerVisibilityStore.getState().groups.image).toBe(true);
+  });
+
+  it('toggles predicted/human annotation visibility independently', () => {
+    const s = useLayerVisibilityStore.getState();
+    expect(isShapeOriginVisible(useLayerVisibilityStore.getState().annotationOriginVisible, 'predicted')).toBe(true);
+    expect(isShapeOriginVisible(useLayerVisibilityStore.getState().annotationOriginVisible, undefined)).toBe(true);
+    s.setAnnotationOriginVisible('predicted', false);
+    expect(isShapeOriginVisible(useLayerVisibilityStore.getState().annotationOriginVisible, 'predicted')).toBe(false);
+    // Human-drawn (origin undefined) is unaffected by hiding predicted shapes.
+    expect(isShapeOriginVisible(useLayerVisibilityStore.getState().annotationOriginVisible, undefined)).toBe(true);
   });
 });

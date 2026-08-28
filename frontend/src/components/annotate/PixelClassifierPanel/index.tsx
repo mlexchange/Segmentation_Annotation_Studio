@@ -3,11 +3,11 @@
  * Suggest-Labels manifold loop folded in and conformal coverage surfaced as
  * headline guidance (not a legend entry).
  */
-import { useState } from 'react';
 import { CaretLeft, CaretRight, CircleNotch, Compass, TreeStructure } from '@phosphor-icons/react';
 import type { ClfParams, ClfPredictCounts, ClfTrainResult } from '@/hooks/usePixelClassifier';
 import type { ManifoldParams } from '@/hooks/useFeatureManifold';
 import { cn } from '@/lib/utils';
+import CollapsibleSection from '@/components/common/CollapsibleSection';
 
 /** Shared progress-bar treatment (see useExportJob / DownloadModal). */
 function BusyBar({ label }: { label: string }) {
@@ -18,6 +18,25 @@ function BusyBar({ label }: { label: string }) {
       </div>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
         <div className="h-full w-1/3 animate-pulse rounded-full bg-sky-500" />
+      </div>
+    </div>
+  );
+}
+
+/** Real done/total progress bar for batch jobs (see DownloadModal's job bar). */
+function JobProgressBar({ label, done, total }: { label: string; done: number; total: number }) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between text-[10px] text-gray-500">
+        <span>{label}</span>
+        {total > 0 && <span className="tabular-nums">{done}/{total}</span>}
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
+        <div
+          className="h-full rounded-full bg-sky-500 transition-all"
+          style={{ width: `${Math.max(5, pct)}%` }}
+        />
       </div>
     </div>
   );
@@ -67,6 +86,26 @@ export interface PixelClassifierPanelProps {
   featureSetupId?: string | null;
   trainerId?: string | null;
 
+  // Multi-slice train: pool labeled pixels across every annotated slice of the sample.
+  annotatedSliceCount: number;
+  trainAcrossSlices: boolean;
+  onTrainAcrossSlicesChange: (v: boolean) => void;
+  multiTraining: boolean;
+  multiTrainProgress: { done: number; total: number } | null;
+
+  // Apply a trained model across many slices at once, then commit selected classes.
+  totalSliceCount: number;
+  commitClassIds: number[];
+  onToggleCommitClassId: (classId: number) => void;
+  volumeApplying: boolean;
+  volumeApplyProgress: { done: number; total: number } | null;
+  volumeApplyResult: { runCount: number; errorCount: number; cancelled: boolean } | null;
+  volumeApplyCommitting: boolean;
+  onApplyToVolume: () => void;
+  onCommitVolumeApply: () => void;
+  onCancelVolumeApply: () => void;
+  onDismissVolumeApply: () => void;
+
   // Suggest-labels (manifold), folded into the same loop instead of a separate panel.
   manifoldParams: ManifoldParams;
   onManifoldParamsChange: (p: ManifoldParams) => void;
@@ -114,6 +153,22 @@ export default function PixelClassifierPanel({
   commitLabel = 'Commit singletons',
   featureSetupId = null,
   trainerId = null,
+  annotatedSliceCount,
+  trainAcrossSlices,
+  onTrainAcrossSlicesChange,
+  multiTraining,
+  multiTrainProgress,
+  totalSliceCount,
+  commitClassIds,
+  onToggleCommitClassId,
+  volumeApplying,
+  volumeApplyProgress,
+  volumeApplyResult,
+  volumeApplyCommitting,
+  onApplyToVolume,
+  onCommitVolumeApply,
+  onCancelVolumeApply,
+  onDismissVolumeApply,
   manifoldParams,
   onManifoldParamsChange,
   manifoldSampling,
@@ -133,10 +188,14 @@ export default function PixelClassifierPanel({
   onCaptureManifoldRoi,
   onClearManifoldRoi,
 }: PixelClassifierPanelProps) {
-  const [showSuggest, setShowSuggest] = useState(false);
-  const busy = training || predicting;
-  const canTrain = (hasFeatureJob || canAutoPreprocess) && hasShapes && !busy;
-  const canPredict = !!model && (hasFeatureJob || !!model.featureId) && !busy;
+  const busy = training || predicting || multiTraining || volumeApplying;
+  const canTrain =
+    (trainAcrossSlices ? annotatedSliceCount > 0 : (hasFeatureJob || canAutoPreprocess) && hasShapes) &&
+    !busy;
+  // ensureFeatureBank() (inside predict()) computes a bank for the current slice
+  // when one isn't ready yet, so predicting doesn't require hasFeatureJob up front —
+  // only that a model exists to apply.
+  const canPredict = !!model && !busy;
   const maxImp = model?.featureImportances[0]?.importance ?? 1;
   const alphaPct = Math.round(params.alpha * 100);
   const nClasses = model?.classIds.length ?? 0;
@@ -148,16 +207,14 @@ export default function PixelClassifierPanel({
   const headline = predictCounts ? coverageHeadline(predictCounts, params.alpha) : null;
 
   return (
-    <div className="flex flex-col gap-2 border-t border-gray-100 pt-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">
-          Classifier
-        </span>
+    <CollapsibleSection
+      title="Classifier"
+      headerRight={
         <span className="text-[10px] text-gray-400" title="Trainer + Mondrian conformal sets">
           {trainerId ?? 'catboost'} · conformal
         </span>
-      </div>
-
+      }
+    >
       <p className="text-[11px] text-gray-600 leading-snug">
         Setup:{' '}
         <span className="font-mono text-gray-800">
@@ -241,10 +298,34 @@ export default function PixelClassifierPanel({
         />
       </label>
 
+      <label
+        className={cn(
+          'flex items-center gap-1.5 text-[10px]',
+          annotatedSliceCount > 1 ? 'text-gray-600' : 'text-gray-300 cursor-not-allowed',
+        )}
+        title={
+          annotatedSliceCount > 1
+            ? `Pool labeled pixels across all ${annotatedSliceCount} annotated slices into one model`
+            : 'Annotate more than one slice to enable this'
+        }
+      >
+        <input
+          type="checkbox"
+          disabled={annotatedSliceCount <= 1 || busy}
+          checked={trainAcrossSlices && annotatedSliceCount > 1}
+          onChange={(e) => onTrainAcrossSlicesChange(e.target.checked)}
+        />
+        Train across all annotated slices ({annotatedSliceCount})
+      </label>
+
       <button
         type="button"
         disabled={!canTrain}
-        title={!hasFeatureJob ? 'Compute features first' : !hasShapes ? 'Annotate at least two classes' : 'Train classifier'}
+        title={
+          trainAcrossSlices
+            ? 'Train one model pooling every annotated slice'
+            : !hasFeatureJob ? 'Compute features first' : !hasShapes ? 'Annotate at least two classes' : 'Train classifier'
+        }
         onClick={onTrain}
         className={cn(
           'flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border transition-colors',
@@ -254,9 +335,16 @@ export default function PixelClassifierPanel({
         )}
       >
         <TreeStructure size={14} />
-        Train classifier
+        {trainAcrossSlices ? 'Train across slices' : 'Train classifier'}
       </button>
       {training && <BusyBar label="Training…" />}
+      {multiTraining && (
+        <JobProgressBar
+          label="Training across slices…"
+          done={multiTrainProgress?.done ?? 0}
+          total={multiTrainProgress?.total ?? 0}
+        />
+      )}
 
       <button
         type="button"
@@ -297,6 +385,93 @@ export default function PixelClassifierPanel({
                   <span className="w-8 text-right text-gray-500">{fi.importance.toFixed(1)}</span>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {model && (
+        <div className="flex flex-col gap-1.5 rounded-md border border-gray-100 bg-gray-50 p-1.5">
+          <span className="text-[10px] font-medium text-gray-600">Classes to commit</span>
+          <div className="flex flex-wrap gap-1">
+            {model.classIds.map((cid) => {
+              const on = commitClassIds.includes(cid);
+              return (
+                <button
+                  key={cid}
+                  type="button"
+                  onClick={() => onToggleCommitClassId(cid)}
+                  className={cn(
+                    'rounded border px-1.5 py-0.5 text-[9px]',
+                    on
+                      ? 'border-sky-300 bg-sky-50 text-sky-900'
+                      : 'border-gray-200 bg-white text-gray-400',
+                  )}
+                >
+                  {classLabelForId?.(cid) ?? `class ${cid}`}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="button"
+            disabled={busy || totalSliceCount <= 1 || commitClassIds.length === 0}
+            onClick={onApplyToVolume}
+            title={`Predict across all ${totalSliceCount} slices, then choose which classes to commit`}
+            className={cn(
+              'flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border transition-colors',
+              !busy && totalSliceCount > 1 && commitClassIds.length > 0
+                ? 'bg-white text-gray-800 border-gray-200 hover:bg-sky-50 hover:border-sky-300'
+                : 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed',
+            )}
+          >
+            Apply across volume ({totalSliceCount} slices)
+          </button>
+
+          {volumeApplying && (
+            <div className="flex flex-col gap-1">
+              <JobProgressBar
+                label="Applying across volume…"
+                done={volumeApplyProgress?.done ?? 0}
+                total={volumeApplyProgress?.total ?? 0}
+              />
+              <button
+                type="button"
+                onClick={onCancelVolumeApply}
+                className="self-start text-[10px] text-gray-500 hover:text-red-600"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {volumeApplyResult && !volumeApplying && (
+            <div className="flex flex-col gap-1 rounded border border-sky-100 bg-sky-50/60 p-1.5 text-[10px] text-gray-700">
+              <p>
+                {volumeApplyResult.cancelled ? 'Cancelled — ' : ''}
+                Predicted {volumeApplyResult.runCount} slice(s)
+                {volumeApplyResult.errorCount > 0 ? `, ${volumeApplyResult.errorCount} failed` : ''}.
+              </p>
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  disabled={volumeApplyCommitting || volumeApplyResult.runCount === 0}
+                  onClick={onCommitVolumeApply}
+                  className="flex-1 py-1 rounded-md text-[10px] font-medium bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50"
+                >
+                  {volumeApplyCommitting
+                    ? 'Committing…'
+                    : `Commit predicted shapes (${commitClassIds.length} class${commitClassIds.length === 1 ? '' : 'es'})`}
+                </button>
+                <button
+                  type="button"
+                  onClick={onDismissVolumeApply}
+                  className="flex-1 py-1 rounded-md text-[10px] border border-gray-200 text-gray-700 hover:bg-gray-50"
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -395,21 +570,13 @@ export default function PixelClassifierPanel({
 
       {/* Suggest labels — folded into the same train/infer loop instead of its own panel. */}
       <div className="border-t border-gray-100 pt-1.5">
-        <button
-          type="button"
+        <CollapsibleSection
+          title="Suggest labels (manifold coverage)"
+          icon={<Compass size={12} />}
+          defaultOpen={false}
           disabled={!hasFeatureJob}
-          onClick={() => setShowSuggest((v) => !v)}
-          className={cn(
-            'flex w-full items-center gap-1.5 text-[10px]',
-            hasFeatureJob ? 'text-gray-500 hover:text-sky-700' : 'text-gray-300 cursor-not-allowed',
-          )}
         >
-          <Compass size={12} />
-          {showSuggest ? '▾' : '▸'} Suggest labels (manifold coverage)
-        </button>
-
-        {showSuggest && (
-          <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-gray-100 bg-gray-50 p-1.5">
+          <div className="flex flex-col gap-1.5 rounded-md border border-gray-100 bg-gray-50 p-1.5">
             <div className="grid grid-cols-2 gap-1 text-[10px] text-gray-600">
               <label className="flex flex-col gap-0.5">
                 K boxes
@@ -542,8 +709,8 @@ export default function PixelClassifierPanel({
               <p className="text-[10px] text-red-600 leading-snug break-words">{manifoldError}</p>
             )}
           </div>
-        )}
+        </CollapsibleSection>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }

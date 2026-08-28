@@ -17,6 +17,12 @@ import { Layer, Line, Rect, Ellipse, Group, Shape as KonvaShape } from 'react-ko
 import type Konva from 'konva';
 import type { Shape, EraseStroke } from '@/stores/annotationStore';
 import type { AnnotationClass } from '@/stores/classStore';
+import { isShapeOriginVisible } from '@/stores/layerVisibilityStore';
+
+/** Dash pattern marking a shape as iPred-predicted (vs. hand-drawn, solid). */
+function dashFor(shape: Shape, strokeW: number): number[] | undefined {
+  return shape.origin === 'predicted' ? [strokeW * 4, strokeW * 3] : undefined;
+}
 
 /** Build an even-odd path (outer + hole rings) on a Konva context. */
 function buildRingsPath(ctx: Konva.Context, rings: number[][]): void {
@@ -62,6 +68,8 @@ export interface ShapesLayerProps {
   /** Image frame, for clipping and for giving hole-shapes a real self-rect. */
   imageWidth: number;
   imageHeight: number;
+  /** Predicted/human sub-visibility (see layerVisibilityStore). */
+  originVisible: { human: boolean; predicted: boolean };
 }
 
 function ShapesLayerImpl({
@@ -75,16 +83,24 @@ function ShapesLayerImpl({
   activeClassId,
   imageWidth,
   imageHeight,
+  originVisible,
 }: ShapesLayerProps) {
   const colorForClass = (classId: number) => classMap.get(classId)?.color ?? '#ff0000';
 
   /** Render a polygon that may have holes via an even-odd fill (outer path minus
    *  hole subpaths). Even-odd — not destination-out — so a hole reveals whatever
    *  is *beneath* it (e.g. another class) instead of erasing it off the layer. */
-  const renderPolygonWithHoles = (points: number[], holes: number[][], color: string, strokeW: number) => (
+  const renderPolygonWithHoles = (
+    points: number[],
+    holes: number[][],
+    color: string,
+    strokeW: number,
+    dash: number[] | undefined,
+  ) => (
     <KonvaShape
       stroke={color}
       strokeWidth={strokeW}
+      dash={dash}
       // width/height give the shape a real self-rect so the CACHED committed layer
       // sizes its cache canvas to include it (otherwise it's clipped away when the
       // only other in-bounds shape — the enclosed class — is hidden).
@@ -111,12 +127,15 @@ function ShapesLayerImpl({
         : colorForClass(shape.classId);
     const isSelected = selectedShapeIds.includes(shape.id);
     const strokeW = (isSelected ? 2 : 1) / scaleX;
+    // Predicted (uncommitted-by-a-human) shapes get a dashed outline so they read
+    // as provisional at a glance — see layerVisibilityStore's origin toggle.
+    const dash = dashFor(shape, strokeW);
 
     if (shape.kind === 'polygon') {
       return (
         <Group key={shape.id}>
           {shape.holes?.length
-            ? renderPolygonWithHoles(shape.points, shape.holes, color, strokeW)
+            ? renderPolygonWithHoles(shape.points, shape.holes, color, strokeW, dash)
             : (
               <Line
                 points={shape.points}
@@ -124,6 +143,7 @@ function ShapesLayerImpl({
                 fill={color}
                 stroke={color}
                 strokeWidth={strokeW}
+                dash={dash}
                 perfectDrawEnabled={false}
               />
             )}
@@ -138,6 +158,7 @@ function ShapesLayerImpl({
             x={shape.x} y={shape.y} width={shape.w} height={shape.h}
             fill={color}
             stroke={color} strokeWidth={strokeW}
+            dash={dash}
             perfectDrawEnabled={false}
           />
           {renderErased(shape.erased)}
@@ -151,6 +172,7 @@ function ShapesLayerImpl({
             x={shape.cx} y={shape.cy} radiusX={shape.rx} radiusY={shape.ry}
             fill={color}
             stroke={color} strokeWidth={strokeW}
+            dash={dash}
             perfectDrawEnabled={false}
           />
           {renderErased(shape.erased)}
@@ -193,6 +215,7 @@ function ShapesLayerImpl({
     >
       {shapes
         .filter((s) => classMap.get(s.classId)?.isVisible !== false)
+        .filter((s) => isShapeOriginVisible(originVisible, s.origin))
         .map(renderShape)}
     </Layer>
   );

@@ -95,10 +95,22 @@ export function useExportJob() {
   /** Write rasterized masks into Tiled (standalone). Shares the status polling. */
   const startMaskSync = useCallback((payload: unknown) => run('/api/masks/to-tiled', payload), [run]);
 
+  /** Train one iPred model pooling labeled pixels across multiple slices. */
+  const startIpredBatchTrain = useCallback(
+    (payload: unknown) => run('/api/ipred/batch/train', payload),
+    [run],
+  );
+
+  /** Run iPred inference across a set of slices (e.g. the whole volume). */
+  const startIpredBatchApply = useCallback(
+    (payload: unknown) => run('/api/ipred/batch/apply', payload),
+    [run],
+  );
+
   const downloadUrl =
     state.jobId && (state.result as { zip_available?: boolean } | null)?.zip_available
       ? `${API_BASE}/api/export/download/${state.jobId}`
       : null;
 
-  return { state, start, startMaskSync, reset, downloadUrl };
+  return { state, start, startMaskSync, startIpredBatchTrain, startIpredBatchApply, reset, downloadUrl };
 }

@@ -111,14 +111,14 @@ export default function DenoisePanel({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <label className="text-xs font-medium text-sky-200">Denoise</label>
-        {busy && active && <span className="text-[10px] text-sky-400">filtering…</span>}
+        <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">Denoise</label>
+        {busy && active && <span className="text-[10px] text-gray-500">filtering…</span>}
       </div>
 
       <select
         value={denoise.method}
         onChange={(e) => onChange({ method: e.target.value })}
-        className="w-full rounded border border-sky-800 bg-sky-950 px-2 py-1 text-xs text-sky-100"
+        className="w-full rounded border border-gray-200 bg-white px-1 py-0.5 text-xs text-gray-800"
       >
         {methods.map((m) => (
           <option key={m.method} value={m.method} disabled={!m.available}>
@@ -130,7 +130,7 @@ export default function DenoisePanel({
       </select>
 
       {current && current.method !== 'none' && (
-        <p className="text-[11px] leading-snug text-sky-300/80">{current.description}</p>
+        <p className="text-[11px] leading-snug text-gray-600">{current.description}</p>
       )}
 
       {active && (
@@ -149,7 +149,7 @@ export default function DenoisePanel({
               type="button"
               onClick={applyAuto}
               disabled={autoBusy || !source}
-              className="flex items-center gap-1 rounded border border-sky-700 px-2 py-1 text-[11px] text-sky-200 hover:bg-sky-900 disabled:opacity-50"
+              className="flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-[11px] text-gray-800 hover:bg-sky-50 hover:border-sky-300 disabled:opacity-50"
               title="Measure this slice's noise level and suggest a strength"
             >
               <MagicWand size={12} />
@@ -159,7 +159,7 @@ export default function DenoisePanel({
               <button
                 type="button"
                 onClick={onBake}
-                className="rounded border border-sky-700 px-2 py-1 text-[11px] text-sky-200 hover:bg-sky-900"
+                className="rounded border border-gray-200 bg-white px-2 py-1 text-[11px] text-gray-800 hover:bg-sky-50 hover:border-sky-300"
                 title="Write a denoised copy as a new dataset you can annotate and export"
               >
                 Save denoised copy…
@@ -168,13 +168,13 @@ export default function DenoisePanel({
           </div>
 
           {autoError && (
-            <p className="flex items-start gap-1 text-[11px] leading-snug text-amber-300/90">
+            <p className="flex items-start gap-1 rounded border border-amber-200 bg-amber-50 p-1.5 text-[11px] leading-snug text-amber-800">
               <Warning size={12} className="mt-0.5 shrink-0" />
               {autoError}
             </p>
           )}
 
-          <p className="text-[10px] leading-snug text-sky-400/70">
+          <p className="text-[10px] leading-snug text-gray-500">
             Affects the intensity tools too, not just the display. Exports still use
             the original pixels.
           </p>

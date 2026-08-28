@@ -16,6 +16,7 @@ import { getClassPalette } from '@/lib/classColors';
 import { buildSourceKey } from '@/lib/sourceKey';
 import { cn } from '@/lib/utils';
 import { Copy } from '@phosphor-icons/react';
+import CollapsibleSection from '@/components/common/CollapsibleSection';
 
 /** Counts shapes assigned to a class within a single sample (*sourceKey*), across its
  *  slices. Scoped to the current sample so the delete prompt never counts (or deletes)
@@ -316,9 +317,9 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
   );
 
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">Classes</span>
+    <CollapsibleSection
+      title="Classes"
+      headerRight={
         <button
           aria-label="Add class"
           className="p-0.5 rounded hover:bg-sky-100 hover:text-sky-700"
@@ -326,8 +327,8 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
         >
           <Plus size={14} />
         </button>
-      </div>
-
+      }
+    >
       <label
         className="flex items-center gap-1.5 mb-1 text-xs text-gray-600 cursor-pointer select-none"
         title="Color newly added classes from a colorblind-safe palette (Okabe–Ito). Existing classes keep their colors."
@@ -403,6 +404,6 @@ export default function ClassManager({ activeClassId, onActivate, onClassDeleted
           />
         ))}
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }

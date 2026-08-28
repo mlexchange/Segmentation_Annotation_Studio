@@ -6,6 +6,7 @@
 import { ArrowCounterClockwise } from '@phosphor-icons/react';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import HistogramControl from '@/components/annotate/HistogramControl';
+import CollapsibleSection from '@/components/common/CollapsibleSection';
 import { COLORMAP_NAMES, colormapGradient, type ColormapName } from '@/lib/colormaps';
 
 export interface DisplayControlsProps {
@@ -76,9 +77,9 @@ export default function DisplayControls({
   denoiseSlot,
 }: DisplayControlsProps) {
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">Display</span>
+    <CollapsibleSection
+      title="Display"
+      headerRight={
         <button
           aria-label="Reset brightness and contrast"
           title="Reset display"
@@ -87,8 +88,8 @@ export default function DisplayControls({
         >
           <ArrowCounterClockwise size={14} />
         </button>
-      </div>
-
+      }
+    >
       <div className="flex flex-col gap-0.5">
         <DebouncedSlider
           label="Brightness"
@@ -162,7 +163,7 @@ export default function DisplayControls({
           unlike the pre-blur below, which is a client-side filter on the already
           8-bit display image. Placed first because it is the upstream stage. */}
       {denoiseSlot && (
-        <div className="border-t border-sky-900/60 pt-2">{denoiseSlot}</div>
+        <div className="border-t border-gray-100 pt-2">{denoiseSlot}</div>
       )}
 
       {/* Gaussian pre-blur — denoises so threshold/wand/fill see coherent regions. */}
@@ -238,6 +239,6 @@ export default function DisplayControls({
           Exported pixels and annotation coordinates are unchanged.
         </p>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }

@@ -41,6 +41,10 @@ export interface LayerVisibilityState {
   showPredictionMulti: boolean;
   /** Show conformal abstain. */
   showPredictionAbstain: boolean;
+  /** Annotations-layer sub-toggle: show human-drawn vs. iPred-predicted shapes
+   *  independently (see `ShapeOrigin` in annotationStore). Both default visible. */
+  annotationOriginVisible: { human: boolean; predicted: boolean };
+  setAnnotationOriginVisible: (origin: 'human' | 'predicted', visible: boolean) => void;
   setGroup: (id: LayerGroupId, visible: boolean) => void;
   toggleGroup: (id: LayerGroupId) => void;
   setProbaOpacity: (v: number) => void;
@@ -69,6 +73,12 @@ export const useLayerVisibilityStore = create<LayerVisibilityState>((set, get) =
   predictionClassVisible: {},
   showPredictionMulti: true,
   showPredictionAbstain: true,
+  annotationOriginVisible: { human: true, predicted: true },
+
+  setAnnotationOriginVisible: (origin, visible) =>
+    set((s) => ({
+      annotationOriginVisible: { ...s.annotationOriginVisible, [origin]: visible },
+    })),
 
   setGroup: (id, visible) =>
     set((s) => ({ groups: { ...s.groups, [id]: visible } })),
@@ -120,4 +130,12 @@ export function isPredictionClassVisible(
   classId: number,
 ): boolean {
   return map[classId] !== false;
+}
+
+/** True when a shape's origin (human/predicted; undefined = human) should draw. */
+export function isShapeOriginVisible(
+  visible: { human: boolean; predicted: boolean },
+  origin: 'human' | 'predicted' | undefined,
+): boolean {
+  return origin === 'predicted' ? visible.predicted : visible.human;
 }

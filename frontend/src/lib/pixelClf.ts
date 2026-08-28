@@ -241,7 +241,15 @@ export function labelMapToPolygonShapes(
     minRegion = 64,
     preserveShapes,
     smooth = 1,
-  }: { minRegion?: number; preserveShapes?: Shape[]; smooth?: number } = {},
+    origin = 'predicted',
+  }: {
+    minRegion?: number;
+    preserveShapes?: Shape[];
+    smooth?: number;
+    /** Stamped onto every returned shape — see `ShapeOrigin` in annotationStore.
+     *  Defaults to 'predicted' since every current caller commits iPred output. */
+    origin?: 'human' | 'predicted';
+  } = {},
 ): PolygonShape[] {
   const preserve =
     preserveShapes && preserveShapes.length > 0
@@ -272,6 +280,7 @@ export function labelMapToPolygonShapes(
         classId,
         kind: 'polygon',
         points,
+        origin,
         ...(holes.length ? { holes } : {}),
       });
     }

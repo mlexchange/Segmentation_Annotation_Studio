@@ -6,6 +6,7 @@ import { useAnnotationStore } from '@/stores/annotationStore';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { buildSourceKey } from '@/lib/sourceKey';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
+import CollapsibleSection from '@/components/common/CollapsibleSection';
 
 /** Renders slice navigation controls bound to the dataset and annotation stores. */
 export default function SliceNavigator() {
@@ -40,11 +41,7 @@ export default function SliceNavigator() {
   const onCoarseLevel = !!meta.levelKey && (meta.levelIndex ?? 0) > 0;
 
   return (
-    <div className="flex flex-col gap-2">
-      <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">
-        Slice {currentSlice + 1} / {n}
-      </span>
-
+    <CollapsibleSection title={`Slice ${currentSlice + 1} / ${n}`}>
       {onCoarseLevel && (
         <span
           className="text-[11px] leading-snug text-amber-600"
@@ -112,6 +109,6 @@ export default function SliceNavigator() {
         <WarningCircle size={12} />
         {isNegative ? 'Negative example' : 'Mark as negative'}
       </button>
-    </div>
+    </CollapsibleSection>
   );
 }

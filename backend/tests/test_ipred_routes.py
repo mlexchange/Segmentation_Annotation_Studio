@@ -1,10 +1,14 @@
 """Tests for the /api/ipred/* proxy — mocks ipred_client, never hits :8003."""
 from __future__ import annotations
 
+import asyncio
+import time
+
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import export_jobs
 import ipred_client as ipred_client_mod
 from annotation_server import app
 
@@ -97,3 +101,87 @@ async def test_run_proba_png_proxies_bytes(monkeypatch: pytest.MonkeyPatch) -> N
     assert response.status_code == 200
     assert response.content == b"\x89PNG\r\n"
     assert response.headers["content-type"] == "image/png"
+
+
+async def _await_job(jid: str, timeout: float = 5.0) -> dict:
+    """Poll export_jobs until the (thread-backed) job finishes."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = export_jobs.get_job(jid)
+        assert job is not None
+        if job["state"] in ("done", "error"):
+            return job
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"job {jid} did not finish within {timeout}s")
+
+
+@pytest.mark.asyncio
+async def test_batch_train_pools_slices_and_reports_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /batch/train preprocesses every slice, then trains once, pooled."""
+    preprocessed: list[int] = []
+
+    def _preprocess(*, session_id, feature_setup_id, composition_id, slice_index, array_ref=None):
+        preprocessed.append(slice_index)
+        return {"feature_id": f"feat-{slice_index}", "cache_hit": False}
+
+    captured_train: dict = {}
+
+    def _train_multi(*, session_id, slices, feature_ids, trainer_id, config):
+        captured_train.update(
+            session_id=session_id, slices=slices, feature_ids=feature_ids, trainer_id=trainer_id
+        )
+        return {"model_id": "m1", "class_ids": [1, 2], "n_samples": 4000}
+
+    monkeypatch.setattr(ipred_client_mod, "preprocess", _preprocess)
+    monkeypatch.setattr(ipred_client_mod, "train_multi", _train_multi)
+
+    shapes = [{"kind": "rectangle", "classId": 1, "x": 0, "y": 0, "w": 5, "h": 5}]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/ipred/batch/train",
+            json={
+                "session_id": "s1",
+                "slices": {"0": shapes, "2": shapes},
+                "composition_id": "comp-skimage",
+                "trainer_id": "catboost",
+            },
+        )
+    assert response.status_code == 200
+    jid = response.json()["job_id"]
+    job = await _await_job(jid)
+    assert job["state"] == "done"
+    assert job["result"] == {"model_id": "m1", "class_ids": [1, 2], "n_samples": 4000}
+    assert sorted(preprocessed) == [0, 2]
+    assert set(captured_train["feature_ids"]) == {"0", "2"}
+
+
+@pytest.mark.asyncio
+async def test_batch_apply_tolerates_one_bad_slice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /batch/apply keeps going after one slice fails and reports it in result.errors."""
+
+    def _preprocess(*, session_id, feature_setup_id, composition_id, slice_index, array_ref=None):
+        if slice_index == 1:
+            raise RuntimeError("boom")
+        return {"feature_id": f"feat-{slice_index}"}
+
+    def _infer(*, session_id, model_id, feature_id, alpha):
+        return {"run_id": f"run-{feature_id}"}
+
+    monkeypatch.setattr(ipred_client_mod, "preprocess", _preprocess)
+    monkeypatch.setattr(ipred_client_mod, "infer", _infer)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/ipred/batch/apply",
+            json={
+                "session_id": "s1",
+                "model_id": "m1",
+                "slice_indices": [0, 1, 2],
+            },
+        )
+    assert response.status_code == 200
+    jid = response.json()["job_id"]
+    job = await _await_job(jid)
+    assert job["state"] == "done"
+    assert job["result"]["runs"] == {"0": "run-feat-0", "2": "run-feat-2"}
+    assert job["result"]["errors"] == [{"slice": 1, "error": "boom"}]

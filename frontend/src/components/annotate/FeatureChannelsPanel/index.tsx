@@ -18,6 +18,7 @@ import type { FeatureJobInfo } from '@/hooks/useFeatureChannels';
 import { useIpredStore } from '@/stores/ipredStore';
 import { listIpredCompositions, listIpredModules, type CompositionDoc, type FeatureModuleInfo } from '@/lib/ipredApi';
 import CompositionPanel from '@/components/CompositionPanel';
+import CollapsibleSection from '@/components/common/CollapsibleSection';
 import { cn } from '@/lib/utils';
 
 /** Plain-language labels for the 7 built-in compositions, by id. */
@@ -127,17 +128,17 @@ export default function FeatureChannelsPanel({
     channelIndex !== null && job ? (job.channels[channelIndex]?.label ?? `Channel ${channelIndex}`) : null;
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">Features</span>
-        {n > 0 && (
+    <CollapsibleSection
+      title="Features"
+      headerRight={
+        n > 0 ? (
           <span className="text-[10px] text-gray-400">
             {n} ch{job?.hasSam ? ' +SAM' : ''}
             {job?.cacheHit ? ' · cache' : ''}
           </span>
-        )}
-      </div>
-
+        ) : undefined
+      }
+    >
       <label className="flex flex-col gap-0.5 text-xs text-gray-600">
         Recipe
         {loadingPresets ? (
@@ -259,6 +260,6 @@ export default function FeatureChannelsPanel({
           </div>
         )}
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }

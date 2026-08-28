@@ -14,6 +14,7 @@ import { clearHistory } from '@/hooks/editHistory';
 import { useGuideLoad } from '@/hooks/useGuideSync';
 import { useSave, type VersionPayload } from '@/hooks/useSave';
 import { buildSourceKey } from '@/lib/sourceKey';
+import { API_BASE } from '@/config';
 import { useKeybinds } from '@/hooks/useKeybinds';
 import type { ColormapName } from '@/lib/colormaps';
 import Toolbar from '@/components/annotate/Toolbar';
@@ -32,6 +33,8 @@ import { useFeatureChannels } from '@/hooks/useFeatureChannels';
 import { usePixelClassifier } from '@/hooks/usePixelClassifier';
 import { useFeatureManifold } from '@/hooks/useFeatureManifold';
 import { loadLabelPng, labelMapToPolygonShapes } from '@/lib/pixelClf';
+import { ipredRunCommitUrl } from '@/lib/ipredApi';
+import type { Shape } from '@/stores/annotationStore';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import DownloadModal from '@/components/annotate/DownloadModal';
 import InsightsModal from '@/components/annotate/InsightsModal';
@@ -77,7 +80,7 @@ function StageSwitcher({ stage, onChange }: { stage: AnnotateStage; onChange: (s
 export default function AnnotatePage() {
   const navigate = useNavigate();
   const { source, kind, serverUri, meta, denoise, setDenoise } = useDatasetStore();
-  const { removeShapes, addShapes, byImage } = useAnnotationStore();
+  const { removeShapes, addShapes, addShapesAcrossSlices, byImage } = useAnnotationStore();
   const { selectedShapeIds, setSelectedShapeId, fillOpacity, setFillOpacity } = useToolStore();
   const { classes } = useClassStore();
 
@@ -197,7 +200,10 @@ export default function AnnotatePage() {
 
   const clf = usePixelClassifier({
     featureJobId: features.job?.jobId ?? null,
-    resetKey: sourceKey ? `${sourceKey}:${currentSlice}` : null,
+    // Sample/composition identity only — NOT the slice, so a trained model
+    // survives a slice change and can be applied to whichever slice is on
+    // screen (see usePixelClassifier's two reset effects for the split).
+    resetKey: sourceKey,
     source,
     kind,
     serverUri,
@@ -211,9 +217,43 @@ export default function AnnotatePage() {
     onFeatureJobExpired: features.invalidateJob,
   });
 
+  // ---- Batch iPred: multi-slice train + whole-volume apply ----
+  const [trainAcrossSlices, setTrainAcrossSlices] = useState(false);
+  const [commitClassIds, setCommitClassIds] = useState<number[]>([]);
+  const [volumeApplyCommitting, setVolumeApplyCommitting] = useState(false);
+
+  // Every non-empty slice of this sample — the pool for "train across all
+  // annotated slices" and the source of truth for `annotatedSliceCount`.
+  const annotatedSlices = useMemo(() => {
+    const slices = sourceKey ? (byImage[sourceKey] ?? {}) : {};
+    const out: Record<number, Shape[]> = {};
+    for (const [key, shapes] of Object.entries(slices)) {
+      if (shapes.length > 0) out[Number(key)] = shapes;
+    }
+    return out;
+  }, [sourceKey, byImage]);
+  const annotatedSliceCount = Object.keys(annotatedSlices).length;
+  const totalSliceCount = meta?.nSlices ?? 1;
+
+  // Keep the commit class filter in sync with whichever model is current —
+  // default to "all classes" each time a (re)train finishes.
+  useEffect(() => {
+    setCommitClassIds(clf.model?.classIds ?? []);
+  }, [clf.model]);
+
+  const toggleCommitClassId = useCallback((classId: number) => {
+    setCommitClassIds((prev) =>
+      prev.includes(classId) ? prev.filter((c) => c !== classId) : [...prev, classId],
+    );
+  }, []);
+
   const handleClfTrain = useCallback(() => {
-    void clf.train(sliceShapes);
-  }, [clf, sliceShapes]);
+    if (trainAcrossSlices) {
+      void clf.trainAcrossSlices(annotatedSlices);
+    } else {
+      void clf.train(sliceShapes);
+    }
+  }, [clf, sliceShapes, trainAcrossSlices, annotatedSlices]);
 
   const handleClfPredict = useCallback(() => {
     void clf.predict(sliceShapes);
@@ -223,16 +263,63 @@ export default function AnnotatePage() {
     if (!sourceKey || !clf.commitUrl || !clf.model) return;
     try {
       const { data, width, height } = await loadLabelPng(clf.commitUrl);
-      const shapes = labelMapToPolygonShapes(data, width, height, clf.model.classIds, {
+      const shapes = labelMapToPolygonShapes(data, width, height, commitClassIds, {
         minRegion: 64,
         preserveShapes: sliceShapes,
+        origin: 'predicted',
       });
       if (shapes.length) addShapes(sourceKey, currentSlice, shapes);
       clf.dismiss();
     } catch {
       /* keep overlay; error surfaces via clf.error if needed */
     }
-  }, [sourceKey, clf, addShapes, currentSlice, sliceShapes]);
+  }, [sourceKey, clf, addShapes, currentSlice, sliceShapes, commitClassIds]);
+
+  const handleApplyToVolume = useCallback(() => {
+    const sliceIndices = Array.from({ length: totalSliceCount }, (_, i) => i);
+    void clf.applyAcrossVolume(sliceIndices);
+  }, [clf, totalSliceCount]);
+
+  const handleCancelVolumeApply = useCallback(async () => {
+    const jobId = clf.volumeApplyJob.jobId;
+    if (!jobId) return;
+    // Cooperative: the job stops at its next slice boundary (see DenoiseBakeModal
+    // for the same pattern against the same /api/export/cancel/{id} route).
+    await fetch(`${API_BASE}/api/export/cancel/${jobId}`, { method: 'POST' });
+  }, [clf.volumeApplyJob.jobId]);
+
+  // Fetch + vectorize each completed slice's commit PNG client-side, reusing the
+  // same tracer as the single-slice commit — see Phase 4.5's plan for why this
+  // stays client-side rather than porting polygon tracing to the ipred service.
+  const handleCommitVolumeApply = useCallback(async () => {
+    if (!sourceKey) return;
+    const result = clf.volumeApplyJob.result as { runs?: Record<string, string> } | null;
+    const runs = result?.runs;
+    if (!runs || commitClassIds.length === 0) return;
+    setVolumeApplyCommitting(true);
+    try {
+      const bySlice: Record<number, Shape[]> = {};
+      let processed = 0;
+      for (const [sliceKey, runId] of Object.entries(runs)) {
+        const sliceIdx = Number(sliceKey);
+        const { data, width, height } = await loadLabelPng(ipredRunCommitUrl(runId));
+        const existing = byImage[sourceKey]?.[sliceKey] ?? [];
+        const shapes = labelMapToPolygonShapes(data, width, height, commitClassIds, {
+          minRegion: 64,
+          preserveShapes: existing,
+          origin: 'predicted',
+        });
+        if (shapes.length) bySlice[sliceIdx] = shapes;
+        processed += 1;
+        // Yield every few slices so vectorizing a large volume doesn't freeze the tab.
+        if (processed % 4 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      if (Object.keys(bySlice).length) addShapesAcrossSlices(sourceKey, bySlice);
+      clf.resetVolumeApplyJob();
+    } finally {
+      setVolumeApplyCommitting(false);
+    }
+  }, [sourceKey, clf, byImage, commitClassIds, addShapesAcrossSlices]);
 
   const classLabelForId = useCallback(
     (classId: number) => {
@@ -356,8 +443,6 @@ export default function AnnotatePage() {
             value={Math.round(fillOpacity * 100)}
             onChange={(v) => setFillOpacity(v / 100)}
           />
-          <hr />
-          <StageSwitcher stage={stage} onChange={setStage} />
           <LayersPanel
             hasFeatures={!!features.job && features.channelIndex !== null}
             hasProba={!!clf.probaUrl}
@@ -365,7 +450,8 @@ export default function AnnotatePage() {
             predictionClassIds={clf.model?.classIds ?? []}
             hasManifold={manifold.hasSample || !!manifold.heatmapUrl}
           />
-          <hr />
+          <StageSwitcher stage={stage} onChange={setStage} />
+          <SliceNavigator />
 
           {stage === 'draw' && (
             <>
@@ -414,34 +500,25 @@ export default function AnnotatePage() {
                   />
                 }
               />
-              <hr />
-              <SliceNavigator />
-              <hr />
               <MaskToolsPanel sourceKey={sourceKey} activeClassId={activeClassId} />
-              <hr />
               <MeasurementPanel sourceKey={sourceKey} />
-              <hr />
             </>
           )}
 
           {stage === 'assist' && (
-            <>
-              <FeatureChannelsPanel
-                job={features.job}
-                channelIndex={features.channelIndex}
-                computing={features.computing}
-                error={features.error}
-                onCompute={features.compute}
-                onSelectChannel={features.selectChannel}
-                onCycle={features.cycleChannel}
-                onOriginal={features.clearSelection}
-              />
-              <hr />
-            </>
+            <FeatureChannelsPanel
+              job={features.job}
+              channelIndex={features.channelIndex}
+              computing={features.computing}
+              error={features.error}
+              onCompute={features.compute}
+              onSelectChannel={features.selectChannel}
+              onCycle={features.cycleChannel}
+              onOriginal={features.clearSelection}
+            />
           )}
 
           {stage === 'predict' && (
-            <>
               <PixelClassifierPanel
                 hasFeatureJob={!!features.job}
                 canAutoPreprocess={clf.canTrainWithoutJob}
@@ -467,6 +544,37 @@ export default function AnnotatePage() {
                 commitLabel="Commit singletons"
                 featureSetupId={features.job?.setupId ?? null}
                 trainerId={clf.trainerId}
+                annotatedSliceCount={annotatedSliceCount}
+                trainAcrossSlices={trainAcrossSlices}
+                onTrainAcrossSlicesChange={setTrainAcrossSlices}
+                multiTraining={clf.multiTraining}
+                multiTrainProgress={{ done: clf.multiTrainJob.done, total: clf.multiTrainJob.total }}
+                totalSliceCount={totalSliceCount}
+                commitClassIds={commitClassIds}
+                onToggleCommitClassId={toggleCommitClassId}
+                volumeApplying={clf.volumeApplying}
+                volumeApplyProgress={{ done: clf.volumeApplyJob.done, total: clf.volumeApplyJob.total }}
+                volumeApplyResult={
+                  clf.volumeApplyJob.result
+                    ? (() => {
+                        const r = clf.volumeApplyJob.result as {
+                          runs?: Record<string, string>;
+                          errors?: unknown[];
+                          cancelled?: boolean;
+                        };
+                        return {
+                          runCount: Object.keys(r.runs ?? {}).length,
+                          errorCount: (r.errors ?? []).length,
+                          cancelled: !!r.cancelled,
+                        };
+                      })()
+                    : null
+                }
+                volumeApplyCommitting={volumeApplyCommitting}
+                onApplyToVolume={handleApplyToVolume}
+                onCommitVolumeApply={() => { void handleCommitVolumeApply(); }}
+                onCancelVolumeApply={() => { void handleCancelVolumeApply(); }}
+                onDismissVolumeApply={clf.resetVolumeApplyJob}
                 manifoldParams={manifold.params}
                 onManifoldParamsChange={manifold.setParams}
                 manifoldSampling={manifold.sampling}
@@ -489,8 +597,6 @@ export default function AnnotatePage() {
                 }}
                 onClearManifoldRoi={manifold.clearPlacementMask}
               />
-              <hr />
-            </>
           )}
 
           {/* Save button + status */}
