@@ -38,6 +38,12 @@ dependencies = [
 [project.optional-dependencies]
 dev  = ["flake8", "flake8-isort", "black"]
 test = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+# Multi-GB (torch) — not installed in the Docker image; start_all.sh's
+# ensure_ml_env() installs it locally. Every /api/train/* route (and
+# denoise_bake.py's "model" denoise method) degrades to a clear error via
+# train_common.torch_available()/dlsia_available() rather than crashing on
+# import when this extra isn't installed.
+ml   = ["torch>=2.4", "dlsia>=0.3", "qlty>=1.5"]
 
 [tool.setuptools]
 py-modules = []

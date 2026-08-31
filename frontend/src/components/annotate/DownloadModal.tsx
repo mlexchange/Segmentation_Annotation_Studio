@@ -8,7 +8,7 @@ import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
 import { useRatingStore } from '@/stores/ratingStore';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { buildSourceKey } from '@/lib/sourceKey';
+import { buildSourceKey, parseSourceKey } from '@/lib/sourceKey';
 import { useExportJob } from '@/hooks/useExportJob';
 
 interface DownloadModalProps {
@@ -16,16 +16,6 @@ interface DownloadModalProps {
 }
 
 type Scope = 'slice' | 'current' | 'all' | 'stars1' | 'stars2' | 'stars3';
-
-/** Parse a canonical sourceKey back to { kind, source, serverUri }. */
-function parseSourceKey(sk: string) {
-  if (sk.startsWith('tiled:')) {
-    const rest = sk.slice('tiled:'.length);
-    const sep = rest.indexOf(':');
-    return { kind: 'tiled' as const, serverUri: rest.slice(0, sep) || null, source: rest.slice(sep + 1) };
-  }
-  return { kind: 'local' as const, serverUri: null, source: sk.slice('local:'.length) };
-}
 
 const SCOPE_OPTIONS: { value: Scope; label: string; desc: string; stars?: string }[] = [
   {

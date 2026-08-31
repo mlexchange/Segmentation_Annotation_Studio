@@ -38,16 +38,20 @@ from starlette.middleware.gzip import GZipMiddleware
 
 import annotation_thumbnails
 import arrays as arrays_mod
+import batch_probe
 import denoise as denoise_mod
 import denoise_bake as denoise_bake_mod
 import drafts as drafts_mod
 import export_jobs
 import guides as guides_mod
 import images as images_mod
+import infer_jobs
 import ingest as ingest_mod
 import ipred_routes
 import local_fs
 import tiff_stack_source
+import train_common
+import train_jobs
 import volume_build
 import volume_nodes
 import zarr_source
@@ -70,6 +74,7 @@ from coco_export import (
     write_lightly_split,
 )
 from schemas import (
+    BatchProbeRequest,
     DenoiseBakeRequest,
     DraftPayload,
     ExportRequest,
@@ -77,9 +82,11 @@ from schemas import (
     GuidePayload,
     ImageMeta,
     IngestPreflightRequest,
+    InferRequest,
     MeasureRequest,
     SaveVersionRequest,
     TiffStackRegisterRequest,
+    TrainRequest,
     VolumeBuildRequest,
     ZarrRegisterRequest,
 )
@@ -1499,6 +1506,110 @@ async def denoise_bake(payload: DenoiseBakeRequest) -> dict:
         target=denoise_bake_mod.run_denoise_bake_job, args=(jid, payload), daemon=True
     ).start()
     return {"job_id": jid, "target_path": target}
+
+
+@app.get("/api/train/capability")
+async def train_capability() -> dict:
+    """Best-effort snapshot of Train-tab readiness (torch/dlsia/tiling/device)."""
+    return train_common.capability()
+
+
+@app.get("/api/train/runs")
+async def train_list_runs() -> dict:
+    """List saved fine-tune runs (both dlsia_tunet and dlsia_denoiser), newest first."""
+    return {"runs": train_common.list_runs()}
+
+
+@app.delete("/api/train/runs/{run_id}")
+async def train_delete_run(run_id: str) -> dict:
+    """Permanently remove a saved run's directory (config, metrics, weights)."""
+    train_common.delete_run(run_id)
+    return {"deleted": run_id}
+
+
+@app.post("/api/train/start")
+async def train_start(payload: TrainRequest) -> dict:
+    """Start a fine-tuning job. Runs on a background thread; poll
+    ``GET /api/export/status/{job_id}``; cancel via
+    ``POST /api/export/cancel/{job_id}`` (same shared registry every
+    background job in this app already uses).
+    """
+    if not train_common.torch_available():
+        raise HTTPException(503, "torch is not installed on this server — see the ml extra in pyproject.toml")
+    needs_dlsia = payload.model.model_family == "dlsia_tunet" or (
+        payload.model.model_family == "dlsia_denoiser" and payload.model.architecture == "tunet"
+    )
+    if needs_dlsia and not train_common.dlsia_available():
+        raise HTTPException(503, "dlsia is not installed on this server")
+    if payload.model.hyperparams.tiling:
+        import tiling
+
+        if not tiling.qlty_available():
+            raise HTTPException(503, "Tiling requires the 'qlty' package, which is not installed on this server")
+
+    run_id = train_jobs.new_run_id(payload.model.model_family)
+    if payload.resume_from_run_id:
+        try:
+            parent_config = train_common.load_run_config(payload.resume_from_run_id)
+            train_jobs.check_resume_compatible(parent_config, payload)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    if not train_common.ML_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Another training or inference job is already running")
+    train_common.ML_LOCK.release()  # run_train_job re-acquires it itself; this was just a pre-check
+
+    jid = export_jobs.new_job(run_id)
+    threading.Thread(target=train_jobs.run_train_job, args=(jid, payload, run_id), daemon=True).start()
+    return {"job_id": jid, "run_id": run_id}
+
+
+@app.post("/api/train/estimate-batch")
+async def train_estimate_batch(payload: BatchProbeRequest) -> dict:
+    """Measure the largest batch size that fits in device memory for *payload.model*.
+
+    Runs on a background thread; poll ``GET /api/export/status/{job_id}``.
+    """
+    if not train_common.torch_available():
+        raise HTTPException(503, "torch is not installed on this server")
+    jid = export_jobs.new_job(f"batch-probe:{payload.model.model_family}")
+    threading.Thread(target=batch_probe.run_probe_job, args=(jid, payload), daemon=True).start()
+    return {"job_id": jid}
+
+
+@app.post("/api/train/infer")
+async def train_infer(payload: InferRequest) -> dict:
+    """Run a saved fine-tuned run over the requested slices. Runs on a
+    background thread; poll ``GET /api/export/status/{job_id}``.
+    """
+    if not train_common.torch_available():
+        raise HTTPException(503, "torch is not installed on this server")
+    try:
+        train_common.load_run_config(payload.run_id)
+    except HTTPException:
+        raise
+    jid = export_jobs.new_job(payload.run_id)
+    threading.Thread(target=infer_jobs.run_infer_job, args=(jid, payload), daemon=True).start()
+    return {"job_id": jid}
+
+
+@app.get("/api/train/infer/preview/{job_id}/{slice_index}")
+async def train_infer_preview(job_id: str, slice_index: int) -> Response:
+    """Colourised RGBA overlay PNG for one predicted slice of a cached inference job."""
+    return Response(content=infer_jobs.preview_png(job_id, slice_index), media_type="image/png")
+
+
+@app.post("/api/train/infer/write-tiled/{job_id}")
+async def train_infer_write_tiled(job_id: str) -> dict:
+    """Push a completed inference job's label maps into Tiled. Runs on a
+    background thread; poll ``GET /api/export/status/{job_id}`` with the
+    RETURNED job id (distinct from *job_id*, the inference job being written).
+    """
+    write_jid = export_jobs.new_job(f"write-tiled:{job_id}")
+    threading.Thread(target=infer_jobs.run_write_tiled_job, args=(write_jid, job_id), daemon=True).start()
+    return {"job_id": write_jid}
 
 
 @app.get("/api/volume/resolve")

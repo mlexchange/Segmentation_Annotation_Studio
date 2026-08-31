@@ -18,6 +18,16 @@ export function buildSourceKey(
   return kind === 'tiled' ? `tiled:${serverUri ?? ''}:${path}` : `local:${path}`;
 }
 
+/** Inverse of {@link buildSourceKey}: recovers {kind, source, serverUri} from a canonical sourceKey. */
+export function parseSourceKey(sk: string): { kind: 'tiled' | 'local'; source: string; serverUri: string | null } {
+  if (sk.startsWith('tiled:')) {
+    const rest = sk.slice('tiled:'.length);
+    const sep = rest.indexOf(':');
+    return { kind: 'tiled', serverUri: rest.slice(0, sep) || null, source: rest.slice(sep + 1) };
+  }
+  return { kind: 'local', serverUri: null, source: sk.slice('local:'.length) };
+}
+
 /**
  * True if *path* itself, or anything below it, has annotations.
  *

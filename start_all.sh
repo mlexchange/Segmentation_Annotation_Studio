@@ -287,6 +287,52 @@ ensure_backend_env() {
   fi
 }
 
+ensure_ml_env() {
+  # Best-effort + backgrounded-in-spirit: never blocks or fails startup — the
+  # Train tab (and denoise_bake.py's "model" denoise method) already degrade
+  # to a clear "unavailable" state via train_common.torch_available() /
+  # dlsia_available() when these aren't installed, so skipping this is always
+  # a safe default, not a broken one.
+  local want_install="${INSTALL_ML:-}"
+  # Default to installing on Apple Silicon Mac (torch gets MPS acceleration
+  # there); other platforms opt in explicitly, since a CUDA/CPU torch wheel is
+  # a multi-GB download the user may not want on every fresh machine.
+  if [ -z "$want_install" ] && [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    want_install=1
+  fi
+  if [ "$want_install" != "1" ]; then
+    echo -e "${YELLOW}    Skipping ML deps (Train tab) — set INSTALL_ML=1 to install torch/dlsia here.${NC}"
+    return 0
+  fi
+
+  if "$PYTHON" -c "import torch" >/dev/null 2>&1; then
+    echo -e "${GREEN}    torch already installed — Train tab available.${NC}"
+  else
+    echo -e "${CYAN}==> Installing torch for the Train tab (can take a few minutes on first run)...${NC}"
+    if uv pip install --python "$PYTHON" "torch>=2.4"; then
+      echo -e "${GREEN}    torch installed.${NC}"
+    else
+      echo -e "${YELLOW}    torch install failed — the Train tab will report 'unavailable'. Retry manually:${NC}"
+      echo -e "${YELLOW}      uv pip install --python \"$PYTHON\" \"torch>=2.4\"${NC}"
+    fi
+  fi
+
+  if "$PYTHON" -c "import dlsia" >/dev/null 2>&1; then
+    echo -e "${GREEN}    dlsia already installed — TUNet model family available.${NC}"
+  else
+    echo -e "${CYAN}==> Installing dlsia (+ qlty) for the Train tab's TUNet model family...${NC}"
+    if uv pip install --python "$PYTHON" "dlsia>=0.3" "qlty>=1.5"; then
+      echo -e "${GREEN}    dlsia installed.${NC}"
+    else
+      echo -e "${YELLOW}    dlsia install failed — the TUNet model family will report 'unavailable'.${NC}"
+    fi
+  fi
+
+  # Some ops (e.g. certain interpolate modes) aren't implemented on MPS yet;
+  # fall back to CPU for just that op instead of erroring.
+  export PYTORCH_ENABLE_MPS_FALLBACK=1
+}
+
 ensure_ipred_env() {
   # NOTE: probe "ipred.api", not bare "ipred" — the repo's top-level ipred/
   # directory (sibling of ipred/src/) is itself an importable namespace package
@@ -354,6 +400,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 ensure_backend_env
+ensure_ml_env
 ensure_frontend_runtime
 cleanup_managed_processes
 reclaim_orphaned_repo_ports
