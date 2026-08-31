@@ -575,6 +575,7 @@ export default function AnnotatePage() {
                 onCommitVolumeApply={() => { void handleCommitVolumeApply(); }}
                 onCancelVolumeApply={() => { void handleCancelVolumeApply(); }}
                 onDismissVolumeApply={clf.resetVolumeApplyJob}
+                onTrainDeepModel={() => navigate('/train')}
                 manifoldParams={manifold.params}
                 onManifoldParamsChange={manifold.setParams}
                 manifoldSampling={manifold.sampling}

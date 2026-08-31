@@ -22,7 +22,9 @@ export function buildSourceKey(
 export function parseSourceKey(sk: string): { kind: 'tiled' | 'local'; source: string; serverUri: string | null } {
   if (sk.startsWith('tiled:')) {
     const rest = sk.slice('tiled:'.length);
-    const sep = rest.indexOf(':');
+    // The serverUri itself contains colons (`http://host:port`), so the
+    // separator before the tiled path is the LAST colon, not the first.
+    const sep = rest.lastIndexOf(':');
     return { kind: 'tiled', serverUri: rest.slice(0, sep) || null, source: rest.slice(sep + 1) };
   }
   return { kind: 'local', serverUri: null, source: sk.slice('local:'.length) };

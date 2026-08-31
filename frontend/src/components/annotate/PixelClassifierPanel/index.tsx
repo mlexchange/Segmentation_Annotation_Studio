@@ -3,7 +3,7 @@
  * Suggest-Labels manifold loop folded in and conformal coverage surfaced as
  * headline guidance (not a legend entry).
  */
-import { CaretLeft, CaretRight, CircleNotch, Compass, TreeStructure } from '@phosphor-icons/react';
+import { Brain, CaretLeft, CaretRight, CircleNotch, Compass, TreeStructure } from '@phosphor-icons/react';
 import type { ClfParams, ClfPredictCounts, ClfTrainResult } from '@/hooks/usePixelClassifier';
 import type { ManifoldParams } from '@/hooks/useFeatureManifold';
 import { cn } from '@/lib/utils';
@@ -106,6 +106,10 @@ export interface PixelClassifierPanelProps {
   onCancelVolumeApply: () => void;
   onDismissVolumeApply: () => void;
 
+  // Hand-off to the deep-training tab: the iPred annotation work already done
+  // on this sample becomes the training set, pre-selected there.
+  onTrainDeepModel?: () => void;
+
   // Suggest-labels (manifold), folded into the same loop instead of a separate panel.
   manifoldParams: ManifoldParams;
   onManifoldParamsChange: (p: ManifoldParams) => void;
@@ -169,6 +173,7 @@ export default function PixelClassifierPanel({
   onCommitVolumeApply,
   onCancelVolumeApply,
   onDismissVolumeApply,
+  onTrainDeepModel,
   manifoldParams,
   onManifoldParamsChange,
   manifoldSampling,
@@ -473,6 +478,18 @@ export default function PixelClassifierPanel({
                 </button>
               </div>
             </div>
+          )}
+
+          {onTrainDeepModel && annotatedSliceCount > 0 && (
+            <button
+              type="button"
+              onClick={onTrainDeepModel}
+              title="Open the Train tab with this sample's annotated slices pre-selected as the training set"
+              className="flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border border-gray-200 bg-white text-gray-800 hover:bg-sky-50 hover:border-sky-300 transition-colors"
+            >
+              <Brain size={13} />
+              Train a deep model on this
+            </button>
           )}
         </div>
       )}
