@@ -25,6 +25,7 @@ import numpy as np
 
 import arrays as arrays_mod
 import export_jobs
+import mask_pyramid
 from coco_export import _safe_name, shape_to_mask
 from tiled_clients import api_key_for_uri, get_tiled_client
 
@@ -188,7 +189,10 @@ def _read_existing_masks(container: Any) -> dict[str, Any] | None:
         meta = dict(container.metadata)
         legend = meta.get("legend") or meta.get("classes") or []
         indices = [int(i) for i in (meta.get("slice_indices") or [])]
-        semantic = np.asarray(container["semantic"][...])
+        # "semantic" is now a registered multiscale node (mask_pyramid.py), not
+        # a flat array — the merge logic always operates on native resolution,
+        # never the downsampled viewer-only preview levels.
+        semantic = mask_pyramid.read_mask_scale0(container, "semantic")
         safe_to_name = {_safe_name(e["name"]): e["name"] for e in legend}
         class_arrays: dict[str, np.ndarray] = {}
         for key in list(container):
@@ -214,13 +218,26 @@ def write_masks_to_tiled(
     server_uri: str | None,
     volumes: dict[str, Any],
     classes: list[Any],
+    container_suffix: str = "",
 ) -> dict[str, Any]:
-    """Merge stacked mask volumes into a ``<source_stem>__masks`` sibling container.
+    """Merge stacked mask volumes into a ``<source_stem>__masks<container_suffix>``
+    sibling container.
 
     Slices in this push overwrite the same index; previously-pushed slices are
     kept (merge). Metadata records ``updated_at`` and a per-slice
     ``slice_updated_at`` map plus ``last_updated_slices`` so the latest version of
     each slice is explicit. Returns ``{path, n_slices, updated, n_classes}``.
+
+    ``container_suffix`` keeps independent producers of masks for the same
+    source from silently merging into one blob: the manual "sync masks to
+    Tiled" action and a dlsia run's "write to Tiled" (``infer_jobs.py``) both
+    call this function, and without a suffix they'd write the exact same
+    ``<stem>__masks`` container — a later push from one would merge onto
+    (and, on overlapping slices, overwrite) the other's, making it impossible
+    to keep both results around to compare, e.g. side-by-side in the 3-D
+    viewer's two independent mask layers. Empty by default (the manual sync
+    action's own container, unsuffixed, for backward compatibility with
+    anything already pointing at ``<stem>__masks``).
     """
     api_key = api_key_for_uri(server_uri)
     client = get_tiled_client(server_uri, api_key)
@@ -231,7 +248,7 @@ def write_masks_to_tiled(
     for part in parts[:-1]:
         parent = parent[part]
 
-    container_key = f"{stem}__masks"
+    container_key = f"{stem}__masks{container_suffix}"
     try:
         container: Any = parent[container_key]
     except KeyError:
@@ -270,10 +287,12 @@ def write_masks_to_tiled(
         container = parent.create_container(key=container_key, metadata=container_meta)
 
     dims = ["slice", "y", "x"]
-    container.write_array(
-        merged["semantic"], key="semantic", dims=dims,
-        metadata={"studio_type": "segmentation_semantic"},
-    )
+    # Registered as a real OME-NGFF multiscale node (mask_pyramid.py), not a
+    # bare write_array — that's what lets the volume viewer's loadMask()
+    # actually open this as a Zarr store instead of rejecting it for
+    # "missing multiscales". Only `semantic` needs this: it's the one array
+    # the viewer's single combined class-id mask texture reads.
+    mask_pyramid.register_mask_pyramid(merged["semantic"], key="semantic", container=container)
     for name, vol in merged["class_vols"].items():
         container.write_array(
             vol, key=_safe_name(name), dims=dims,

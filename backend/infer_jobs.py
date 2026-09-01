@@ -395,7 +395,13 @@ def run_write_tiled_job(jid: str, infer_job_id: str) -> None:
         }
 
         export_jobs.set_total(jid, 1)
-        info = tiled_mask_sync.write_masks_to_tiled(entry["source"], entry["server_uri"], volumes, classes)
+        # "_deep" keeps this in its own container, separate from whatever the
+        # manual "sync masks to Tiled" action (iPred's fast results) has
+        # written for the same source — letting both be loaded as independent
+        # mask layers in the 3-D viewer instead of merging into one.
+        info = tiled_mask_sync.write_masks_to_tiled(
+            entry["source"], entry["server_uri"], volumes, classes, container_suffix="_deep",
+        )
         export_jobs.bump(jid, 1)
         export_jobs.update(jid, state="done", phase="done", result=info)
         export_jobs.log(jid, f"Wrote predicted masks to {info['path']}.")

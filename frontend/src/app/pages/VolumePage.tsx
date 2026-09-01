@@ -12,8 +12,10 @@
  * lives in a `__volume` sidecar, and a stack nobody has built one for has none.
  * See `backend/volume_nodes.py`.
  *
- * Annotation overlay is deliberately not here yet — it needs a second label
- * texture in the renderer, which lands upstream in the viewer repo.
+ * Annotation overlay: two independent mask/annotation layers ("Fast (iPred)"
+ * and "Deep (dlsia)" — see `MaskLayersPanel`), backed by the vendored
+ * renderer's own two-slot mask API and the `<source>__masks[_deep]` Tiled
+ * containers `tiled_mask_sync.write_masks_to_tiled` writes.
  */
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -22,8 +24,9 @@ import { API_BASE } from '@/config';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { buildZarrUrl, describeUnavailable, type ZarrUnavailable } from '@/lib/zarrUrl';
 import type { ServerInfo } from '@/types/server';
-import VolumeViewer, { webGpuAvailability } from '@/components/volume/VolumeViewer';
+import VolumeViewer, { webGpuAvailability, type WebGpuViewerInstance } from '@/components/volume/VolumeViewer';
 import BuildVolumePanel from '@/components/volume/BuildVolumePanel';
+import MaskLayersPanel from '@/components/volume/MaskLayersPanel';
 
 /** Shape of `GET /api/volume/resolve`. */
 interface VolumeNode {
@@ -50,6 +53,7 @@ function Notice({ title, detail, hint }: { title: string; detail: string; hint?:
 export default function VolumePage() {
   const { kind, source, serverUri } = useDatasetStore();
   const [bootError, setBootError] = useState<string | null>(null);
+  const [viewerInstance, setViewerInstance] = useState<WebGpuViewerInstance | null>(null);
 
   // A new dataset deserves a fresh attempt — otherwise one bad volume leaves the
   // page stuck on its error for every dataset opened afterwards.
@@ -117,14 +121,16 @@ export default function VolumePage() {
   }
 
   return (
-    <div className="flex h-full w-full flex-col">
+    <div className="relative flex h-full w-full flex-col">
       <VolumeViewer
         // Remount on source change so the renderer tears its GPU device down
         // and rebuilds, rather than trying to swap a volume in place.
         key={url}
         zarrUrl={url}
+        onReady={setViewerInstance}
         onError={(e) => setBootError(e instanceof Error ? e.message : String(e))}
       />
+      <MaskLayersPanel instance={viewerInstance} kind={kind} source={source} serverUri={resolvedUri} />
     </div>
   );
 }

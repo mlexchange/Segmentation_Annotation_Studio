@@ -31,6 +31,7 @@
       "@zarr-viewer/controls": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/controls/index.ts"],
       "@zarr-viewer/io": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/io/index.ts"],
       "@zarr-viewer/render": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/render/index.ts"],
+      "@zarr-viewer/fx": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/fx/src/index.ts"],
       "@prism/core": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/core/index.ts"],
       "@prism/math": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/math/index.ts"],
       "@prism/render": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/render/index.ts"],
@@ -43,5 +44,12 @@
   // compiles cleanly under ours. If it ever does not, that is an upstream fix on
   // the viewer repo's own branch — do not edit vendored sources to appease tsc.
   "include": ["src", "vendor/view_tomography_recon_app/src/zarr-viewer/src"],
-  "exclude": ["vendor/view_tomography_recon_app/src/zarr-viewer/src/fx/test"]
+  "exclude": [
+    "vendor/view_tomography_recon_app/src/zarr-viewer/src/fx/test",
+    // Upstream test fixture predates `RenderProvenance.extendedPreIntegration`
+    // (added alongside the mip-pyramid/half-res-lighting work) and was never
+    // updated — a test-only type error with no effect on the exported API we
+    // actually consume. Excluded rather than patched, per the note above.
+    "vendor/view_tomography_recon_app/src/zarr-viewer/src/render/accel/test/accel.spec.ts"
+  ]
 }

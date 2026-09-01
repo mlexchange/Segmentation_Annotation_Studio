@@ -104,3 +104,40 @@ export function buildZarrUrl(
 
   return { url: `${zarrRootFor(serverUri)}/${path}`, reason: null };
 }
+
+/**
+ * Zarr store URL for a sample's mask/annotation volume — the
+ * `<stem>__masks<suffix>` sibling container `tiled_mask_sync.write_masks_to_tiled`
+ * writes, registered as a real OME-NGFF multiscale node by
+ * `mask_pyramid.register_mask_pyramid` so this is directly loadable via the
+ * volume viewer's mask layer (`loadMask(slot, url)`).
+ *
+ * @param source Tiled path of the annotated dataset — same `source` passed to
+ *   `buildZarrUrl` for the primary volume, NOT the `__masks` container itself;
+ *   the `__masks`/`semantic` suffix is appended here.
+ * @param suffix Distinguishes independent mask producers for the same source
+ *   that must not merge into one container — `''` for the manual "sync masks
+ *   to Tiled" action (iPred's fast results), `'_deep'` for a dlsia run's
+ *   "Write masks to Tiled" (`infer_jobs.py`'s `container_suffix="_deep"`).
+ *   Must match the backend suffix exactly or this points at an empty/missing
+ *   container.
+ */
+export function buildMaskZarrUrl(
+  kind: string | null,
+  source: string | null,
+  serverUri: string | null,
+  suffix: '' | '_deep' = '',
+): ZarrUrlResult {
+  if (!kind || !source) return { url: null, reason: 'no-source' };
+  if (kind !== 'tiled') return { url: null, reason: 'local-source' };
+  if (!serverUri) return { url: null, reason: 'no-server' };
+
+  const parts = source.split('/').filter(Boolean);
+  const stem = parts.pop();
+  if (!stem) return { url: null, reason: 'no-source' };
+  const path = [...parts, `${stem}__masks${suffix}`, 'semantic']
+    .map(encodeURIComponent)
+    .join('/');
+
+  return { url: `${zarrRootFor(serverUri)}/${path}`, reason: null };
+}

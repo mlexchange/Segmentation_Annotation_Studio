@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildZarrUrl, zarrRootFor, describeUnavailable } from './zarrUrl';
+import { buildZarrUrl, buildMaskZarrUrl, zarrRootFor, describeUnavailable } from './zarrUrl';
 
 describe('zarrRootFor', () => {
   it('appends the zarr v2 root to a bare origin', () => {
@@ -58,6 +58,37 @@ describe('buildZarrUrl', () => {
     // put a write-capable credential in browser history and referrers.
     const { url } = buildZarrUrl('tiled', 'scans/x', server);
     expect(url).not.toMatch(/api_key|token|Authorization/i);
+  });
+});
+
+describe('buildMaskZarrUrl', () => {
+  const server = 'http://127.0.0.1:8010';
+
+  it('appends the __masks/semantic sibling to the dataset path', () => {
+    expect(buildMaskZarrUrl('tiled', 'browse/260_R1_Oct_slice_2', server)).toEqual({
+      url: 'http://127.0.0.1:8010/zarr/v2/browse/260_R1_Oct_slice_2__masks/semantic',
+      reason: null,
+    });
+  });
+
+  it('keeps the __masks suffix on the leaf segment only, not the whole path', () => {
+    const { url } = buildMaskZarrUrl('tiled', 'a/b/c', server);
+    expect(url).toBe('http://127.0.0.1:8010/zarr/v2/a/b/c__masks/semantic');
+  });
+
+  it('points at a distinct container for the deep-model suffix', () => {
+    const { url } = buildMaskZarrUrl('tiled', 'browse/x', server, '_deep');
+    expect(url).toBe('http://127.0.0.1:8010/zarr/v2/browse/x__masks_deep/semantic');
+  });
+
+  it.each([
+    ['no source open', null, null, server, 'no-source'],
+    ['local file', 'local', 'foo.tif', null, 'local-source'],
+    ['server unresolved', 'tiled', 'scans/x', null, 'no-server'],
+  ])('reports %s rather than guessing a URL', (_label, kind, source, uri, reason) => {
+    const result = buildMaskZarrUrl(kind as string | null, source as string | null, uri as string | null);
+    expect(result.url).toBeNull();
+    expect(result.reason).toBe(reason);
   });
 });
 
