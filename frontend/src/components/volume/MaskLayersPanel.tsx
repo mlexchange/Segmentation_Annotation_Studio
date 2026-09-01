@@ -17,7 +17,7 @@
  * downsampled-raw-volume endpoint this app's `/volume` page does not have
  * (it streams the real Tiled Zarr pyramid directly instead).
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Eye, EyeSlash, CircleNotch } from '@phosphor-icons/react';
 import { buildMaskZarrUrl } from '@/lib/zarrUrl';
 import type { WebGpuViewerInstance } from './VolumeViewer';
@@ -58,20 +58,37 @@ interface MaskLayersPanelProps {
   kind: string | null;
   source: string | null;
   serverUri: string | null;
+  /** Slot to load automatically once the viewer is ready — the "View in 3D"
+   * hand-off from Train/Annotate arrives here already knowing which result
+   * the user just produced, so it shouldn't need a second manual click. */
+  autoLoadSlot?: 0 | 1;
 }
 
-export default function MaskLayersPanel({ instance, kind, source, serverUri }: MaskLayersPanelProps) {
+export default function MaskLayersPanel({ instance, kind, source, serverUri, autoLoadSlot }: MaskLayersPanelProps) {
   const [state, setState] = useState<Record<0 | 1, SlotState>>({
     0: initialSlotState,
     1: initialSlotState,
   });
+  // Guards the auto-load effect against StrictMode's double-invoke and
+  // against re-firing on every re-render once it's already kicked off once
+  // for this instance.
+  const autoLoadedFor = useRef<WebGpuViewerInstance | null>(null);
 
   // A new dataset invalidates every previously-loaded mask — the viewer
   // itself remounts on source change (see VolumePage's `key={url}`), so
   // there is nothing to explicitly unload here, only local status to reset.
   useEffect(() => {
     setState({ 0: initialSlotState, 1: initialSlotState });
+    autoLoadedFor.current = null;
   }, [source, serverUri]);
+
+  useEffect(() => {
+    if (!instance || autoLoadSlot === undefined || autoLoadedFor.current === instance) return;
+    autoLoadedFor.current = instance;
+    const cfg = SLOTS.find((s) => s.slot === autoLoadSlot);
+    if (cfg) void load(cfg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `load` is redefined every render but stable in effect: it only reads current instance/kind/source/serverUri via closure, matching the effect's own deps.
+  }, [instance, autoLoadSlot]);
 
   if (!instance) return null;
 

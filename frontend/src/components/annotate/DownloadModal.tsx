@@ -2,7 +2,8 @@
  * DownloadModal — scope picker + optional star-rating filter, then COCO export.
  */
 import { useMemo, useState } from 'react';
-import { DownloadSimple, X, CheckCircle, WarningCircle } from '@phosphor-icons/react';
+import { useNavigate } from 'react-router';
+import { DownloadSimple, X, CheckCircle, WarningCircle, Cube } from '@phosphor-icons/react';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
 import { useClassStore } from '@/stores/classStore';
@@ -55,6 +56,7 @@ const SCOPE_OPTIONS: { value: Scope; label: string; desc: string; stars?: string
 
 /** Renders the COCO download dialog and drives the export job for the chosen scope. */
 export default function DownloadModal({ onClose }: DownloadModalProps) {
+  const navigate = useNavigate();
   const { source, kind, serverUri, currentSlice } = useDatasetStore();
   const { byImage, splitBySlice, negativeSlices } = useAnnotationStore();
   const { classes } = useClassStore();
@@ -295,13 +297,23 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
         )}
 
         {status === 'done' && maskResult && (
-          <div className="flex items-start gap-2 text-sm text-green-300">
+          <div className="flex flex-wrap items-start gap-2 text-sm text-green-300">
             <CheckCircle size={16} className="mt-0.5 shrink-0" />
-            <span className="min-w-0 break-words">
+            <span className="min-w-0 flex-1 break-words">
               {maskResult.length === 0
                 ? 'No masks written (no Tiled sources or no annotated slices).'
                 : <>Masks merged into Tiled: {maskResult.map((w) => `${w.container} (${w.n_slices} slices total, ${w.updated ?? 0} updated)`).join(', ')}.</>}
             </span>
+            {maskResult.length > 0 && (
+              <button
+                type="button"
+                onClick={() => { onClose(); navigate('/volume?mask=fast'); }}
+                className="flex shrink-0 items-center gap-1 rounded-md border border-green-600 px-2 py-1 text-xs text-green-300 hover:bg-green-900/30 transition-colors"
+              >
+                <Cube size={12} />
+                View in 3D
+              </button>
+            )}
           </div>
         )}
         {status === 'done' && !maskResult && (

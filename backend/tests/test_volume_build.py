@@ -25,7 +25,10 @@ import volume_build  # noqa: E402
 def fake_stack(monkeypatch):
     """Stand in for a Tiled stack: `resolve_array` + `array_shape_meta` + `read_slice`."""
 
-    def install(n_slices=64, height=1024, width=1024, dtype="uint16", is_rgb=False):
+    # 4096 > TARGET_DIM (2048) by default, so an un-overridden fake_stack still
+    # represents "a large stack that needs a pyramid" — this used to be true at
+    # 1024 back when TARGET_DIM was 384.
+    def install(n_slices=64, height=4096, width=4096, dtype="uint16", is_rgb=False):
         meta = {
             "n_slices": n_slices,
             "height": height,
@@ -48,9 +51,9 @@ def fake_stack(monkeypatch):
 
 class TestInspect:
     def test_describes_the_pyramid_that_would_be_built(self, fake_stack):
-        fake_stack(n_slices=64, height=1024, width=1024)
+        fake_stack(n_slices=64, height=4096, width=4096)
         info = volume_build.inspect_volume_build("browse/stack")
-        assert info["full_shape"] == [64, 1024, 1024]
+        assert info["full_shape"] == [64, 4096, 4096]
         assert info["pyramid_plan"]
         assert info["already_small"] is False
 

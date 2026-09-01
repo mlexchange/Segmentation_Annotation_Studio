@@ -4,6 +4,8 @@
  * and/or push them into Tiled as masks.
  */
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router';
+import { Cube } from '@phosphor-icons/react';
 import { API_BASE } from '@/config';
 import { useExportJob } from '@/hooks/useExportJob';
 import { buildSliceUrl } from '@/hooks/useImageSlice';
@@ -30,6 +32,7 @@ type Scope = 'current' | 'range' | 'all';
 export default function InferencePanel({
   selectedRunId, hasOpenSample, isTiledSource, source, serverUri, currentSlice, nSlices, baseImageUrl, onImportPredictions,
 }: InferencePanelProps) {
+  const navigate = useNavigate();
   const [scope, setScope] = useState<Scope>('current');
   const [rangeStart, setRangeStart] = useState(0);
   const [rangeEnd, setRangeEnd] = useState(Math.max(0, nSlices - 1));
@@ -247,11 +250,21 @@ export default function InferencePanel({
                 </p>
               )}
               {writeJob.status === 'done' && (
-                <p className="text-xs text-emerald-400">
-                  Masks saved to Tiled
-                  {typeof writeJob.result?.n_slices === 'number' ? ` (${writeJob.result.n_slices} slices)` : ''} —
-                  load them in Annotate anytime with "Load saved masks".
-                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-xs text-emerald-400">
+                    Masks saved to Tiled
+                    {typeof writeJob.result?.n_slices === 'number' ? ` (${writeJob.result.n_slices} slices)` : ''} —
+                    load them in Annotate anytime with "Load saved masks".
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => navigate('/volume?mask=deep')}
+                    className="flex items-center gap-1 rounded-md border border-emerald-600 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-900/30 transition-colors"
+                  >
+                    <Cube size={12} />
+                    View in 3D
+                  </button>
+                </div>
               )}
               <JobProgressBar job={writeJob} unit="steps" />
             </div>

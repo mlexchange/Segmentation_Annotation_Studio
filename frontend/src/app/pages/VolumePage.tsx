@@ -18,6 +18,7 @@
  * containers `tiled_mask_sync.write_masks_to_tiled` writes.
  */
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { Cube } from '@phosphor-icons/react';
 import { API_BASE } from '@/config';
@@ -27,6 +28,7 @@ import type { ServerInfo } from '@/types/server';
 import VolumeViewer, { webGpuAvailability, type WebGpuViewerInstance } from '@/components/volume/VolumeViewer';
 import BuildVolumePanel from '@/components/volume/BuildVolumePanel';
 import MaskLayersPanel from '@/components/volume/MaskLayersPanel';
+import RebuildVolumeControl from '@/components/volume/RebuildVolumeControl';
 
 /** Shape of `GET /api/volume/resolve`. */
 interface VolumeNode {
@@ -54,6 +56,16 @@ export default function VolumePage() {
   const { kind, source, serverUri } = useDatasetStore();
   const [bootError, setBootError] = useState<string | null>(null);
   const [viewerInstance, setViewerInstance] = useState<WebGpuViewerInstance | null>(null);
+  // Bumped after a rebuild — folded into VolumeViewer's `key` below to force
+  // a remount even though the resolved path (and therefore `url`) doesn't
+  // change on a rebuild the way it does for a brand-new volume.
+  const [rebuildNonce, setRebuildNonce] = useState(0);
+  // "View in 3D" hand-offs from Train/Annotate arrive as `?mask=fast|deep` so
+  // the relevant layer loads automatically instead of requiring a second
+  // manual click (see MaskLayersPanel's `autoLoadSlot`).
+  const [searchParams] = useSearchParams();
+  const maskParam = searchParams.get('mask');
+  const autoLoadSlot = maskParam === 'fast' ? 0 : maskParam === 'deep' ? 1 : undefined;
 
   // A new dataset deserves a fresh attempt — otherwise one bad volume leaves the
   // page stuck on its error for every dataset opened afterwards.
@@ -123,14 +135,31 @@ export default function VolumePage() {
   return (
     <div className="relative flex h-full w-full flex-col">
       <VolumeViewer
-        // Remount on source change so the renderer tears its GPU device down
-        // and rebuilds, rather than trying to swap a volume in place.
-        key={url}
+        // Remount on source change (a genuinely different dataset) OR on
+        // rebuildNonce (the same dataset's pyramid was just rebuilt in
+        // place) — either way the renderer needs to tear its GPU device down
+        // and re-fetch, rather than trying to swap a volume in place.
+        key={`${url}:${rebuildNonce}`}
         zarrUrl={url}
         onReady={setViewerInstance}
         onError={(e) => setBootError(e instanceof Error ? e.message : String(e))}
       />
-      <MaskLayersPanel instance={viewerInstance} kind={kind} source={source} serverUri={resolvedUri} />
+      <MaskLayersPanel
+        instance={viewerInstance}
+        kind={kind}
+        source={source}
+        serverUri={resolvedUri}
+        autoLoadSlot={autoLoadSlot}
+      />
+      {node?.mode === 'sidecar' && source && (
+        <div className="pointer-events-none absolute right-3 top-3 z-10">
+          <RebuildVolumeControl
+            source={source}
+            serverUri={resolvedUri}
+            onRebuilt={() => setRebuildNonce((n) => n + 1)}
+          />
+        </div>
+      )}
     </div>
   );
 }

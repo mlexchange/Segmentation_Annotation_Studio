@@ -74,12 +74,16 @@ logger = logging.getLogger("tiff_stack_source")
 
 TIFF_SUFFIXES: tuple[str, ...] = (".tif", ".tiff")
 
-# Longest edge (voxels) the finest GENERATED level may have. Chosen so a level
-# comfortably fits a 2048 3-D texture with room for the renderer's own budget,
-# and so building one stays within a few hundred MB of RAM: this module assembles
-# each generated level in memory before writing it (worst case 384**3 * 4 B ~=
-# 226 MB, and z is normally far smaller than 384).
-TARGET_DIM = 384
+# Longest edge (voxels) the finest GENERATED level may have. 2048 matches
+# WebGPU's guaranteed-minimum `maxTextureDimension3D` — the viewer picks
+# whichever registered level is the coarsest that still fits the actual
+# device's limit, so a level above what a given GPU can take is simply
+# skipped, never a hard failure. Raising this raises fidelity but also
+# memory/time to build it: this module assembles each generated level fully
+# in RAM before writing it, so cost scales with actual voxel count
+# (nx * ny * nz, not nx**3 — z is normally far smaller than the in-plane
+# edges for a tomography stack).
+TARGET_DIM = 2048
 
 # How many levels to generate below scale0. Three gives the renderer a choice of
 # detail without the cost growing: each is 1/8 the voxels of the one above.
