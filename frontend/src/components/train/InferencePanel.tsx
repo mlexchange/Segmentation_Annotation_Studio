@@ -88,7 +88,15 @@ export default function InferencePanel({
   // and selectedRunId is page-local state that resets to null when the Train tab
   // remounts — requiring it here made a finished job's overlay vanish on the way
   // back to the tab, leaving just the bare base image under a "done" progress bar.
-  const previewUrl = job.status === 'done' && activePreviewSlice != null && job.jobId
+  //
+  // Gated on `previewSlices.length > 0`, NOT `job.status === 'done'` (#15):
+  // infer_jobs.py now publishes `result.preview_slices` incrementally as each
+  // slice finishes, so a still-`running` job already has real, servable
+  // preview PNGs for whatever's completed so far — waiting for `done` meant
+  // switching slices mid-job showed nothing yet (no preview existed at all
+  // until the whole job finished), which read as "it stopped predicting"
+  // even though the job was running fine server-side.
+  const previewUrl = activePreviewSlice != null && job.jobId
     ? `${API_BASE}/api/train/infer/preview/${job.jobId}/${activePreviewSlice}`
     : null;
 
@@ -182,10 +190,13 @@ export default function InferencePanel({
             )}
           </div>
 
-          {job.status === 'done' && (
+          {(job.status === 'done' || (job.status === 'running' && previewSlices.length > 0)) && (
             <div className="space-y-2 rounded-lg border border-slate-700 bg-slate-900/40 p-2">
               <p className="text-xs text-slate-300">
                 {totalShapes} predicted region{totalShapes !== 1 ? 's' : ''}
+                {job.status === 'running'
+                  ? ` so far (${previewSlices.length}/${job.total} slices predicted)`
+                  : ''}
                 {job.result?.cancelled === true ? ' (cancelled — partial result)' : ''}.
               </p>
               {previewSlices.length > 0 && basePreviewUrl && (
@@ -217,7 +228,12 @@ export default function InferencePanel({
                   )}
                 </>
               )}
-              {hasOpenSample && (
+              {/* Acting on the result (importing shapes, pushing to Tiled) waits for
+                  `done` — the preview above is fine to show mid-job, but these two
+                  operate on `job.result.slices`/all label PNGs, so doing them against
+                  a still-growing partial result would silently drop whatever hasn't
+                  predicted yet instead of erroring, which is worse than just waiting. */}
+              {hasOpenSample && job.status === 'done' && (
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
                     type="button"

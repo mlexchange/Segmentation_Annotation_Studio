@@ -194,6 +194,14 @@ def run_ipred_volume_apply_job(
         cancelled = False
         pool_size = max(1, int(os.getenv("IPRED_APPLY_CONCURRENCY", _DEFAULT_APPLY_CONCURRENCY)))
 
+        def _publish_result() -> None:
+            """Update the job's `result` after every completed slice, not
+            just once at the end — otherwise a UI polling this job while it
+            runs sees `result: null` the entire time, no matter how many
+            slices have actually already predicted (same class of bug fixed
+            in infer_jobs.py's dlsia inference job for the same reason)."""
+            export_jobs.update(jid, result={"runs": dict(runs), "errors": list(errors), "cancelled": cancelled})
+
         with ipred_client_mod.new_shared_client() as client, \
                 concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as pool:
             pending = iter(slice_indices)
@@ -234,6 +242,7 @@ def run_ipred_volume_apply_job(
                         runs[str(slice_index)] = run_id  # type: ignore[assignment]
                         export_jobs.log(jid, f"slice {slice_index}: predicted (run {run_id[:8]})")
                     export_jobs.bump(jid, 1)
+                    _publish_result()
 
                 if export_jobs.cancel_requested(jid):
                     cancelled = True

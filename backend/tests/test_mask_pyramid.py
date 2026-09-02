@@ -1,8 +1,8 @@
 """Unit tests for mask_pyramid's pure downsampling (no Tiled I/O)."""
 import numpy as np
 
-from mask_pyramid import build_mask_pyramid, majority_downsample
 import tiff_stack_source as tss
+from mask_pyramid import build_mask_pyramid, majority_downsample
 
 
 def test_majority_downsample_picks_the_more_frequent_class():

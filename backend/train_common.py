@@ -43,6 +43,18 @@ import threading  # noqa: E402
 
 ML_LOCK = threading.Lock()
 
+# Separate from ML_LOCK: ML_LOCK gates whole JOBS against each other (a
+# training run, an inference run, a denoise bake, a batch probe — all four
+# hold it for their entire duration so no two heavy ML jobs contend for the
+# GPU at once). GPU_FORWARD_LOCK is finer-grained — it serializes only the
+# actual model forward call, so a per-job worker pool (see infer_jobs.py's
+# per-slice pool) can run I/O, preprocessing, and vectorization for multiple
+# slices concurrently while still guaranteeing only one thread ever calls
+# into the model at a given instant. Do not use this in place of ML_LOCK —
+# it does not protect against two different JOBS running at once, only
+# against two threads calling the model at the same time within one job.
+GPU_FORWARD_LOCK = threading.Lock()
+
 IGNORE_INDEX = 255  # unannotated pixels — see coco_export.build_export_plan(lightly=True)
 
 

@@ -153,6 +153,12 @@ export function usePixelClassifier({
   const commitUrlRef = useRef<string | null>(null);
   const statusUrlRef = useRef<string | null>(null);
   const probaUrlRef = useRef<string | null>(null);
+  /** run_id currently shown via the volume-apply live preview (see the effect
+   * below) — cleared in revokePredict() so a slice revisit after any revoke
+   * (slice change, sample change, job restart) always re-fetches rather than
+   * skipping because "we already showed this run_id once" while commitUrl
+   * itself has since gone back to null. */
+  const volumeApplyPreviewRunIdRef = useRef<string | null>(null);
   /** Raw softmax PNG per class (before threshold preview). */
   const rawProbaBlobRef = useRef<Blob | null>(null);
   const probaThresholdsRef = useRef(probaThresholds);
@@ -206,6 +212,7 @@ export function usePixelClassifier({
     setRunId(null);
     setProbaClassIndex(0);
     setProbaThresholds({});
+    volumeApplyPreviewRunIdRef.current = null;
     revokeProba();
   }, [revokeProba]);
 
@@ -413,6 +420,11 @@ export function usePixelClassifier({
       }
       if (sliceIndices.length === 0) return;
       setError(null);
+      // Clear any prior job's frozen preview (single-slice OR a previous
+      // volume apply) before starting — otherwise switching slices right
+      // after kicking off a new run could briefly show a stale overlay left
+      // over from before this job's own results start landing.
+      revokePredict();
       const sessionId = await ensureSession();
       volumeApplyHandledRef.current = null;
       await volumeApplyJobHook.startIpredBatchApply({
@@ -423,7 +435,7 @@ export function usePixelClassifier({
         alpha: params.alpha,
       });
     },
-    [model, preferredCompositionId, params.alpha, ensureSession, volumeApplyJobHook],
+    [model, preferredCompositionId, params.alpha, ensureSession, volumeApplyJobHook, revokePredict],
   );
 
   useEffect(() => {
@@ -434,6 +446,52 @@ export function usePixelClassifier({
       setError(jobError ?? 'Volume apply failed.');
     }
   }, [volumeApplyJobHook.state]);
+
+  // Live per-slice preview during (or after) a volume-apply job: as soon as
+  // ipred_batch_jobs.py's result.runs has an entry for whichever slice is
+  // currently on screen, fetch and show that slice's commit/status overlay —
+  // reusing the exact same commitUrl/statusUrl the single-slice "Predict"
+  // button already drives, so AnnotationCanvas needs no new prop. Before this,
+  // switching slices during/after a volume apply showed nothing at all until
+  // the explicit "Commit" step vectorized everything into permanent shapes —
+  // there was no cheap way to just look at a slice's predicted result first.
+  //
+  // NOT a proba-channel preview: batch-apply runs are created with
+  // store_probabilities=false (ipred_batch_jobs.py's `_apply_one_slice`), so
+  // there is no proba.npy to load for these run ids — only commit/status.
+  useEffect(() => {
+    const result = volumeApplyJobHook.state.result as { runs?: Record<string, string> } | null;
+    const targetRunId = result?.runs?.[String(sliceIndex)] ?? null;
+    if (!targetRunId || targetRunId === volumeApplyPreviewRunIdRef.current) return;
+    let cancelled = false;
+    volumeApplyPreviewRunIdRef.current = targetRunId;
+    void (async () => {
+      try {
+        const [commitRes, statusRes] = await Promise.all([
+          fetch(ipredRunCommitUrl(targetRunId)),
+          fetch(ipredRunStatusUrl(targetRunId)),
+        ]);
+        if (!commitRes.ok || !statusRes.ok || cancelled) return;
+        const [commitBlob, statusBlob] = await Promise.all([commitRes.blob(), statusRes.blob()]);
+        if (cancelled) return;
+        const cUrl = URL.createObjectURL(commitBlob);
+        const sUrl = URL.createObjectURL(statusBlob);
+        if (commitUrlRef.current) URL.revokeObjectURL(commitUrlRef.current);
+        if (statusUrlRef.current) URL.revokeObjectURL(statusUrlRef.current);
+        commitUrlRef.current = cUrl;
+        statusUrlRef.current = sUrl;
+        setCommitUrl(cUrl);
+        setStatusUrl(sUrl);
+      } catch {
+        // Best-effort live preview only — a fetch hiccup here shouldn't
+        // surface a hard error; the explicit Commit step remains the
+        // authoritative path regardless of whether this preview loaded.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sliceIndex, volumeApplyJobHook.state.result]);
 
   const predict = useCallback(
     async (_shapes: Shape[]) => {

@@ -18,8 +18,10 @@ different concept (unannotated ground truth, not a model's confidence gate).
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import logging
+import os
 import threading
 from typing import Any
 
@@ -157,8 +159,117 @@ def _vectorize_label_map(
     return shapes
 
 
+#: Slices processed concurrently in one inference job. Only the actual model
+#: forward call is serialized (train_common.GPU_FORWARD_LOCK, held briefly
+#: inside _predict_one_slice) — I/O, rendering, and vectorization for
+#: different slices run genuinely in parallel across this pool, so CPU-bound
+#: work overlaps with the GPU instead of the whole per-slice pipeline
+#: serializing behind one lock (the old behavior, when ML_LOCK itself was
+#: held for the entire job). Mirrors ipred_batch_jobs.py's pool shape.
+_DEFAULT_INFER_CONCURRENCY = 4
+
+
+def _predict_one_slice(
+    slice_idx: int,
+    *,
+    jid: str,
+    node: Any,
+    meta: dict[str, Any],
+    h: int,
+    w: int,
+    render: dict[str, Any],
+    global_range: Any,
+    render_slice_fn: Any,
+    tiled: bool,
+    image_size: int,
+    forward_fn: Any,
+    to_tensor_fn: Any,
+    device: Any,
+    request: InferRequest,
+    run_classes: list[dict[str, Any]],
+    tiling_logged: threading.Event,
+) -> tuple[int, bytes | None, list[dict[str, Any]] | None, str | None]:
+    """Read + render + (GPU-locked) predict + vectorize one slice on a worker
+    thread. Returns ``(slice_idx, label_png_bytes, shapes, error)`` — never
+    raises, so a pool of these can be driven with plain ``future.result()``
+    and no per-future try/except at the call site (mirrors
+    ``ipred_batch_jobs._apply_one_slice``'s contract).
+
+    A ``None`` label_png/shapes pair with no error means the tiled path was
+    cancelled mid-slice (``tiling.predict_label_map_tiled`` returns ``None``
+    when its own ``cancel_cb`` fires) — the caller's overall cancellation
+    check already covers stopping the job, so this slice simply contributes
+    nothing rather than needing its own error to report.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    import arrays as arrays_mod
+
+    try:
+        arr = arrays_mod.read_slice(node, meta, slice_idx)
+        rgb = render_slice_fn(arr, render, global_range)
+
+        with train_common.GPU_FORWARD_LOCK, torch.no_grad():
+            if tiled:
+                import tiling
+
+                # Logged once across the whole job, not once per slice — every
+                # slice shares the same tiling geometry. Race-free because
+                # this whole block already runs under GPU_FORWARD_LOCK: only
+                # one worker is ever inside here at a time, so check-then-set
+                # on tiling_logged can't interleave between two threads.
+                first_to_log = not tiling_logged.is_set()
+                if first_to_log:
+                    tiling_logged.set()
+                label_map = tiling.predict_label_map_tiled(
+                    rgb,
+                    forward_fn=forward_fn,
+                    to_tensor_fn=to_tensor_fn,
+                    window=image_size,
+                    min_confidence=request.min_confidence,
+                    device=device,
+                    cancel_cb=lambda: export_jobs.cancel_requested(jid),
+                    progress_cb=(lambda msg: export_jobs.log(jid, f"tiling: {msg}")) if first_to_log else None,
+                )
+                if label_map is None:  # cancelled mid-slice
+                    return slice_idx, None, None, None
+            else:
+                img_l, _ = train_common.letterbox(rgb, np.zeros((h, w), dtype=np.uint8), image_size)
+                batch = to_tensor_fn(img_l).unsqueeze(0).to(device)
+
+                logits = forward_fn(batch)[0]
+                probs = F.softmax(logits, dim=0)
+                confidence, pred_class = probs.max(dim=0)
+                pred_np = pred_class.cpu().numpy()
+                conf_np = confidence.cpu().numpy()
+                label_letterboxed = np.where(conf_np >= request.min_confidence, pred_np + 1, 0).astype(np.uint8)
+                label_map = train_common.unletterbox(label_letterboxed, h, w, image_size)
+
+        shapes = _vectorize_label_map(
+            label_map, run_classes, request.min_area, request.simplify_tol, request.run_id, slice_idx,
+        )
+        buf = io.BytesIO()
+        PILImage.fromarray(label_map, mode="L").save(buf, format="PNG")
+        return slice_idx, buf.getvalue(), shapes, None
+    except Exception as exc:  # noqa: BLE001 — one bad slice must not abort the job
+        return slice_idx, None, None, str(exc)
+
+
 def run_infer_job(jid: str, request: InferRequest) -> None:
-    """Background worker: predict + vectorize each requested slice."""
+    """Background worker: predict + vectorize each requested slice.
+
+    ``train_common.ML_LOCK`` is still held for the whole job (unchanged —
+    this is what keeps a training run, a denoise bake, or another inference
+    job from contending for the GPU at the same time as this one). Within
+    the job, slices are processed by a small bounded worker pool
+    (``_DEFAULT_INFER_CONCURRENCY``) instead of one at a time: only the
+    actual model forward call is serialized (``train_common.GPU_FORWARD_LOCK``,
+    a separate, finer-grained lock — see its own doc), so I/O, rendering, and
+    vectorization for different slices overlap with the GPU instead of the
+    old behavior of serializing the entire per-slice pipeline behind
+    ``ML_LOCK``.
+    """
     if not train_common.ML_LOCK.acquire(blocking=False):
         export_jobs.update(
             jid,
@@ -176,7 +287,6 @@ def run_infer_job(jid: str, request: InferRequest) -> None:
         config = train_common.load_run_config(request.run_id)
         adapter_state = train_common.load_adapter_state(request.run_id)
         run_classes: list[dict[str, Any]] = config["classes"]
-        n_classes = len(run_classes)
         image_size = int(config["image_size"])
         render = request.render.model_dump() if request.render is not None else config["render"]
         # Predict with the geometry this run was TRAINED with — reading the flag off
@@ -228,9 +338,6 @@ def run_infer_job(jid: str, request: InferRequest) -> None:
         else:
             raise RuntimeError(f"Unsupported model family: {config['model_family']!r}")
 
-        import torch
-        import torch.nn.functional as F
-
         import arrays as arrays_mod
         import images as images_mod
 
@@ -242,70 +349,18 @@ def run_infer_job(jid: str, request: InferRequest) -> None:
         export_jobs.set_total(jid, len(request.slice_indices))
         export_jobs.update(jid, phase="predicting")
 
+        # A single mutable dict, referenced (not copied) by the cache entry
+        # below — workers below only ever add their OWN slice_idx key, so
+        # concurrent inserts never conflict, and every `preview_png` call
+        # from another request thread sees results as soon as they land, no
+        # further _cache_put calls needed (see #15's live-preview ask: this
+        # is what makes `GET /api/train/infer/preview/{job_id}/{slice_index}`
+        # servable for early slices while the job is still `running`).
         label_pngs: dict[int, bytes] = {}
         slices_result: dict[str, list[dict[str, Any]]] = {}
         n_shapes = 0
         cancelled = False
-        logged_tiling = False
-
-        with torch.no_grad():
-            for slice_idx in request.slice_indices:
-                if export_jobs.cancel_requested(jid):
-                    cancelled = True
-                    break
-
-                arr = arrays_mod.read_slice(node, meta, slice_idx)
-                rgb = render_slice_fn(arr, render, global_range)
-
-                if tiled:
-                    import tiling
-
-                    label_map = tiling.predict_label_map_tiled(
-                        rgb,
-                        forward_fn=forward_fn,
-                        to_tensor_fn=to_tensor_fn,
-                        window=image_size,
-                        min_confidence=request.min_confidence,
-                        device=device,
-                        cancel_cb=lambda: export_jobs.cancel_requested(jid),
-                        # Logged once: every slice of a volume has the same shape, so
-                        # the tiling geometry never changes between them. Repeating it
-                        # per slice would just double an already per-slice log.
-                        progress_cb=(lambda msg: export_jobs.log(jid, f"tiling: {msg}")) if not logged_tiling else None,
-                    )
-                    logged_tiling = True
-                    if label_map is None:  # cancelled mid-slice
-                        cancelled = True
-                        break
-                else:
-                    img_l, _ = train_common.letterbox(rgb, np.zeros((h, w), dtype=np.uint8), image_size)
-                    batch = to_tensor_fn(img_l).unsqueeze(0).to(device)
-
-                    logits = forward_fn(batch)[0]
-                    probs = F.softmax(logits, dim=0)
-                    confidence, pred_class = probs.max(dim=0)
-                    pred_np = pred_class.cpu().numpy()
-                    conf_np = confidence.cpu().numpy()
-                    label_letterboxed = np.where(conf_np >= request.min_confidence, pred_np + 1, 0).astype(np.uint8)
-                    label_map = train_common.unletterbox(label_letterboxed, h, w, image_size)
-
-                shapes = _vectorize_label_map(
-                    label_map,
-                    run_classes,
-                    request.min_area,
-                    request.simplify_tol,
-                    request.run_id,
-                    slice_idx,
-                )
-                n_shapes += len(shapes)
-                slices_result[str(slice_idx)] = shapes
-
-                buf = io.BytesIO()
-                PILImage.fromarray(label_map, mode="L").save(buf, format="PNG")
-                label_pngs[slice_idx] = buf.getvalue()
-
-                export_jobs.bump(jid, 1)
-                export_jobs.log(jid, f"slice {slice_idx}: {len(shapes)} region(s)")
+        tiling_logged = threading.Event()
 
         _cache_put(
             jid,
@@ -321,15 +376,78 @@ def run_infer_job(jid: str, request: InferRequest) -> None:
             },
         )
 
-        result = {
-            "run_id": request.run_id,
-            "classes": run_classes,
-            "slices": slices_result,
-            "n_shapes": n_shapes,
-            "preview_slices": sorted(label_pngs.keys()),
-            "cancelled": cancelled,
-        }
-        export_jobs.update(jid, state="done", phase="done", result=result)
+        def _publish_result(*, done: bool) -> None:
+            """Update the job's `result` after every completed slice (not
+            just once at the end) so the frontend's poll of
+            `GET /api/train/infer/status/{job_id}` can render a growing
+            preview slider while state is still `running` — see #15."""
+            export_jobs.update(
+                jid,
+                state="done" if done else "running",
+                phase="done" if done else "predicting",
+                result={
+                    "run_id": request.run_id,
+                    "classes": run_classes,
+                    "slices": dict(slices_result),
+                    "n_shapes": n_shapes,
+                    "preview_slices": sorted(label_pngs.keys()),
+                    "cancelled": cancelled,
+                },
+            )
+
+        pool_size = max(1, int(os.getenv("DLSIA_INFER_CONCURRENCY", _DEFAULT_INFER_CONCURRENCY)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as pool:
+            pending = iter(request.slice_indices)
+            in_flight: dict[concurrent.futures.Future, int] = {}
+
+            def submit_next() -> bool:
+                si = next(pending, None)
+                if si is None:
+                    return False
+                fut = pool.submit(
+                    _predict_one_slice,
+                    si,
+                    jid=jid, node=node, meta=meta, h=h, w=w, render=render,
+                    global_range=global_range, render_slice_fn=render_slice_fn,
+                    tiled=tiled, image_size=image_size, forward_fn=forward_fn,
+                    to_tensor_fn=to_tensor_fn, device=device, request=request,
+                    run_classes=run_classes, tiling_logged=tiling_logged,
+                )
+                in_flight[fut] = si
+                return True
+
+            for _ in range(pool_size):
+                if not submit_next():
+                    break
+
+            while in_flight:
+                done_futs, _ = concurrent.futures.wait(
+                    in_flight, return_when=concurrent.futures.FIRST_COMPLETED
+                )
+                for fut in done_futs:
+                    del in_flight[fut]
+                    slice_idx, png_bytes, shapes, error = fut.result()
+                    if error is not None:
+                        logger.warning("Inference job %s: slice %d failed (%s)", jid, slice_idx, error)
+                        export_jobs.log(jid, f"slice {slice_idx}: failed ({error})")
+                    elif png_bytes is not None and shapes is not None:
+                        n_shapes += len(shapes)
+                        slices_result[str(slice_idx)] = shapes
+                        label_pngs[slice_idx] = png_bytes
+                        export_jobs.log(jid, f"slice {slice_idx}: {len(shapes)} region(s)")
+                    # else: cancelled mid-slice (tiled path) — nothing to record.
+                    export_jobs.bump(jid, 1)
+                    _publish_result(done=False)
+
+                if export_jobs.cancel_requested(jid):
+                    cancelled = True
+                    # Already-submitted work can't be un-submitted — just stop
+                    # refilling the pool so it drains rather than growing.
+                    continue
+                for _ in done_futs:
+                    submit_next()
+
+        _publish_result(done=True)
         export_jobs.log(jid, "Inference cancelled; partial results kept." if cancelled else "Inference complete.")
     except Exception as exc:  # noqa: BLE001 — reported as a job error, never a crash
         logger.error("Inference job %s failed: %s", jid, exc)

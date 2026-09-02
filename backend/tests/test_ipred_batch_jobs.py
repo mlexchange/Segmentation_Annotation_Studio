@@ -132,3 +132,54 @@ def test_cancellation_stops_submitting_new_slices(monkeypatch: pytest.MonkeyPatc
     # With concurrency=1, cancellation is observed right after slice 0
     # completes — no later slice should ever have started.
     assert started == [0]
+
+
+def test_result_is_published_incrementally_while_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test: result.runs must be visible WHILE the job is still
+    `running`, not only once the whole volume finishes — otherwise a live
+    per-slice preview in the UI (Annotate's PixelClassifierPanel) has nothing
+    to show for slices that already predicted, no matter how far along the
+    job is (this is exactly what a user reported live: slice 2 of a 690-slice
+    apply job stayed blank even though 11 slices had already predicted)."""
+    def fake_preprocess(*, session_id, feature_setup_id, composition_id, slice_index, client):
+        time.sleep(0.03)
+        return {"feature_id": f"fid-{slice_index}"}
+
+    def fake_infer(*, session_id, model_id, feature_id, alpha, store_probabilities, client):
+        return {"run_id": f"run-{feature_id}"}
+
+    monkeypatch.setattr(ipred_client_mod, "preprocess", fake_preprocess)
+    monkeypatch.setattr(ipred_client_mod, "infer", fake_infer)
+    monkeypatch.setattr(ipred_client_mod, "delete_feature_bank", lambda feature_id, *, client: None)
+    monkeypatch.setenv("IPRED_APPLY_CONCURRENCY", "2")
+
+    n_slices = 8
+    jid = export_jobs.new_job("")
+    thread = threading.Thread(
+        target=ipred_batch_jobs.run_ipred_volume_apply_job,
+        kwargs=dict(
+            jid=jid, session_id="s1", model_id="m1", slice_indices=list(range(n_slices)),
+            composition_id=None, feature_setup_id=None, alpha=0.05,
+        ),
+        daemon=True,
+    )
+    thread.start()
+
+    saw_partial_progress = False
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        job = export_jobs.get_job(jid)
+        if job["state"] == "running" and job.get("result"):
+            n = len(job["result"].get("runs", {}))
+            if 0 < n < n_slices:
+                saw_partial_progress = True
+                break
+        if job["state"] in ("done", "error"):
+            break
+        time.sleep(0.005)
+    thread.join(timeout=10.0)
+
+    assert saw_partial_progress, "expected to observe a partial (running) result with some but not all slices done"
+    job = export_jobs.get_job(jid)
+    assert job["state"] == "done"
+    assert len(job["result"]["runs"]) == n_slices
