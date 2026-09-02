@@ -1,7 +1,7 @@
 /**
  * AnnotatePage — react-konva canvas workspace with sidebar tools.
  */
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router';
 import { DownloadSimple, FloppyDisk, ClockCounterClockwise, CircleDashed, ChartBar } from '@phosphor-icons/react';
 import { cn } from '@/lib/utils';
@@ -31,6 +31,7 @@ import PixelClassifierPanel from '@/components/annotate/PixelClassifierPanel';
 import AnnotationCanvas from '@/components/annotate/AnnotationCanvas';
 import { useFeatureChannels } from '@/hooks/useFeatureChannels';
 import { usePixelClassifier } from '@/hooks/usePixelClassifier';
+import { useExportJob } from '@/hooks/useExportJob';
 import { useFeatureManifold } from '@/hooks/useFeatureManifold';
 import { loadLabelPng, labelMapToPolygonShapes } from '@/lib/pixelClf';
 import { ipredRunCommitUrl } from '@/lib/ipredApi';
@@ -80,7 +81,7 @@ function StageSwitcher({ stage, onChange }: { stage: AnnotateStage; onChange: (s
 export default function AnnotatePage() {
   const navigate = useNavigate();
   const { source, kind, serverUri, meta, denoise, setDenoise } = useDatasetStore();
-  const { removeShapes, addShapes, addShapesAcrossSlices, byImage } = useAnnotationStore();
+  const { removeShapes, addShapes, addShapesAcrossSlices, byImage, splitBySlice, negativeSlices } = useAnnotationStore();
   const { selectedShapeIds, setSelectedShapeId, fillOpacity, setFillOpacity } = useToolStore();
   const { classes } = useClassStore();
 
@@ -291,6 +292,18 @@ export default function AnnotatePage() {
   // Fetch + vectorize each completed slice's commit PNG client-side, reusing the
   // same tracer as the single-slice commit — see Phase 4.5's plan for why this
   // stays client-side rather than porting polygon tracing to the ipred service.
+  //
+  // Committed in BATCHES rather than accumulated for the whole volume before
+  // one store write: on a large volume (hundreds-to-thousands of slices), the
+  // old accumulate-everything-then-one-write approach held every slice's
+  // vectorized shapes in memory at once, on top of per-slice PNG-decode/mask
+  // buffers that outpaced GC (only yielding every 4th slice), and was
+  // immediately followed by useDraftSync serializing the whole enlarged
+  // per-sample slice set — this was the actual cause of the reported browser
+  // OOM on volume-wide apply. Writing to the store every VOLUME_COMMIT_BATCH
+  // slices bounds peak memory to one batch and gives the browser a real GC
+  // window between batches (this does mean a multi-batch commit now creates
+  // more than one undo entry — an acceptable tradeoff for a job this size).
   const handleCommitVolumeApply = useCallback(async () => {
     if (!sourceKey) return;
     const result = clf.volumeApplyJob.result as { runs?: Record<string, string> } | null;
@@ -298,7 +311,8 @@ export default function AnnotatePage() {
     if (!runs || commitClassIds.length === 0) return;
     setVolumeApplyCommitting(true);
     try {
-      const bySlice: Record<number, Shape[]> = {};
+      const VOLUME_COMMIT_BATCH = 50;
+      let bySlice: Record<number, Shape[]> = {};
       let processed = 0;
       for (const [sliceKey, runId] of Object.entries(runs)) {
         const sliceIdx = Number(sliceKey);
@@ -311,8 +325,13 @@ export default function AnnotatePage() {
         });
         if (shapes.length) bySlice[sliceIdx] = shapes;
         processed += 1;
-        // Yield every few slices so vectorizing a large volume doesn't freeze the tab.
-        if (processed % 4 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+        // Yield every slice (not just every 4th) so the browser gets a real
+        // chance to garbage-collect the per-slice decode/mask buffers below.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (processed % VOLUME_COMMIT_BATCH === 0 && Object.keys(bySlice).length) {
+          addShapesAcrossSlices(sourceKey, bySlice);
+          bySlice = {};
+        }
       }
       if (Object.keys(bySlice).length) addShapesAcrossSlices(sourceKey, bySlice);
       clf.resetVolumeApplyJob();
@@ -320,6 +339,41 @@ export default function AnnotatePage() {
       setVolumeApplyCommitting(false);
     }
   }, [sourceKey, clf, byImage, commitClassIds, addShapesAcrossSlices]);
+
+  // "Push to Tiled + View in 3D" — a direct, one-click path from the iPred
+  // panel to the 3D view, instead of requiring the user to separately
+  // discover the Export modal's "Sync masks to Tiled" action first (that
+  // dependency wasn't obvious — see the plan doc). Rasterizes and writes
+  // this sample's ENTIRE current shape set (every slice, both origins) to
+  // Tiled's <source>__masks container, then jumps to /volume?mask=fast to
+  // auto-load it, mirroring DownloadModal's own "current sample" scope.
+  const maskSyncJob = useExportJob('mask-sync-view3d');
+  const navigatedAfterSyncRef = useRef(false);
+  const handleSyncToTiledAndView3D = useCallback(() => {
+    if (!source || !kind || kind !== 'tiled') {
+      window.alert('Pushing masks to Tiled only works for Tiled sources.');
+      return;
+    }
+    navigatedAfterSyncRef.current = false;
+    maskSyncJob.startMaskSync({
+      sources: [{
+        kind,
+        source,
+        server_uri: serverUri ?? null,
+        slices: byImage[sourceKey!] ?? {},
+        split_by_slice: splitBySlice[sourceKey!] ?? {},
+        negative_slices: negativeSlices[sourceKey!] ?? [],
+      }],
+      classes,
+    });
+  }, [source, kind, serverUri, sourceKey, byImage, splitBySlice, negativeSlices, classes, maskSyncJob]);
+
+  useEffect(() => {
+    if (maskSyncJob.state.status === 'done' && !navigatedAfterSyncRef.current) {
+      navigatedAfterSyncRef.current = true;
+      navigate('/volume?mask=fast');
+    }
+  }, [maskSyncJob.state.status, navigate]);
 
   const classLabelForId = useCallback(
     (classId: number) => {
@@ -576,6 +630,9 @@ export default function AnnotatePage() {
                 onCancelVolumeApply={() => { void handleCancelVolumeApply(); }}
                 onDismissVolumeApply={clf.resetVolumeApplyJob}
                 onTrainDeepModel={() => navigate('/train')}
+                onSyncToTiledAndView3D={handleSyncToTiledAndView3D}
+                syncingToTiled={maskSyncJob.state.status === 'running'}
+                syncToTiledError={maskSyncJob.state.status === 'error' ? maskSyncJob.state.error : null}
                 manifoldParams={manifold.params}
                 onManifoldParamsChange={manifold.setParams}
                 manifoldSampling={manifold.sampling}

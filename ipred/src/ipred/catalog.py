@@ -352,6 +352,35 @@ class Catalog:
             ).fetchone()
         return dict(row) if row else None
 
+    def delete_feature_bank(self, feature_id: str) -> str | None:
+        """Delete a feature-bank row and return its `blob_dir` for the caller
+        to remove from disk (this method does not touch the filesystem — it
+        only owns the DB row, matching every other method here).
+
+        Feature banks bake 32-64 full-resolution float32 PCA channels
+        (~1 GB per 2000x2000 slice, see `sam_embed.emb_grid_to_pca_channels`)
+        and were never evicted: a single interactive slice benefits from the
+        cache (re-predicting after a param tweak), but a volume-wide batch
+        job (Phase 4.5's "Apply across volume") touches every slice exactly
+        once, so there is nothing later in that job to reuse the cache for —
+        it just accumulates forever. 690 slices at ~1 GB each is enough to
+        fill a laptop's disk mid-job. Batch-apply calls this right after each
+        slice's inference completes; ordinary single-slice interactive use
+        (train/preprocess/infer outside a batch job) is untouched.
+
+        Returns None if the feature_id doesn't exist (already deleted, or a
+        bad id) — the caller should treat that as a no-op, not an error.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT blob_dir FROM feature_banks WHERE feature_id = ?",
+                (feature_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute("DELETE FROM feature_banks WHERE feature_id = ?", (feature_id,))
+        return row["blob_dir"]
+
     def insert_model(self, record: dict[str, Any]) -> None:
         """Insert a model row."""
         with self.connect() as conn:

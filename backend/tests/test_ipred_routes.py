@@ -159,16 +159,17 @@ async def test_batch_train_pools_slices_and_reports_done(monkeypatch: pytest.Mon
 async def test_batch_apply_tolerates_one_bad_slice(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST /batch/apply keeps going after one slice fails and reports it in result.errors."""
 
-    def _preprocess(*, session_id, feature_setup_id, composition_id, slice_index, array_ref=None):
+    def _preprocess(*, session_id, feature_setup_id, composition_id, slice_index, array_ref=None, client=None):
         if slice_index == 1:
             raise RuntimeError("boom")
         return {"feature_id": f"feat-{slice_index}"}
 
-    def _infer(*, session_id, model_id, feature_id, alpha):
+    def _infer(*, session_id, model_id, feature_id, alpha, store_probabilities=True, client=None):
         return {"run_id": f"run-{feature_id}"}
 
     monkeypatch.setattr(ipred_client_mod, "preprocess", _preprocess)
     monkeypatch.setattr(ipred_client_mod, "infer", _infer)
+    monkeypatch.setattr(ipred_client_mod, "delete_feature_bank", lambda feature_id, *, client=None: None)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(

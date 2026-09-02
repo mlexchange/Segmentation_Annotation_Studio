@@ -23,6 +23,8 @@ import { useQuery } from '@tanstack/react-query';
 import { Cube } from '@phosphor-icons/react';
 import { API_BASE } from '@/config';
 import { useDatasetStore } from '@/stores/datasetStore';
+import { useAnnotationStore } from '@/stores/annotationStore';
+import { buildSourceKey } from '@/lib/sourceKey';
 import { buildZarrUrl, describeUnavailable, type ZarrUnavailable } from '@/lib/zarrUrl';
 import type { ServerInfo } from '@/types/server';
 import VolumeViewer, { webGpuAvailability, type WebGpuViewerInstance } from '@/components/volume/VolumeViewer';
@@ -53,7 +55,9 @@ function Notice({ title, detail, hint }: { title: string; detail: string; hint?:
 }
 
 export default function VolumePage() {
-  const { kind, source, serverUri } = useDatasetStore();
+  const { kind, source, serverUri, meta } = useDatasetStore();
+  const byImage = useAnnotationStore((s) => s.byImage);
+  const sourceKey = source && kind ? buildSourceKey(kind as 'tiled' | 'local', source, serverUri) : null;
   const [bootError, setBootError] = useState<string | null>(null);
   const [viewerInstance, setViewerInstance] = useState<WebGpuViewerInstance | null>(null);
   // Bumped after a rebuild — folded into VolumeViewer's `key` below to force
@@ -150,6 +154,10 @@ export default function VolumePage() {
         source={source}
         serverUri={resolvedUri}
         autoLoadSlot={autoLoadSlot}
+        liveShapes={sourceKey ? byImage[sourceKey] : undefined}
+        imageWidth={meta?.width}
+        imageHeight={meta?.height}
+        nSlices={meta?.nSlices}
       />
       {node?.mode === 'sidecar' && source && (
         <div className="pointer-events-none absolute right-3 top-3 z-10">

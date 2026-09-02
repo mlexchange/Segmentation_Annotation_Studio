@@ -49,11 +49,20 @@ def _read_local(
     if suffix in {".tif", ".tiff"}:
         import tifffile
 
-        arr = tifffile.imread(str(path))
-    else:
-        from PIL import Image as PILImage
+        # Read exactly one PAGE, not the whole stack (`tifffile.imread` decodes
+        # every page up front). A batch-apply job over N slices previously
+        # decoded the entire stack N times — an O(N^2) cost that dominated
+        # "predict across all slices" wall-clock time on larger volumes.
+        with tifffile.TiffFile(str(path)) as tif:
+            n_pages = len(tif.pages)
+            if n_pages <= 1:
+                return _index_slice(np.asarray(tif.asarray()), slice_index)
+            idx = int(slice_index) if 0 <= int(slice_index) < n_pages else 0
+            page = np.asarray(tif.pages[idx].asarray())
+        return _index_slice(page, 0)
+    from PIL import Image as PILImage
 
-        arr = np.asarray(PILImage.open(path))
+    arr = np.asarray(PILImage.open(path))
     return _index_slice(np.asarray(arr), slice_index)
 
 
@@ -132,9 +141,27 @@ def _read_tiled(
         # Container of per-slice arrays (not a bare NHW/NHWC array node).
         keys = sorted(node)
         node = node[keys[int(slice_index)]]
-        slice_index = 0
-    data = np.asarray(node)
-    return _index_slice(data, slice_index)
+        return _index_slice(np.asarray(node), 0)
+
+    # A bare NHW/NHWC array node: index it BEFORE calling np.asarray, so only
+    # the requested slice is fetched/decoded over the wire — `np.asarray(node)`
+    # first (the previous behavior) pulls the ENTIRE stack for every single
+    # slice request, turning an N-slice batch-apply job into an O(N^2) read.
+    # `.shape` is cheap metadata (no data fetch), so it's safe to inspect
+    # before deciding whether/how to index — mirrors `_index_slice`'s own
+    # HWC-vs-NHW heuristic, applied to shape metadata instead of a realized
+    # array. Matches the working pattern in `backend/arrays.py: read_slice`.
+    shape = tuple(int(s) for s in node.shape)
+    if len(shape) <= 2:
+        return np.asarray(node)
+    if len(shape) == 3 and shape[-1] in (1, 3, 4) and (
+        shape[0] > 8 or shape[0] == shape[1]
+    ):
+        return np.asarray(node)  # HWC single image — nothing to index, it's the whole thing
+    # Genuine NHW/NHWC stack: node[idx] is Tiled's own lazy single-slice
+    # fetch — the whole reason this branch exists — so the result is already
+    # exactly one 2-D/HWC frame with no further slicing needed.
+    return np.asarray(node[int(slice_index)])
 
 
 def _index_slice(arr: np.ndarray, slice_index: int) -> np.ndarray:

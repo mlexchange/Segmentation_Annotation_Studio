@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import httpx
 
@@ -24,6 +25,30 @@ def ipred_url() -> str:
 
 def _client(timeout: float = 300.0) -> httpx.Client:
     return httpx.Client(base_url=ipred_url(), timeout=timeout)
+
+
+def new_shared_client(timeout: float = 300.0) -> httpx.Client:
+    """A `httpx.Client` a caller owns and reuses across many calls (e.g. one
+    per slice in a volume-wide batch-apply job), instead of the fresh
+    open/close-per-call `_client()` every other function here defaults to.
+    `httpx.Client` is documented safe for concurrent use from multiple
+    threads, so this is also what a thread-pooled batch job should share.
+    Caller is responsible for closing it (a `with` block or `.close()`).
+    """
+    return httpx.Client(base_url=ipred_url(), timeout=timeout)
+
+
+@contextmanager
+def _use_client(client: httpx.Client | None, timeout: float = 300.0) -> Iterator[httpx.Client]:
+    """Yield `client` if given (never closing it — the caller owns its
+    lifecycle), else open-and-close a fresh one exactly like every call site
+    here did before `client=` params existed. Keeps every function's
+    single-call default behavior unchanged for callers that don't pass one."""
+    if client is not None:
+        yield client
+        return
+    with _client(timeout=timeout) as owned:
+        yield owned
 
 
 def health() -> dict[str, Any]:
@@ -143,8 +168,10 @@ def preprocess(
     composition_id: str | None = None,
     slice_index: int = 0,
     array_ref: str | None = None,
+    client: httpx.Client | None = None,
 ) -> dict[str, Any]:
-    """POST /preprocess."""
+    """POST /preprocess. Pass `client` (see `new_shared_client`) to reuse a
+    connection across many calls instead of opening a fresh one each time."""
     body: dict[str, Any] = {
         "session_id": session_id,
         "slice_index": slice_index,
@@ -155,8 +182,18 @@ def preprocess(
         body["feature_setup_id"] = feature_setup_id
     if array_ref:
         body["array_ref"] = array_ref
-    with _client() as client:
-        r = client.post("/preprocess", json=body)
+    with _use_client(client) as c:
+        r = c.post("/preprocess", json=body)
+        r.raise_for_status()
+        return r.json()
+
+
+def delete_feature_bank(feature_id: str, *, client: httpx.Client | None = None) -> dict[str, Any]:
+    """DELETE /features/{id} — release a feature bank's disk blob once nothing
+    later in the current job needs it (see ipred_batch_jobs.py's volume-apply
+    job, the only caller)."""
+    with _use_client(client) as c:
+        r = c.delete(f"/features/{feature_id}")
         r.raise_for_status()
         return r.json()
 
@@ -223,16 +260,23 @@ def infer(
     model_id: str | None = None,
     feature_id: str | None = None,
     alpha: float = 0.05,
+    store_probabilities: bool = True,
+    client: httpx.Client | None = None,
 ) -> dict[str, Any]:
-    """POST /infer."""
-    with _client() as client:
-        r = client.post(
+    """POST /infer. `store_probabilities=False` skips persisting the run's
+    full probability array — see `train_infer.run_infer`'s doc for why a
+    volume-wide batch-apply job (the only caller that passes `False`) never
+    needs it. Pass `client` (see `new_shared_client`) to reuse a connection
+    across many calls instead of opening a fresh one each time."""
+    with _use_client(client) as c:
+        r = c.post(
             "/infer",
             json={
                 "session_id": session_id,
                 "model_id": model_id,
                 "feature_id": feature_id,
                 "alpha": alpha,
+                "store_probabilities": store_probabilities,
             },
         )
         r.raise_for_status()

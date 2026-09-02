@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -107,6 +108,7 @@ class InferBody(BaseModel):
     model_id: Optional[str] = None
     feature_id: Optional[str] = None
     alpha: float = 0.05
+    store_probabilities: bool = True
 
 
 class RethresholdBody(BaseModel):
@@ -347,6 +349,22 @@ def api_feature_channel(feature_id: str, index: int) -> Response:
     return FileResponse(path, media_type="image/png")
 
 
+@app.delete("/features/{feature_id}")
+def api_delete_feature_bank(feature_id: str) -> dict[str, Any]:
+    """Delete a feature bank (DB row + its on-disk blob dir).
+
+    For batch-apply jobs (Phase 4.5's "Apply across volume") to release each
+    slice's feature bank immediately after it's used — see
+    `Catalog.delete_feature_bank`'s doc for why this exists. Deleting an
+    already-gone or unknown feature_id is a no-op, not an error: cleanup
+    calls are best-effort and must never fail the job that triggered them.
+    """
+    blob_dir = get_catalog().delete_feature_bank(feature_id)
+    if blob_dir:
+        shutil.rmtree(blob_dir, ignore_errors=True)
+    return {"deleted": blob_dir is not None}
+
+
 @app.post("/train")
 def api_train(body: TrainBody) -> dict[str, Any]:
     """Train via trainer plugin."""
@@ -399,6 +417,7 @@ def api_infer(body: InferBody) -> dict[str, Any]:
             model_id=body.model_id,
             feature_id=body.feature_id,
             alpha=body.alpha,
+            store_probabilities=body.store_probabilities,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc

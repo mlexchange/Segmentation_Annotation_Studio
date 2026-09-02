@@ -3,7 +3,7 @@
  * Suggest-Labels manifold loop folded in and conformal coverage surfaced as
  * headline guidance (not a legend entry).
  */
-import { Brain, CaretLeft, CaretRight, CircleNotch, Compass, TreeStructure } from '@phosphor-icons/react';
+import { Brain, CaretLeft, CaretRight, CircleNotch, Compass, Cube, TreeStructure, WarningCircle } from '@phosphor-icons/react';
 import type { ClfParams, ClfPredictCounts, ClfTrainResult } from '@/hooks/usePixelClassifier';
 import type { ManifoldParams } from '@/hooks/useFeatureManifold';
 import { cn } from '@/lib/utils';
@@ -110,6 +110,14 @@ export interface PixelClassifierPanelProps {
   // on this sample becomes the training set, pre-selected there.
   onTrainDeepModel?: () => void;
 
+  // Push this sample's current shapes (every slice, both origins) to Tiled's
+  // <source>__masks container and jump straight to the 3D view's Fast
+  // (iPred) layer — the direct path that skips having to separately
+  // discover the Export modal's "Sync masks to Tiled" action first.
+  onSyncToTiledAndView3D?: () => void;
+  syncingToTiled?: boolean;
+  syncToTiledError?: string | null;
+
   // Suggest-labels (manifold), folded into the same loop instead of a separate panel.
   manifoldParams: ManifoldParams;
   onManifoldParamsChange: (p: ManifoldParams) => void;
@@ -174,6 +182,9 @@ export default function PixelClassifierPanel({
   onCancelVolumeApply,
   onDismissVolumeApply,
   onTrainDeepModel,
+  onSyncToTiledAndView3D,
+  syncingToTiled = false,
+  syncToTiledError = null,
   manifoldParams,
   onManifoldParamsChange,
   manifoldSampling,
@@ -477,6 +488,27 @@ export default function PixelClassifierPanel({
                   Dismiss
                 </button>
               </div>
+            </div>
+          )}
+
+          {onSyncToTiledAndView3D && annotatedSliceCount > 0 && (
+            <div className="flex flex-col gap-1">
+              <button
+                type="button"
+                onClick={onSyncToTiledAndView3D}
+                disabled={syncingToTiled}
+                title="Write this sample's current shapes to Tiled, then open the 3D view with the Fast (iPred) layer loaded"
+                className="flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border border-gray-200 bg-white text-gray-800 hover:bg-sky-50 hover:border-sky-300 transition-colors disabled:opacity-50"
+              >
+                {syncingToTiled ? <CircleNotch size={13} className="animate-spin" /> : <Cube size={13} />}
+                {syncingToTiled ? 'Pushing to Tiled…' : 'Push to Tiled + view in 3D'}
+              </button>
+              {syncToTiledError && (
+                <p className="flex items-start gap-1 text-[10px] text-red-600">
+                  <WarningCircle size={12} className="mt-0.5 shrink-0" />
+                  {syncToTiledError}
+                </p>
+              )}
             </div>
           )}
 

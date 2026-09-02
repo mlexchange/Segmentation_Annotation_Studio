@@ -6,6 +6,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -520,6 +521,28 @@ def run_train_multi_slice(
     )
 
 
+@lru_cache(maxsize=4)
+def _load_model_cached(trainer_id: str, blob_model_str: str) -> tuple[Any, Any, np.ndarray | None, np.ndarray | None]:
+    """Deserialize a trained model (+ its SAM PCA, if any) once and reuse it.
+
+    Model blob directories are never mutated in place — every training run
+    gets a fresh `uuid.uuid4()` model_id/blob_dir (see `run_train`/
+    `_save_trained_model`) — so caching by `(trainer_id, blob_dir)` can never
+    serve stale weights. Without this, a volume-wide "apply across all
+    slices" job (Phase 4.5) reloaded the CatBoost model and PCA from disk on
+    every single slice instead of once per job.
+    """
+    blob_model = Path(blob_model_str)
+    trainer = get_trainer(trainer_id)
+    handle = trainer.load(blob_model)
+    pca_mean = pca_comp = None
+    pca_path = blob_model / "sam_pca.npz"
+    if pca_path.is_file():
+        z = np.load(pca_path)
+        pca_mean, pca_comp = z["mean"], z["components"]
+    return trainer, handle, pca_mean, pca_comp
+
+
 def run_infer(
     catalog: Catalog,
     *,
@@ -528,8 +551,22 @@ def run_infer(
     feature_id: str | None = None,
     alpha: float = 0.05,
     row_chunk: int = 128,
+    store_probabilities: bool = True,
 ) -> dict[str, Any]:
-    """Full-image predict_proba + conformal maps; persist float16 proba."""
+    """Full-image predict_proba + conformal maps; persist float16 proba.
+
+    `store_probabilities=False` skips writing `proba.npy` to disk (the math
+    is unchanged — `proba` is still computed in memory to derive `commit`/
+    `status`/`membership`). For a volume-wide batch-apply job (Phase 4.5),
+    `proba.npy` is the single largest thing a run writes (a full H×W×K
+    float16 array) and is never read back by that flow — only `commit.png`
+    is (see `AnnotatePage.tsx`'s `handleCommitVolumeApply`). Leave this
+    `True` (the default) for interactive single-slice infer calls: it's what
+    `run_rethreshold`/`threshold_class_map` read back to let a user adjust
+    alpha or view a per-class heatmap after the fact — pointing either of
+    those at a run saved with `store_probabilities=False` raises
+    `FileNotFoundError`, by design.
+    """
     session = catalog.get_session(session_id)
     if session is None:
         raise KeyError(f"unknown session {session_id}")
@@ -544,13 +581,8 @@ def run_infer(
 
     blob_model = Path(model_row["blob_dir"])
     meta = json.loads((blob_model / "meta.json").read_text(encoding="utf-8"))
-    trainer = get_trainer(model_row["trainer_id"])
-    handle = trainer.load(blob_model)
+    trainer, handle, pca_mean, pca_comp = _load_model_cached(model_row["trainer_id"], str(blob_model))
     bank = load_feature_bank_arrays(bank_row["blob_dir"])
-    pca_mean = pca_comp = None
-    if (blob_model / "sam_pca.npz").is_file():
-        z = np.load(blob_model / "sam_pca.npz")
-        pca_mean, pca_comp = z["mean"], z["components"]
 
     class_ids = [int(c) for c in meta["class_ids"]]
     h, w, _ = bank["float_stack"].shape
@@ -585,7 +617,8 @@ def run_infer(
     run_id = uuid.uuid4().hex
     blob = project_blob_dir(session.project_id) / "runs" / run_id
     blob.mkdir(parents=True, exist_ok=True)
-    np.save(blob / "proba.npy", proba)
+    if store_probabilities:
+        np.save(blob / "proba.npy", proba)
     np.save(blob / "commit.npy", commit)
     np.save(blob / "status.npy", status)
     np.save(blob / "membership.npy", membership)

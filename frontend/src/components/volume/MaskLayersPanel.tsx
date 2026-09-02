@@ -6,20 +6,22 @@
  * that meaning ("fast" vs "deep", which Tiled container each comes from)
  * actually lives, kept out of the vendored viewer entirely.
  *
- * Both slots are Tiled-backed for now (`buildMaskZarrUrl`), pointed at the
- * two independent `<source>__masks` / `<source>__masks_deep` containers
- * `tiled_mask_sync.write_masks_to_tiled` writes (see its `container_suffix`
- * doc). A zero-latency, no-Tiled-round-trip live preview for the Fast slot
- * (rasterizing current Annotate-tab predictions client-side via
- * `loadMaskFromArray`) is a deliberately deferred follow-up — this repo has
- * no existing client-side volume-rasterization code to build on, unlike the
- * fork's `labelVolume.ts`/`volumeDims.ts`, which assume a server-side
- * downsampled-raw-volume endpoint this app's `/volume` page does not have
- * (it streams the real Tiled Zarr pyramid directly instead).
+ * Deep is always Tiled-backed (`buildMaskZarrUrl`), pointed at the
+ * `<source>__masks_deep` container `tiled_mask_sync.write_masks_to_tiled`
+ * writes (see its `container_suffix` doc) — there is no local equivalent for
+ * a from-scratch-trained model. Fast defaults to a zero-latency, no-network
+ * "Live" mode instead: `buildLiveMaskVolume` rasterizes the sample's CURRENT
+ * shapes (every slice, client-side) into a coarse class-id array and loads
+ * it via `loadMaskFromArray` — no "Sync masks to Tiled" step required first.
+ * Fast can still be pointed at the Tiled-backed `<source>__masks` container
+ * (the precise result, built by the real backend rasterizer) via its own
+ * toggle.
  */
 import { useEffect, useRef, useState } from 'react';
 import { Eye, EyeSlash, CircleNotch } from '@phosphor-icons/react';
 import { buildMaskZarrUrl } from '@/lib/zarrUrl';
+import { buildLiveMaskVolume } from '@/lib/volumeMaskPreview';
+import type { Shape } from '@/stores/annotationStore';
 import type { WebGpuViewerInstance } from './VolumeViewer';
 
 type MaskClasses = NonNullable<ReturnType<WebGpuViewerInstance['getMaskClasses']>>;
@@ -28,12 +30,17 @@ interface SlotConfig {
   slot: 0 | 1;
   label: string;
   suffix: '' | '_deep';
+  /** Only the Fast slot has a no-Tiled-round-trip option — Deep is always a
+   * from-scratch-trained model's saved output, nothing to rasterize live. */
+  canLive: boolean;
 }
 
 const SLOTS: SlotConfig[] = [
-  { slot: 0, label: 'Fast (iPred)', suffix: '' },
-  { slot: 1, label: 'Deep (dlsia)', suffix: '_deep' },
+  { slot: 0, label: 'Fast (iPred)', suffix: '', canLive: true },
+  { slot: 1, label: 'Deep (dlsia)', suffix: '_deep', canLive: false },
 ];
+
+type SourceMode = 'live' | 'tiled';
 
 interface SlotState {
   loading: boolean;
@@ -42,6 +49,8 @@ interface SlotState {
   enabled: boolean;
   opacity: number;
   classes: MaskClasses;
+  /** Ignored for slots where `canLive` is false. */
+  mode: SourceMode;
 }
 
 const initialSlotState: SlotState = {
@@ -51,6 +60,7 @@ const initialSlotState: SlotState = {
   enabled: true,
   opacity: 0.6,
   classes: [],
+  mode: 'live',
 };
 
 interface MaskLayersPanelProps {
@@ -62,9 +72,17 @@ interface MaskLayersPanelProps {
    * hand-off from Train/Annotate arrives here already knowing which result
    * the user just produced, so it shouldn't need a second manual click. */
   autoLoadSlot?: 0 | 1;
+  /** Current sample's shapes (every slice) for the Fast slot's "Live" mode —
+   * `byImage[sourceKey]` from `annotationStore`, undefined if none open. */
+  liveShapes?: Record<string, Shape[]>;
+  imageWidth?: number;
+  imageHeight?: number;
+  nSlices?: number;
 }
 
-export default function MaskLayersPanel({ instance, kind, source, serverUri, autoLoadSlot }: MaskLayersPanelProps) {
+export default function MaskLayersPanel({
+  instance, kind, source, serverUri, autoLoadSlot, liveShapes, imageWidth, imageHeight, nSlices,
+}: MaskLayersPanelProps) {
   const [state, setState] = useState<Record<0 | 1, SlotState>>({
     0: initialSlotState,
     1: initialSlotState,
@@ -86,13 +104,49 @@ export default function MaskLayersPanel({ instance, kind, source, serverUri, aut
     if (!instance || autoLoadSlot === undefined || autoLoadedFor.current === instance) return;
     autoLoadedFor.current = instance;
     const cfg = SLOTS.find((s) => s.slot === autoLoadSlot);
-    if (cfg) void load(cfg);
+    if (!cfg) return;
+    // A "View in 3D" hand-off means the user just pushed fresh data to
+    // Tiled (or is coming from a saved dlsia run) — always the Tiled-backed
+    // result here, regardless of whichever mode the Fast slot's toggle was
+    // last left on.
+    setState((s) => ({ ...s, [cfg.slot]: { ...s[cfg.slot], mode: 'tiled' } }));
+    void load(cfg, 'tiled');
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `load` is redefined every render but stable in effect: it only reads current instance/kind/source/serverUri via closure, matching the effect's own deps.
   }, [instance, autoLoadSlot]);
 
   if (!instance) return null;
 
-  const load = async (cfg: SlotConfig) => {
+  const load = async (cfg: SlotConfig, modeOverride?: SourceMode) => {
+    const mode = modeOverride ?? state[cfg.slot].mode;
+
+    if (cfg.canLive && mode === 'live') {
+      const volume = imageWidth && imageHeight && nSlices
+        ? buildLiveMaskVolume(liveShapes ?? {}, imageWidth, imageHeight, nSlices)
+        : null;
+      if (!volume) {
+        setState((s) => ({
+          ...s,
+          [cfg.slot]: { ...s[cfg.slot], error: 'Nothing annotated for this sample yet.', loading: false },
+        }));
+        return;
+      }
+      setState((s) => ({ ...s, [cfg.slot]: { ...s[cfg.slot], loading: true, error: null } }));
+      try {
+        instance.loadMaskFromArray(cfg.slot, volume.data, volume.dims);
+        const classes = await waitForClasses(instance, cfg.slot);
+        setState((s) => ({
+          ...s,
+          [cfg.slot]: { ...s[cfg.slot], loading: false, loaded: true, classes, error: null },
+        }));
+      } catch (err) {
+        setState((s) => ({
+          ...s,
+          [cfg.slot]: { ...s[cfg.slot], loading: false, error: err instanceof Error ? err.message : String(err) },
+        }));
+      }
+      return;
+    }
+
     const { url, reason } = buildMaskZarrUrl(kind, source, serverUri, cfg.suffix);
     if (!url) {
       setState((s) => ({ ...s, [cfg.slot]: { ...s[cfg.slot], error: reason ?? 'No source open', loading: false } }));
@@ -107,7 +161,7 @@ export default function MaskLayersPanel({ instance, kind, source, serverUri, aut
       const classes = await waitForClasses(instance, cfg.slot);
       setState((s) => ({
         ...s,
-        [cfg.slot]: { ...s[cfg.slot], loading: false, loaded: true, classes, error: classes.length === 0 ? 'Loaded, but no classes found (every voxel is background, or this dataset has no mask pushed yet).' : null },
+        [cfg.slot]: { ...s[cfg.slot], loading: false, loaded: true, classes, error: classes.length === 0 ? 'Loaded, but no classes found (every voxel is background, or nothing has been pushed to Tiled for this dataset yet).' : null },
       }));
     } catch (err) {
       setState((s) => ({
@@ -127,6 +181,10 @@ export default function MaskLayersPanel({ instance, kind, source, serverUri, aut
     for (const cls of state[cfg.slot].classes) {
       instance.setMaskClassOpacity(cfg.slot, cls.id, opacity);
     }
+  };
+
+  const setMode = (cfg: SlotConfig, mode: SourceMode) => {
+    setState((s) => ({ ...s, [cfg.slot]: { ...s[cfg.slot], mode, error: null } }));
   };
 
   const toggleClass = (cfg: SlotConfig, classId: number) => {
@@ -171,6 +229,27 @@ export default function MaskLayersPanel({ instance, kind, source, serverUri, aut
                 </button>
               )}
             </div>
+
+            {cfg.canLive && !s.loaded && (
+              <div className="mb-2 flex overflow-hidden rounded border border-sky-800/60 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => setMode(cfg, 'live')}
+                  title="Rasterize this sample's current shapes directly in the browser — no Tiled sync needed, updates instantly"
+                  className={`flex-1 py-1 ${s.mode === 'live' ? 'bg-sky-600 text-white' : 'bg-transparent text-sky-300 hover:bg-sky-900/60'}`}
+                >
+                  Live
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode(cfg, 'tiled')}
+                  title="Load the precise result from Tiled — requires Export → Sync masks to Tiled (or the iPred panel's Push to Tiled button) first"
+                  className={`flex-1 py-1 ${s.mode === 'tiled' ? 'bg-sky-600 text-white' : 'bg-transparent text-sky-300 hover:bg-sky-900/60'}`}
+                >
+                  Tiled
+                </button>
+              </div>
+            )}
 
             {s.error && <p className="mb-2 text-xs text-amber-300">{s.error}</p>}
 
