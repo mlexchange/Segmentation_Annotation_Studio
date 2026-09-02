@@ -2,6 +2,7 @@
 import numpy as np
 
 from mask_pyramid import build_mask_pyramid, majority_downsample
+import tiff_stack_source as tss
 
 
 def test_majority_downsample_picks_the_more_frequent_class():
@@ -68,3 +69,30 @@ def test_build_mask_pyramid_generates_coarser_levels_for_a_large_volume():
         assert levels[level["path"]].dtype == np.uint8
         # Downsampled level must only contain class ids actually present.
         assert set(np.unique(levels[level["path"]])).issubset({0, 1})
+
+
+def test_write_pyramid_store_scopes_by_key_not_shared(monkeypatch, tmp_path):
+    """Regression test for the bug where every mask sync (any dataset, iPred
+    or dlsia) wrote to the same on-disk path because register_mask_pyramid
+    always passed the literal "semantic" as write_pyramid_store's key —
+    Tiled's per-container metadata differed but the actual pixel data on
+    disk was shared and silently clobbered by whichever sync ran last.
+    """
+    monkeypatch.setenv("VOLUME_CACHE_DIR", str(tmp_path))
+
+    fast = np.zeros((1, 2, 2), dtype=np.uint8)
+    fast[:] = 1
+    deep = np.zeros((1, 2, 2), dtype=np.uint8)
+    deep[:] = 2
+
+    fast_path = tss.write_pyramid_store("sample__masks", {"scale0": fast})
+    deep_path = tss.write_pyramid_store("sample__masks_deep", {"scale0": deep})
+
+    assert fast_path != deep_path
+
+    import zarr
+
+    fast_readback = np.asarray(zarr.open_group(str(fast_path), mode="r")["scale0"][:])
+    deep_readback = np.asarray(zarr.open_group(str(deep_path), mode="r")["scale0"][:])
+    assert np.all(fast_readback == 1)
+    assert np.all(deep_readback == 2)

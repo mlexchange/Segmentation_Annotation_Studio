@@ -81,7 +81,9 @@ def build_mask_pyramid(semantic: np.ndarray) -> tuple[dict[str, np.ndarray], lis
     return levels, generated
 
 
-def register_mask_pyramid(semantic: np.ndarray, key: str, container: Any) -> dict[str, Any]:
+def register_mask_pyramid(
+    semantic: np.ndarray, key: str, container: Any, *, cache_key: str,
+) -> dict[str, Any]:
     """Build and register *semantic* (a ``(z, y, x)`` uint8 class-id volume) as
     a real OME-NGFF multiscale node named *key* inside *container* (the
     ``<source>__masks`` container ``tiled_mask_sync`` already manages).
@@ -93,6 +95,21 @@ def register_mask_pyramid(semantic: np.ndarray, key: str, container: Any) -> dic
     way it already serves the primary volume's pyramid — just downsampled by
     majority vote instead of mean.
 
+    *key* only names the Tiled sub-node under *container* (always
+    ``"semantic"`` today) — it is NOT unique across datasets or producers.
+    *cache_key* is what actually scopes the on-disk sidecar
+    ``write_pyramid_store`` writes to (``pyramid_cache_root() / cache_key``),
+    and MUST be globally unique per (source, mask producer) — e.g. the
+    already-unique ``<stem>__masks<suffix>`` container name. Passing a
+    constant here (this function's own bug, previously always ``"semantic"``)
+    means every mask sync for every dataset and every producer (iPred vs
+    dlsia) silently overwrites the same on-disk pyramid file: Tiled's
+    per-container metadata stays correct (it lives in Tiled's own DB), but
+    the actual pixel data every such container's registration points at is
+    the same shared file, so whichever sync ran last "wins" for everyone —
+    exactly like ``build_volume`` already keys its own sidecar by the
+    source's stem, which this must match to avoid the same class of bug.
+
     Replaces any previous registration for *key* — a re-sync must refresh the
     pyramid, not fail or accumulate duplicates, matching ``build_volume``'s
     same rule for the primary volume.
@@ -102,7 +119,7 @@ def register_mask_pyramid(semantic: np.ndarray, key: str, container: Any) -> dic
     import ingest as ingest_mod
 
     levels, generated = build_mask_pyramid(semantic)
-    sidecar = tss.write_pyramid_store(key, levels)
+    sidecar = tss.write_pyramid_store(cache_key, levels)
 
     if key in ingest_mod._child_keys(container):
         container.delete_contents(key, recursive=True, external_only=False)

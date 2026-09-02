@@ -292,7 +292,9 @@ def write_masks_to_tiled(
     # actually open this as a Zarr store instead of rejecting it for
     # "missing multiscales". Only `semantic` needs this: it's the one array
     # the viewer's single combined class-id mask texture reads.
-    mask_pyramid.register_mask_pyramid(merged["semantic"], key="semantic", container=container)
+    mask_pyramid.register_mask_pyramid(
+        merged["semantic"], key="semantic", container=container, cache_key=container_key,
+    )
     for name, vol in merged["class_vols"].items():
         container.write_array(
             vol, key=_safe_name(name), dims=dims,
