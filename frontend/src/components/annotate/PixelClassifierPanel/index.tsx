@@ -100,11 +100,24 @@ export interface PixelClassifierPanelProps {
   volumeApplying: boolean;
   volumeApplyProgress: { done: number; total: number } | null;
   volumeApplyResult: { runCount: number; errorCount: number; cancelled: boolean } | null;
-  volumeApplyCommitting: boolean;
   onApplyToVolume: () => void;
   onCommitVolumeApply: () => void;
   onCancelVolumeApply: () => void;
   onDismissVolumeApply: () => void;
+
+  // The slice on screen has an un-vectorized predicted region (a
+  // predictedRasterStore pointer, set by "Commit predicted shapes" — see
+  // AnnotatePage's handleCommitVolumeApply) that's only ever shown as a
+  // raster overlay until explicitly turned into editable Shape[].
+  hasPredictedPointerOnCurrentSlice: boolean;
+  vectorizingSlice: boolean;
+  onMakeSliceEditable: () => void;
+  // True when this sample has ANY committed-but-not-yet-vectorized predicted
+  // pointer, on any slice — annotatedSliceCount alone (real shapes only,
+  // correctly so for multi-slice training) would otherwise hide "Push to
+  // Tiled" entirely for a sample whose only committed content is still
+  // pointers, even though there's real predicted content to push.
+  hasAnyPredictedPointers: boolean;
 
   // Hand-off to the deep-training tab: the iPred annotation work already done
   // on this sample becomes the training set, pre-selected there.
@@ -114,9 +127,16 @@ export interface PixelClassifierPanelProps {
   // <source>__masks container and jump straight to the 3D view's Fast
   // (iPred) layer — the direct path that skips having to separately
   // discover the Export modal's "Sync masks to Tiled" action first.
-  onSyncToTiledAndView3D?: () => void;
+  // Split into two independent actions — a combined "push + navigate" used
+  // to force you onto the 3D page (and into "Build Volume" if the dataset's
+  // pyramid didn't exist yet) with no way back to Annotate short of the
+  // browser's own back button. Pushing to Tiled no longer navigates at all;
+  // viewing in 3D no longer requires a push to have just happened.
+  onSyncToTiled?: () => void;
   syncingToTiled?: boolean;
   syncToTiledError?: string | null;
+  syncedToTiled?: boolean;
+  onViewIn3D?: () => void;
 
   // Suggest-labels (manifold), folded into the same loop instead of a separate panel.
   manifoldParams: ManifoldParams;
@@ -176,15 +196,20 @@ export default function PixelClassifierPanel({
   volumeApplying,
   volumeApplyProgress,
   volumeApplyResult,
-  volumeApplyCommitting,
   onApplyToVolume,
   onCommitVolumeApply,
   onCancelVolumeApply,
   onDismissVolumeApply,
+  hasPredictedPointerOnCurrentSlice,
+  vectorizingSlice,
+  onMakeSliceEditable,
+  hasAnyPredictedPointers,
   onTrainDeepModel,
-  onSyncToTiledAndView3D,
+  onSyncToTiled,
   syncingToTiled = false,
   syncToTiledError = null,
+  syncedToTiled = false,
+  onViewIn3D,
   manifoldParams,
   onManifoldParamsChange,
   manifoldSampling,
@@ -472,13 +497,12 @@ export default function PixelClassifierPanel({
               <div className="flex gap-1">
                 <button
                   type="button"
-                  disabled={volumeApplyCommitting || volumeApplyResult.runCount === 0}
+                  disabled={volumeApplyResult.runCount === 0}
                   onClick={onCommitVolumeApply}
+                  title="Instant — records a lightweight pointer per slice rather than vectorizing every slice into shapes up front. Use 'Make this slice editable' on a specific slice when you actually want to edit its predicted regions."
                   className="flex-1 py-1 rounded-md text-[10px] font-medium bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50"
                 >
-                  {volumeApplyCommitting
-                    ? 'Committing…'
-                    : `Commit predicted shapes (${commitClassIds.length} class${commitClassIds.length === 1 ? '' : 'es'})`}
+                  {`Commit predicted shapes (${commitClassIds.length} class${commitClassIds.length === 1 ? '' : 'es'})`}
                 </button>
                 <button
                   type="button"
@@ -491,18 +515,48 @@ export default function PixelClassifierPanel({
             </div>
           )}
 
-          {onSyncToTiledAndView3D && annotatedSliceCount > 0 && (
-            <div className="flex flex-col gap-1">
+          {hasPredictedPointerOnCurrentSlice && (
+            <div className="flex flex-col gap-1 rounded border border-amber-200 bg-amber-50/60 p-1.5 text-[10px] text-gray-700">
+              <p>This slice's predicted regions are shown but not yet editable.</p>
               <button
                 type="button"
-                onClick={onSyncToTiledAndView3D}
-                disabled={syncingToTiled}
-                title="Write this sample's current shapes to Tiled, then open the 3D view with the Fast (iPred) layer loaded"
-                className="flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border border-gray-200 bg-white text-gray-800 hover:bg-sky-50 hover:border-sky-300 transition-colors disabled:opacity-50"
+                disabled={vectorizingSlice}
+                onClick={onMakeSliceEditable}
+                className="py-1 rounded-md text-[10px] font-medium bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50"
               >
-                {syncingToTiled ? <CircleNotch size={13} className="animate-spin" /> : <Cube size={13} />}
-                {syncingToTiled ? 'Pushing to Tiled…' : 'Push to Tiled + view in 3D'}
+                {vectorizingSlice ? 'Vectorizing…' : 'Make this slice editable'}
               </button>
+            </div>
+          )}
+
+          {onSyncToTiled && (annotatedSliceCount > 0 || hasAnyPredictedPointers) && (
+            <div className="flex flex-col gap-1">
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  onClick={onSyncToTiled}
+                  disabled={syncingToTiled}
+                  title="Write this sample's current shapes to Tiled — stays on this tab"
+                  className="flex flex-1 items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border border-gray-200 bg-white text-gray-800 hover:bg-sky-50 hover:border-sky-300 transition-colors disabled:opacity-50"
+                >
+                  {syncingToTiled && <CircleNotch size={13} className="animate-spin" />}
+                  {syncingToTiled ? 'Pushing…' : 'Push to Tiled'}
+                </button>
+                {onViewIn3D && (
+                  <button
+                    type="button"
+                    onClick={onViewIn3D}
+                    title="Open the 3D view with the Fast (iPred) layer — does not push anything first; use Push to Tiled beforehand if this sample's shapes have changed"
+                    className="flex flex-1 items-center justify-center gap-1.5 py-1.5 rounded-md text-xs border border-gray-200 bg-white text-gray-800 hover:bg-sky-50 hover:border-sky-300 transition-colors"
+                  >
+                    <Cube size={13} />
+                    View in 3D
+                  </button>
+                )}
+              </div>
+              {syncedToTiled && !syncingToTiled && (
+                <p className="text-[10px] text-emerald-600">Pushed to Tiled.</p>
+              )}
               {syncToTiledError && (
                 <p className="flex items-start gap-1 text-[10px] text-red-600">
                   <WarningCircle size={12} className="mt-0.5 shrink-0" />

@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { useIpredStore } from '@/stores/ipredStore';
+import { usePredictedRasterStore } from '@/stores/predictedRasterStore';
 import type { Shape } from '@/stores/annotationStore';
 import { useExportJob } from '@/hooks/useExportJob';
 import {
@@ -459,9 +460,23 @@ export function usePixelClassifier({
   // NOT a proba-channel preview: batch-apply runs are created with
   // store_probabilities=false (ipred_batch_jobs.py's `_apply_one_slice`), so
   // there is no proba.npy to load for these run ids — only commit/status.
+  // Reactive: must re-render this effect the instant "Commit predicted
+  // shapes" writes a pointer, not only on the next slice change — a plain
+  // `usePredictedRasterStore.getState()` read wouldn't re-fire the effect
+  // below when only the store (not sliceIndex/job result) changes.
+  const committedRunIdForSlice = usePredictedRasterStore(
+    (s) => (resetKey ? s.bySource[resetKey]?.[String(sliceIndex)]?.runId : undefined) ?? null,
+  );
+
   useEffect(() => {
     const result = volumeApplyJobHook.state.result as { runs?: Record<string, string> } | null;
-    const targetRunId = result?.runs?.[String(sliceIndex)] ?? null;
+    // Prefer the live job's own runs (covers "still running" and "just
+    // finished, not yet committed"); once "Commit predicted shapes" resets
+    // the job (see AnnotatePage's handleCommitVolumeApply), that map is gone
+    // and the durable predictedRasterStore pointer — set by Commit itself —
+    // becomes the only remaining source, so the SAME overlay keeps working
+    // after commit without ever having vectorized anything into Shape[].
+    const targetRunId = result?.runs?.[String(sliceIndex)] ?? committedRunIdForSlice;
     if (!targetRunId || targetRunId === volumeApplyPreviewRunIdRef.current) return;
     let cancelled = false;
     volumeApplyPreviewRunIdRef.current = targetRunId;
@@ -491,7 +506,7 @@ export function usePixelClassifier({
     return () => {
       cancelled = true;
     };
-  }, [sliceIndex, volumeApplyJobHook.state.result]);
+  }, [sliceIndex, volumeApplyJobHook.state.result, committedRunIdForSlice]);
 
   const predict = useCallback(
     async (_shapes: Shape[]) => {

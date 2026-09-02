@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router';
 import { DownloadSimple, X, CheckCircle, WarningCircle, Cube } from '@phosphor-icons/react';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
+import { usePredictedRasterStore } from '@/stores/predictedRasterStore';
 import { useClassStore } from '@/stores/classStore';
 import { useRatingStore } from '@/stores/ratingStore';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -59,6 +60,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
   const navigate = useNavigate();
   const { source, kind, serverUri, currentSlice } = useDatasetStore();
   const { byImage, splitBySlice, negativeSlices } = useAnnotationStore();
+  const predictedPointers = usePredictedRasterStore((s) => s.bySource);
   const { classes } = useClassStore();
   const ratings = useRatingStore((s) => s.ratings);
   const annotatorName = useSettingsStore((s) => s.annotatorName);
@@ -98,6 +100,19 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
       const split_by_slice = scope === 'slice' ? (allSplits[cur] ? { [cur]: allSplits[cur] } : {}) : allSplits;
       const negative_slices = scope === 'slice' ? allNeg.filter((k) => String(k) === cur) : allNeg;
 
+      // Un-vectorized predicted pointers (see predictedRasterStore) for this
+      // sample — only relevant to mask-sync (build_mask_volumes fetches
+      // their commit.png directly); COCO export ignores this field today,
+      // same as before. "Current slice only" keeps just the one pointer
+      // matching cur, mirroring how slices/negative_slices are scoped above.
+      const allPredicted = predictedPointers[sk] ?? {};
+      const predicted_slices = Object.fromEntries(
+        Object.entries(allPredicted)
+          .filter(([k]) => (scope === 'slice' ? k === cur : true))
+          .filter(([k]) => !(slices[k]?.length))
+          .map(([k, p]) => [k, { run_id: p.runId, class_ids: p.classIds }]),
+      );
+
       return [{
         kind,
         source,
@@ -105,6 +120,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
         slices,
         split_by_slice,
         negative_slices,
+        predicted_slices,
       }];
     }
 

@@ -25,11 +25,28 @@ import numpy as np
 
 import arrays as arrays_mod
 import export_jobs
+import ipred_client
 import mask_pyramid
 from coco_export import _safe_name, shape_to_mask
 from tiled_clients import api_key_for_uri, get_tiled_client
 
 logger = logging.getLogger(__name__)
+
+
+def _read_predicted_label_map(run_id: str) -> np.ndarray:
+    """Fetch an ipred run's commit.png and decode it into the same ``(H, W)``
+    uint8 array shape a rasterized shape would produce — pixel value is the
+    raw frontend classId directly (ipred's own convention, matching the
+    frontend's ``labelMapToPolygonShapes``), NOT yet remapped to this
+    export's legend ids; the caller does that remap the same way it already
+    does for real shapes.
+    """
+    import io
+
+    from PIL import Image
+
+    png_bytes = ipred_client.run_commit_png(run_id)
+    return np.asarray(Image.open(io.BytesIO(png_bytes)))
 
 
 def _category_maps(classes: list[Any]) -> tuple[dict[int, int], dict[int, str], list[dict[str, Any]]]:
@@ -57,15 +74,26 @@ def build_mask_volumes(
     there are no slices to write. ``semantic`` is ``(n,H,W)`` uint8 (class index,
     0=bg); ``class_vols`` maps class label → ``(n,H,W)`` uint8 (0/255). Slices are
     every annotated key plus any ``negative_slices`` (emitted as all-zero frames
-    for hard negatives), in sorted numeric order.
+    for hard negatives) plus any ``predicted_slices`` key not already covered by
+    real shapes, in sorted numeric order.
+
+    ``predicted_slices`` (see :class:`schemas.PredictedSlicePointer`) lets an
+    un-vectorized iPred volume-apply result go straight into the mask volume —
+    fetching its commit.png from the ipred service and rasterizing THAT,
+    instead of requiring the frontend to first trace it into polygon shapes
+    just so this function can immediately rasterize them back into a mask.
+    A slice with real shapes always wins over its predicted pointer (matches
+    the frontend's own precedence in ``handleCommitVolumeApply``/
+    `usePredictedRasterStore`).
     """
     h, w = int(meta["height"]), int(meta["width"])
     cat_id_map, cat_id_to_name, legend = _category_maps(classes)
 
     slices: dict[str, list[dict[str, Any]]] = item.slices or {}
     neg = {str(k) for k in (item.negative_slices or [])}
+    predicted: dict[str, Any] = getattr(item, "predicted_slices", None) or {}
     keys = sorted(
-        {k for k, shapes in slices.items() if shapes} | neg,
+        {k for k, shapes in slices.items() if shapes} | neg | {k for k, p in predicted.items() if p},
         key=lambda k: int(k),
     )
     if not keys:
@@ -78,14 +106,27 @@ def build_mask_volumes(
     for key in keys:
         label = np.zeros((h, w), dtype=np.uint8)
         acc: dict[str, np.ndarray] = {name: np.zeros((h, w), dtype=bool) for name in class_names}
-        for shape in slices.get(key, []):
-            shape_dict = shape if isinstance(shape, dict) else shape.model_dump()
-            mask = shape_to_mask(shape_dict, h, w)
-            if float(mask.sum()) < 1:
-                continue
-            cat_id = cat_id_map.get(int(shape_dict.get("classId", 1)), 1)
-            label[mask] = cat_id
-            acc[cat_id_to_name.get(cat_id, "")] |= mask
+        shapes_here = slices.get(key, [])
+        if shapes_here:
+            for shape in shapes_here:
+                shape_dict = shape if isinstance(shape, dict) else shape.model_dump()
+                mask = shape_to_mask(shape_dict, h, w)
+                if float(mask.sum()) < 1:
+                    continue
+                cat_id = cat_id_map.get(int(shape_dict.get("classId", 1)), 1)
+                label[mask] = cat_id
+                acc[cat_id_to_name.get(cat_id, "")] |= mask
+        elif key in predicted and predicted[key]:
+            pointer = predicted[key]
+            run_id = pointer["run_id"] if isinstance(pointer, dict) else pointer.run_id
+            raw = _read_predicted_label_map(run_id)
+            for raw_id in np.unique(raw):
+                if raw_id == 0:
+                    continue
+                cat_id = cat_id_map.get(int(raw_id), 1)
+                mask = raw == raw_id
+                label[mask] = cat_id
+                acc[cat_id_to_name.get(cat_id, "")] |= mask
         sem_list.append(label)
         for name in class_names:
             class_lists[name].append((acc[name] * 255).astype(np.uint8))

@@ -1,7 +1,12 @@
 """Unit tests for tiled_mask_sync.build_mask_volumes (pure rasterization → volumes)."""
-import numpy as np
+import io
 
-from schemas import AnnotationClass, ExportSourceItem
+import numpy as np
+import pytest
+from PIL import Image as PILImage
+
+import tiled_mask_sync
+from schemas import AnnotationClass, ExportSourceItem, PredictedSlicePointer
 from tiled_mask_sync import build_mask_volumes, merge_mask_volumes
 
 H = W = 32
@@ -65,6 +70,63 @@ def test_negative_slices_emitted_as_zero_frames():
 def test_returns_none_without_slices():
     item = ExportSourceItem(kind="tiled", source="browse/ds/img", slices={})
     assert build_mask_volumes(item, _classes(), {"height": H, "width": W}) is None
+
+
+def _fake_commit_png(raw_label_map: np.ndarray) -> bytes:
+    buf = io.BytesIO()
+    PILImage.fromarray(raw_label_map, mode="L").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_predicted_slices_reads_straight_from_the_run_commit_png(monkeypatch: pytest.MonkeyPatch):
+    """Regression test for the lazy-vectorization plan item: a slice with no
+    real shapes but a predicted-slice pointer must be rasterized directly
+    from the ipred run's commit.png (fetched server-side), never requiring
+    the frontend to have vectorized it into polygon shapes first."""
+    raw = np.zeros((H, W), dtype=np.uint8)
+    raw[2:6, 2:6] = 10  # raw frontend classId, matching AnnotationClass(classId=10, "Cell")
+    calls: list[str] = []
+
+    def fake_run_commit_png(run_id: str) -> bytes:
+        calls.append(run_id)
+        assert run_id == "run-abc"
+        return _fake_commit_png(raw)
+
+    monkeypatch.setattr(tiled_mask_sync.ipred_client, "run_commit_png", fake_run_commit_png)
+
+    item = ExportSourceItem(
+        kind="tiled", source="browse/ds/img", slices={},
+        predicted_slices={"7": PredictedSlicePointer(run_id="run-abc", class_ids=[10, 20])},
+    )
+    vols = build_mask_volumes(item, _classes(), {"height": H, "width": W})
+
+    assert vols is not None
+    assert calls == ["run-abc"]
+    assert vols["slice_indices"] == [7]
+    assert vols["semantic"][0, 3, 3] == 1  # remapped from raw classId 10 -> legend id 1 (Cell)
+    assert vols["class_vols"]["Cell"][0, 3, 3] == 255
+    assert vols["class_vols"]["Wall"][0].sum() == 0
+
+
+def test_real_shapes_win_over_a_predicted_pointer_for_the_same_slice(monkeypatch: pytest.MonkeyPatch):
+    """A slice already vectorized/edited into real shapes must never fall
+    back to its (possibly stale) predicted pointer — matches the frontend's
+    own precedence in handleCommitVolumeApply/predictedRasterStore."""
+    def fake_run_commit_png(run_id: str) -> bytes:
+        raise AssertionError("must not fetch commit.png when real shapes already cover this slice")
+
+    monkeypatch.setattr(tiled_mask_sync.ipred_client, "run_commit_png", fake_run_commit_png)
+
+    slices = {"7": [{"id": "a", "kind": "rectangle", "classId": 20, "x": 1, "y": 1, "w": 3, "h": 3}]}
+    item = ExportSourceItem(
+        kind="tiled", source="browse/ds/img", slices=slices,
+        predicted_slices={"7": PredictedSlicePointer(run_id="run-abc", class_ids=[10, 20])},
+    )
+    vols = build_mask_volumes(item, _classes(), {"height": H, "width": W})
+
+    assert vols is not None
+    assert vols["slice_indices"] == [7]
+    assert vols["semantic"][0].max() == 2  # Wall (classId 20), from the real shape — not the pointer
 
 
 def _volumes(slices, negatives=None):

@@ -7,6 +7,7 @@ import { DownloadSimple, FloppyDisk, ClockCounterClockwise, CircleDashed, ChartB
 import { cn } from '@/lib/utils';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
+import { usePredictedRasterStore } from '@/stores/predictedRasterStore';
 import { useToolStore } from '@/stores/toolStore';
 import { useClassStore } from '@/stores/classStore';
 import { useDraftSync } from '@/hooks/useDraftSync';
@@ -221,7 +222,8 @@ export default function AnnotatePage() {
   // ---- Batch iPred: multi-slice train + whole-volume apply ----
   const [trainAcrossSlices, setTrainAcrossSlices] = useState(false);
   const [commitClassIds, setCommitClassIds] = useState<number[]>([]);
-  const [volumeApplyCommitting, setVolumeApplyCommitting] = useState(false);
+  const { setPointers: setPredictedPointers, clearSlice: clearPredictedSlice } = usePredictedRasterStore();
+  const predictedPointers = usePredictedRasterStore((s) => s.bySource);
 
   // Every non-empty slice of this sample — the pool for "train across all
   // annotated slices" and the source of truth for `annotatedSliceCount`.
@@ -289,72 +291,94 @@ export default function AnnotatePage() {
     await fetch(`${API_BASE}/api/export/cancel/${jobId}`, { method: 'POST' });
   }, [clf.volumeApplyJob.jobId]);
 
-  // Fetch + vectorize each completed slice's commit PNG client-side, reusing the
-  // same tracer as the single-slice commit — see Phase 4.5's plan for why this
-  // stays client-side rather than porting polygon tracing to the ipred service.
+  // "Commit predicted shapes" no longer eagerly fetches + vectorizes every
+  // slice's commit.png into real Shape[] — that was the direct cause of the
+  // reported 297MB-draft/browser-OOM incident (139,004 shapes from one
+  // 690-slice volume-apply commit, 98.8% predicted-origin, all landing in
+  // the autosaved draft whether anyone ever looked at them or not).
   //
-  // Committed in BATCHES rather than accumulated for the whole volume before
-  // one store write: on a large volume (hundreds-to-thousands of slices), the
-  // old accumulate-everything-then-one-write approach held every slice's
-  // vectorized shapes in memory at once, on top of per-slice PNG-decode/mask
-  // buffers that outpaced GC (only yielding every 4th slice), and was
-  // immediately followed by useDraftSync serializing the whole enlarged
-  // per-sample slice set — this was the actual cause of the reported browser
-  // OOM on volume-wide apply. Writing to the store every VOLUME_COMMIT_BATCH
-  // slices bounds peak memory to one batch and gives the browser a real GC
-  // window between batches (this does mean a multi-batch commit now creates
-  // more than one undo entry — an acceptable tradeoff for a job this size).
-  const handleCommitVolumeApply = useCallback(async () => {
+  // Instead this just records a lightweight pointer per slice
+  // (predictedRasterStore — {runId, classIds}, tens of bytes, NOT part of
+  // annotationStore/useDraftSync's autosave). The existing Predictions layer
+  // already renders a pointer's commit.png directly (usePixelClassifier's
+  // live-preview effect resolves it the same way it resolves a still-running
+  // job's per-slice result), so nothing is lost visually — a slice only ever
+  // becomes real, editable Shape[] when the user explicitly vectorizes it
+  // (see handleMakeSliceEditable below), one slice at a time.
+  //
+  // Slices that already have real shapes are left alone: creating a pointer
+  // for an already-annotated slice would show the run's raw (unedited)
+  // commit.png overlapping hand-drawn or already-vectorized content — the
+  // "make editable" path is what merges predicted-into-existing correctly
+  // (via preserveShapes), not this bulk commit step.
+  const handleCommitVolumeApply = useCallback(() => {
     if (!sourceKey) return;
     const result = clf.volumeApplyJob.result as { runs?: Record<string, string> } | null;
     const runs = result?.runs;
     if (!runs || commitClassIds.length === 0) return;
-    setVolumeApplyCommitting(true);
-    try {
-      const VOLUME_COMMIT_BATCH = 50;
-      let bySlice: Record<number, Shape[]> = {};
-      let processed = 0;
-      for (const [sliceKey, runId] of Object.entries(runs)) {
-        const sliceIdx = Number(sliceKey);
-        const { data, width, height } = await loadLabelPng(ipredRunCommitUrl(runId));
-        const existing = byImage[sourceKey]?.[sliceKey] ?? [];
-        const shapes = labelMapToPolygonShapes(data, width, height, commitClassIds, {
-          minRegion: 64,
-          preserveShapes: existing,
-          origin: 'predicted',
-        });
-        if (shapes.length) bySlice[sliceIdx] = shapes;
-        processed += 1;
-        // Yield every slice (not just every 4th) so the browser gets a real
-        // chance to garbage-collect the per-slice decode/mask buffers below.
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        if (processed % VOLUME_COMMIT_BATCH === 0 && Object.keys(bySlice).length) {
-          addShapesAcrossSlices(sourceKey, bySlice);
-          bySlice = {};
-        }
-      }
-      if (Object.keys(bySlice).length) addShapesAcrossSlices(sourceKey, bySlice);
-      clf.resetVolumeApplyJob();
-    } finally {
-      setVolumeApplyCommitting(false);
+    const pointers: Record<string, { runId: string; classIds: number[] }> = {};
+    for (const [sliceKey, runId] of Object.entries(runs)) {
+      if ((byImage[sourceKey]?.[sliceKey] ?? []).length > 0) continue;
+      pointers[sliceKey] = { runId, classIds: commitClassIds };
     }
-  }, [sourceKey, clf, byImage, commitClassIds, addShapesAcrossSlices]);
+    if (Object.keys(pointers).length) setPredictedPointers(sourceKey, pointers);
+    clf.resetVolumeApplyJob();
+  }, [sourceKey, clf, byImage, commitClassIds, setPredictedPointers]);
 
-  // "Push to Tiled + View in 3D" — a direct, one-click path from the iPred
-  // panel to the 3D view, instead of requiring the user to separately
-  // discover the Export modal's "Sync masks to Tiled" action first (that
-  // dependency wasn't obvious — see the plan doc). Rasterizes and writes
-  // this sample's ENTIRE current shape set (every slice, both origins) to
-  // Tiled's <source>__masks container, then jumps to /volume?mask=fast to
-  // auto-load it, mirroring DownloadModal's own "current sample" scope.
+  // The only path that turns a predictedRasterStore pointer into real,
+  // editable Shape[] — one slice at a time, on explicit request. Reuses the
+  // exact same tracer the old eager-commit path used per slice, including
+  // `preserveShapes` so an already-partially-annotated slice merges rather
+  // than overwrites.
+  const [vectorizingSlice, setVectorizingSlice] = useState(false);
+  const handleMakeSliceEditable = useCallback(async () => {
+    if (!sourceKey) return;
+    const pointer = predictedPointers[sourceKey]?.[String(currentSlice)];
+    if (!pointer) return;
+    setVectorizingSlice(true);
+    try {
+      const { data, width, height } = await loadLabelPng(ipredRunCommitUrl(pointer.runId));
+      const existing = byImage[sourceKey]?.[String(currentSlice)] ?? [];
+      const shapes = labelMapToPolygonShapes(data, width, height, pointer.classIds, {
+        minRegion: 64,
+        preserveShapes: existing,
+        origin: 'predicted',
+      });
+      if (shapes.length) addShapes(sourceKey, currentSlice, shapes);
+      clearPredictedSlice(sourceKey, String(currentSlice));
+    } finally {
+      setVectorizingSlice(false);
+    }
+  }, [sourceKey, currentSlice, predictedPointers, byImage, addShapes, clearPredictedSlice]);
+
+  // Push to Tiled and View in 3D are two INDEPENDENT actions (previously one
+  // combined "Push to Tiled + view in 3D" button that always navigated on
+  // success) — forcing a navigation to /volume right after a push meant that
+  // on a dataset with no volume pyramid built yet, you landed straight in
+  // "Build Volume" with no way back to Annotate short of the browser's own
+  // back button. Now pushing stays on this tab, and viewing in 3D is a
+  // separate click that works whether or not you just pushed (e.g. to look
+  // at a result pushed earlier in the session).
   const maskSyncJob = useExportJob('mask-sync-view3d');
-  const navigatedAfterSyncRef = useRef(false);
-  const handleSyncToTiledAndView3D = useCallback(() => {
+  const handleSyncToTiled = useCallback(() => {
     if (!source || !kind || kind !== 'tiled') {
       window.alert('Pushing masks to Tiled only works for Tiled sources.');
       return;
     }
-    navigatedAfterSyncRef.current = false;
+    // predicted_slices carries any still-un-vectorized predicted regions
+    // (predictedRasterStore pointers) straight through — the backend fetches
+    // their commit.png directly from ipred and rasterizes it server-side, so
+    // "Push to Tiled" works correctly without first vectorizing every
+    // committed slice into Shape[] client-side (see the lazy-vectorization
+    // plan item). A slice already in `slices` (real shapes) doesn't need its
+    // pointer sent — build_mask_volumes already prefers real shapes anyway,
+    // but there's no reason to make the backend re-derive that here too.
+    const pointersForSource = predictedPointers[sourceKey!] ?? {};
+    const predictedSlicesPayload = Object.fromEntries(
+      Object.entries(pointersForSource)
+        .filter(([sliceKey]) => !(byImage[sourceKey!]?.[sliceKey]?.length))
+        .map(([sliceKey, p]) => [sliceKey, { run_id: p.runId, class_ids: p.classIds }]),
+    );
     maskSyncJob.startMaskSync({
       sources: [{
         kind,
@@ -363,17 +387,15 @@ export default function AnnotatePage() {
         slices: byImage[sourceKey!] ?? {},
         split_by_slice: splitBySlice[sourceKey!] ?? {},
         negative_slices: negativeSlices[sourceKey!] ?? [],
+        predicted_slices: predictedSlicesPayload,
       }],
       classes,
     });
-  }, [source, kind, serverUri, sourceKey, byImage, splitBySlice, negativeSlices, classes, maskSyncJob]);
+  }, [source, kind, serverUri, sourceKey, byImage, splitBySlice, negativeSlices, predictedPointers, classes, maskSyncJob]);
 
-  useEffect(() => {
-    if (maskSyncJob.state.status === 'done' && !navigatedAfterSyncRef.current) {
-      navigatedAfterSyncRef.current = true;
-      navigate('/volume?mask=fast');
-    }
-  }, [maskSyncJob.state.status, navigate]);
+  const handleViewIn3D = useCallback(() => {
+    navigate('/volume?mask=fast');
+  }, [navigate]);
 
   const classLabelForId = useCallback(
     (classId: number) => {
@@ -624,15 +646,24 @@ export default function AnnotatePage() {
                       })()
                     : null
                 }
-                volumeApplyCommitting={volumeApplyCommitting}
                 onApplyToVolume={handleApplyToVolume}
-                onCommitVolumeApply={() => { void handleCommitVolumeApply(); }}
+                onCommitVolumeApply={handleCommitVolumeApply}
                 onCancelVolumeApply={() => { void handleCancelVolumeApply(); }}
                 onDismissVolumeApply={clf.resetVolumeApplyJob}
+                hasPredictedPointerOnCurrentSlice={
+                  !!sourceKey && !!predictedPointers[sourceKey]?.[String(currentSlice)]
+                }
+                vectorizingSlice={vectorizingSlice}
+                onMakeSliceEditable={() => { void handleMakeSliceEditable(); }}
+                hasAnyPredictedPointers={
+                  !!sourceKey && Object.keys(predictedPointers[sourceKey] ?? {}).length > 0
+                }
                 onTrainDeepModel={() => navigate('/train')}
-                onSyncToTiledAndView3D={handleSyncToTiledAndView3D}
+                onSyncToTiled={handleSyncToTiled}
                 syncingToTiled={maskSyncJob.state.status === 'running'}
+                syncedToTiled={maskSyncJob.state.status === 'done'}
                 syncToTiledError={maskSyncJob.state.status === 'error' ? maskSyncJob.state.error : null}
+                onViewIn3D={handleViewIn3D}
                 manifoldParams={manifold.params}
                 onManifoldParamsChange={manifold.setParams}
                 manifoldSampling={manifold.sampling}

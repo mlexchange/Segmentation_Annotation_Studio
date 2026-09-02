@@ -151,6 +151,24 @@ class RenderOpts(BaseModel):
     cmap: Literal["gray", "viridis"] = "gray"
 
 
+class PredictedSlicePointer(BaseModel):
+    """An un-vectorized iPred volume-apply result for one slice — the frontend's
+    ``predictedRasterStore`` pointer, sent straight through instead of first
+    fetching+tracing the commit PNG into polygon shapes client-side (see the
+    lazy-vectorization plan item this supports).
+
+    Attributes:
+        run_id: ipred run id — ``tiled_mask_sync`` fetches its commit.png
+            directly from the ipred service via ``ipred_client.run_commit_png``.
+        class_ids: Frontend class ids the commit PNG's pixel values are drawn
+            from directly (NOT a 1-based sequential index — matches the
+            frontend's own ``labelMapToPolygonShapes`` convention).
+    """
+
+    run_id: str
+    class_ids: list[int]
+
+
 class ExportSourceItem(BaseModel):
     """A single annotated sample within a multi-source export.
 
@@ -161,6 +179,11 @@ class ExportSourceItem(BaseModel):
         slices: Mapping of slice key → list of serialised shape dicts.
         split_by_slice: Mapping of slice key → dataset split name.
         negative_slices: Slice keys included as negative (unannotated) examples.
+        predicted_slices: Mapping of slice key → an un-vectorized iPred result
+            pointer (see :class:`PredictedSlicePointer`). Only consulted by
+            ``tiled_mask_sync.build_mask_volumes`` (the "Push to Tiled" path)
+            for slice keys absent from ``slices`` — a slice with real shapes
+            always wins, matching the frontend's own precedence.
     """
 
     kind: Literal["tiled", "local"]
@@ -169,6 +192,7 @@ class ExportSourceItem(BaseModel):
     slices: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     split_by_slice: dict[str, str] = Field(default_factory=dict)
     negative_slices: list[str] = Field(default_factory=list)
+    predicted_slices: dict[str, PredictedSlicePointer] = Field(default_factory=dict)
 
 
 class ExportRequest(BaseModel):
