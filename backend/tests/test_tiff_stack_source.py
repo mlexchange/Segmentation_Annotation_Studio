@@ -350,3 +350,80 @@ class TestCascade:
         out = tss.downsample_array(np.ones((8, 8, 8), dtype=np.float32), [2, 2, 2])
         assert out.shape == (4, 4, 4)
         assert np.allclose(out, 1.0)  # a constant volume stays constant
+
+
+class FakeContainer:
+    """Duck-typed fake Tiled container — enough surface for preflight_tiff_stack's
+    navigation (`_walk`/`_child_keys`) without touching a real Tiled server."""
+
+    def __init__(self, children=None, metadata=None):
+        self._children = dict(children or {})
+        self.metadata = metadata or {}
+
+    def __iter__(self):
+        return iter(self._children)
+
+    def __getitem__(self, key):
+        return self._children[key]
+
+    def __len__(self):
+        return len(self._children)
+
+    def keys(self):
+        return list(self._children.keys())
+
+
+class TestPreflightTiffStack:
+    """The registration path itself needs a live Tiled server (see this file's
+    module docstring), but preflight_tiff_stack never calls it — it only
+    inspects the local directory and navigates a fake Tiled client, so it is
+    fully testable without one."""
+
+    def test_no_collision_when_key_absent(self, tmp_path, monkeypatch):
+        root = write_stack(tmp_path / "scan")
+        client = FakeContainer({"browse": FakeContainer({})})
+        monkeypatch.setattr(tss, "get_tiled_client", lambda uri, key: client)
+        monkeypatch.setattr(tss, "api_key_for_uri", lambda uri: None)
+        result = tss.preflight_tiff_stack(None, str(root), "browse")
+        assert result["exists"] is False
+        assert result["existing"] is None
+        assert result["key"] == tss.registered_key(root)
+
+    def test_collision_reports_external_registration(self, tmp_path, monkeypatch):
+        root = write_stack(tmp_path / "scan")
+        key = tss.registered_key(root)
+        existing_node = FakeContainer(
+            {"scale0": object()},
+            metadata={"source_format": "tiff-stack-3d", "sample_name": "scan"},
+        )
+        client = FakeContainer({"browse": FakeContainer({key: existing_node})})
+        monkeypatch.setattr(tss, "get_tiled_client", lambda uri, key: client)
+        monkeypatch.setattr(tss, "api_key_for_uri", lambda uri: None)
+        result = tss.preflight_tiff_stack(None, str(root), "browse")
+        assert result["exists"] is True
+        assert result["existing"]["external"] is True
+        assert result["existing"]["child_count"] == 1
+        assert result["existing"]["sample_name"] == "scan"
+
+    def test_collision_with_internally_managed_data_is_not_external(self, tmp_path, monkeypatch):
+        root = write_stack(tmp_path / "scan")
+        key = tss.registered_key(root)
+        existing_node = FakeContainer({"img_0000.tif": object()}, metadata={})
+        client = FakeContainer({"browse": FakeContainer({key: existing_node})})
+        monkeypatch.setattr(tss, "get_tiled_client", lambda uri, key: client)
+        monkeypatch.setattr(tss, "api_key_for_uri", lambda uri: None)
+        result = tss.preflight_tiff_stack(None, str(root), "browse")
+        assert result["existing"]["external"] is False
+
+    def test_missing_target_container_reports_no_collision(self, tmp_path, monkeypatch):
+        root = write_stack(tmp_path / "scan")
+        client = FakeContainer({})
+        monkeypatch.setattr(tss, "get_tiled_client", lambda uri, key: client)
+        monkeypatch.setattr(tss, "api_key_for_uri", lambda uri: None)
+        result = tss.preflight_tiff_stack(None, str(root), "browse/missing")
+        assert result["exists"] is False
+
+    def test_invalid_path_propagates_the_http_exception(self, monkeypatch):
+        with pytest.raises(HTTPException) as exc:
+            tss.preflight_tiff_stack(None, "not/absolute")
+        assert exc.value.status_code == 400

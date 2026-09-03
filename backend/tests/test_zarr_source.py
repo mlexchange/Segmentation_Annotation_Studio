@@ -226,3 +226,75 @@ class TestFullResolutionCoordinates:
         meta = arrays_mod.array_shape_meta(_FakeArray((7, 16, 16)))
         assert (meta["n_slices"], meta["height"], meta["width"]) == (7, 16, 16)
         assert "z_downsample" not in meta
+
+
+class FakeContainer:
+    """Duck-typed fake Tiled container — enough surface for preflight_zarr's
+    navigation (`_walk`/`_child_keys`) without touching a real Tiled server."""
+
+    def __init__(self, children=None, metadata=None):
+        self._children = dict(children or {})
+        self.metadata = metadata or {}
+
+    def __iter__(self):
+        return iter(self._children)
+
+    def __getitem__(self, key):
+        return self._children[key]
+
+    def __len__(self):
+        return len(self._children)
+
+    def keys(self):
+        return list(self._children.keys())
+
+
+class TestPreflightZarr:
+    """register_zarr itself needs a live Tiled server; preflight_zarr never
+    calls it — it only inspects the local store and navigates a fake Tiled
+    client, so it is fully testable without one."""
+
+    def test_no_collision_when_key_absent(self, pyramid: Path, monkeypatch) -> None:
+        client = FakeContainer({"browse": FakeContainer({})})
+        monkeypatch.setattr(zarr_source, "get_tiled_client", lambda uri, key: client)
+        monkeypatch.setattr(zarr_source, "api_key_for_uri", lambda uri: None)
+        result = zarr_source.preflight_zarr(None, str(pyramid), "browse")
+        assert result["exists"] is False
+        assert result["existing"] is None
+        assert result["key"] == zarr_source.registered_key(pyramid)
+
+    def test_collision_reports_external_registration(self, pyramid: Path, monkeypatch) -> None:
+        key = zarr_source.registered_key(pyramid)
+        existing_node = FakeContainer(
+            {"scale0": object()},
+            metadata={"source_format": "zarr", "sample_name": "vol", "n_images": 9},
+        )
+        client = FakeContainer({"browse": FakeContainer({key: existing_node})})
+        monkeypatch.setattr(zarr_source, "get_tiled_client", lambda uri, key: client)
+        monkeypatch.setattr(zarr_source, "api_key_for_uri", lambda uri: None)
+        result = zarr_source.preflight_zarr(None, str(pyramid), "browse")
+        assert result["exists"] is True
+        assert result["existing"]["external"] is True
+        assert result["existing"]["sample_name"] == "vol"
+        assert result["existing"]["n_images"] == 9
+
+    def test_collision_with_internally_managed_data_is_not_external(self, pyramid: Path, monkeypatch) -> None:
+        key = zarr_source.registered_key(pyramid)
+        existing_node = FakeContainer({"img_0000.tif": object()}, metadata={})
+        client = FakeContainer({"browse": FakeContainer({key: existing_node})})
+        monkeypatch.setattr(zarr_source, "get_tiled_client", lambda uri, key: client)
+        monkeypatch.setattr(zarr_source, "api_key_for_uri", lambda uri: None)
+        result = zarr_source.preflight_zarr(None, str(pyramid), "browse")
+        assert result["existing"]["external"] is False
+
+    def test_missing_target_container_reports_no_collision(self, pyramid: Path, monkeypatch) -> None:
+        client = FakeContainer({})
+        monkeypatch.setattr(zarr_source, "get_tiled_client", lambda uri, key: client)
+        monkeypatch.setattr(zarr_source, "api_key_for_uri", lambda uri: None)
+        result = zarr_source.preflight_zarr(None, str(pyramid), "browse/missing")
+        assert result["exists"] is False
+
+    def test_invalid_path_propagates_the_http_exception(self) -> None:
+        with pytest.raises(HTTPException) as exc:
+            zarr_source.preflight_zarr(None, "relative/path")
+        assert exc.value.status_code == 400
