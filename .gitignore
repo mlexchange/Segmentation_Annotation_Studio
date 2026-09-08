@@ -56,6 +56,7 @@ Thumbs.db
 htmlcov/
 .coverage
 coverage.xml
+frontend/coverage/
 
 # Vendored SAM model (large, fetched via frontend/scripts/fetch-sam-model.mjs)
 frontend/public/models/

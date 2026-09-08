@@ -11,6 +11,7 @@ drives it through infer_jobs.run_infer_job itself, with a fake array source
 
 from __future__ import annotations
 
+import io
 import sys
 import threading
 import time
@@ -252,3 +253,261 @@ def test_predict_one_slice_serializes_gpu_forward_calls(trained_run_id, fake_arr
         assert shapes is not None
 
     assert max_concurrent == 1, "GPU_FORWARD_LOCK failed to serialize concurrent forward calls"
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
+
+class TestHexToRgb:
+    def test_full_hex(self):
+        assert infer_jobs._hex_to_rgb("#00ff80") == (0, 255, 128)
+
+    def test_short_hex_is_expanded(self):
+        assert infer_jobs._hex_to_rgb("#0f8") == (0, 255, 136)
+
+    def test_none_falls_back_to_red(self):
+        assert infer_jobs._hex_to_rgb(None) == (255, 0, 0)
+
+    def test_missing_hash_falls_back_to_red(self):
+        assert infer_jobs._hex_to_rgb("00ff80") == (255, 0, 0)
+
+    def test_invalid_hex_digits_fall_back_to_red(self):
+        assert infer_jobs._hex_to_rgb("#zzzzzz") == (255, 0, 0)
+
+
+class TestVectorizeLabelMap:
+    def _run_classes(self):
+        return [{"classId": 1, "label": "a"}, {"classId": 2, "label": "b"}]
+
+    def test_component_below_min_area_is_dropped(self):
+        label_map = np.zeros((20, 20), dtype=np.uint8)
+        label_map[0:2, 0:2] = 1  # 4px, tiny
+        shapes = infer_jobs._vectorize_label_map(label_map, self._run_classes(), min_area=50, simplify_tol=0.0, run_id="run12345", slice_idx=0)
+        assert shapes == []
+
+    def test_ring_shaped_component_gets_a_hole(self):
+        label_map = np.ones((30, 30), dtype=np.uint8)  # all class 1
+        label_map[10:20, 10:20] = 2  # a class-2 hole inside class 1
+        shapes = infer_jobs._vectorize_label_map(label_map, self._run_classes(), min_area=1, simplify_tol=0.0, run_id="run12345", slice_idx=0)
+        class1_shape = next(s for s in shapes if s["classId"] == 1)
+        assert "holes" in class1_shape
+        assert len(class1_shape["holes"]) == 1
+
+    def test_simplify_tol_reduces_point_count(self):
+        label_map = np.zeros((40, 40), dtype=np.uint8)
+        label_map[5:35, 5:35] = 1  # a large, simple square
+        unsimplified = infer_jobs._vectorize_label_map(label_map, self._run_classes(), min_area=1, simplify_tol=0.0, run_id="run12345", slice_idx=0)
+        simplified = infer_jobs._vectorize_label_map(label_map, self._run_classes(), min_area=1, simplify_tol=5.0, run_id="run12345", slice_idx=0)
+        assert len(simplified[0]["points"]) <= len(unsimplified[0]["points"])
+
+    def test_shape_ids_are_unique_per_component(self):
+        label_map = np.zeros((30, 30), dtype=np.uint8)
+        label_map[2:6, 2:6] = 1
+        label_map[20:26, 20:26] = 1
+        shapes = infer_jobs._vectorize_label_map(label_map, self._run_classes(), min_area=1, simplify_tol=0.0, run_id="run12345", slice_idx=3)
+        ids = [s["id"] for s in shapes]
+        assert len(ids) == len(set(ids))
+
+    def test_class_with_no_pixels_is_skipped(self):
+        label_map = np.zeros((10, 10), dtype=np.uint8)
+        shapes = infer_jobs._vectorize_label_map(label_map, self._run_classes(), min_area=1, simplify_tol=0.0, run_id="run12345", slice_idx=0)
+        assert shapes == []
+
+
+# ---------------------------------------------------------------------------
+# run_infer_job — guard paths that don't need a real trained run
+# ---------------------------------------------------------------------------
+
+class TestRunInferJobGuards:
+    def test_busy_ml_lock_reports_error_not_a_crash(self):
+        train_common.ML_LOCK.acquire()
+        try:
+            jid = export_jobs.new_job("x")
+            infer_jobs.run_infer_job(jid, _infer_request("whatever"))
+            job = export_jobs.get_job(jid)
+            assert job["state"] == "error"
+            assert "already running" in job["error"]
+        finally:
+            train_common.ML_LOCK.release()
+
+    def test_no_device_reports_error_and_releases_lock(self, monkeypatch):
+        monkeypatch.setattr(train_common, "pick_device", lambda: None)
+        jid = export_jobs.new_job("x")
+        infer_jobs.run_infer_job(jid, _infer_request("whatever"))
+        job = export_jobs.get_job(jid)
+        assert job["state"] == "error"
+        assert "torch is not installed" in job["error"]
+        assert train_common.ML_LOCK.locked() is False
+
+    def test_denoiser_run_is_refused(self, monkeypatch):
+        monkeypatch.setattr(
+            train_common, "load_run_config",
+            lambda run_id: {"model_family": "dlsia_denoiser", "classes": [], "image_size": 64, "render": {}},
+        )
+        monkeypatch.setattr(train_common, "load_adapter_state", lambda run_id: {})
+        jid = export_jobs.new_job("x")
+        infer_jobs.run_infer_job(jid, _infer_request("whatever"))
+        job = export_jobs.get_job(jid)
+        assert job["state"] == "error"
+        assert "denoiser run" in job["error"]
+
+    def test_unsupported_model_family_is_refused(self, monkeypatch):
+        monkeypatch.setattr(
+            train_common, "load_run_config",
+            lambda run_id: {"model_family": "something_weird", "classes": [], "image_size": 64, "render": {}},
+        )
+        monkeypatch.setattr(train_common, "load_adapter_state", lambda run_id: {})
+        jid = export_jobs.new_job("x")
+        infer_jobs.run_infer_job(jid, _infer_request("whatever"))
+        job = export_jobs.get_job(jid)
+        assert job["state"] == "error"
+        assert "Unsupported model family" in job["error"]
+
+    def test_tiled_run_without_qlty_is_refused(self, monkeypatch):
+        import tiling
+
+        monkeypatch.setattr(
+            train_common, "load_run_config",
+            lambda run_id: {
+                "model_family": "dlsia_tunet", "classes": [], "image_size": 64, "render": {},
+                "hyperparams": {"tiling": True},
+            },
+        )
+        monkeypatch.setattr(train_common, "load_adapter_state", lambda run_id: {})
+        monkeypatch.setattr(tiling, "qlty_available", lambda: False)
+        jid = export_jobs.new_job("x")
+        infer_jobs.run_infer_job(jid, _infer_request("whatever"))
+        job = export_jobs.get_job(jid)
+        assert job["state"] == "error"
+        assert "qlty" in job["error"]
+
+
+# ---------------------------------------------------------------------------
+# preview_png
+# ---------------------------------------------------------------------------
+
+class TestPreviewPng:
+    def test_missing_job_is_404(self):
+        with pytest.raises(Exception) as exc:
+            infer_jobs.preview_png("no-such-job", 0)
+        assert exc.value.status_code == 404
+
+    def test_missing_slice_is_404(self):
+        infer_jobs._cache_put("job-with-no-slices", {"classes": [], "label_pngs": {}})
+        with pytest.raises(Exception) as exc:
+            infer_jobs.preview_png("job-with-no-slices", 0)
+        assert exc.value.status_code == 404
+
+    def test_colorizes_predicted_classes(self):
+        from PIL import Image as PILImage
+
+        label = np.zeros((8, 8), dtype=np.uint8)
+        label[0:4, 0:4] = 1
+        label[4:8, 4:8] = 2
+        buf = io.BytesIO()
+        PILImage.fromarray(label, mode="L").save(buf, format="PNG")
+
+        infer_jobs._cache_put(
+            "job-colorize",
+            {
+                "classes": [{"classId": 1, "color": "#ff0000"}, {"classId": 2, "color": "#00ff00"}],
+                "label_pngs": {0: buf.getvalue()},
+            },
+        )
+        png = infer_jobs.preview_png("job-colorize", 0)
+        rgba = np.asarray(PILImage.open(io.BytesIO(png)))
+        assert tuple(rgba[0, 0]) == (255, 0, 0, 180)
+        assert tuple(rgba[4, 4]) == (0, 255, 0, 180)
+        assert rgba[7, 0][3] == 0  # background stays transparent
+
+
+# ---------------------------------------------------------------------------
+# run_write_tiled_job
+# ---------------------------------------------------------------------------
+
+class TestRunWriteTiledJob:
+    def test_missing_cache_entry_reports_error(self):
+        jid = export_jobs.new_job("x")
+        infer_jobs.run_write_tiled_job(jid, "no-such-infer-job")
+        job = export_jobs.get_job(jid)
+        assert job["state"] == "error"
+        assert "No cached inference results" in job["error"]
+
+    def test_non_tiled_source_is_refused(self):
+        infer_jobs._cache_put("infer-local", {"kind": "local", "classes": [], "label_pngs": {}})
+        jid = export_jobs.new_job("x")
+        infer_jobs.run_write_tiled_job(jid, "infer-local")
+        job = export_jobs.get_job(jid)
+        assert job["state"] == "error"
+        assert "not a Tiled array" in job["error"]
+
+    def test_writes_semantic_and_class_volumes(self, monkeypatch):
+        from PIL import Image as PILImage
+
+        label0 = np.zeros((4, 4), dtype=np.uint8)
+        label0[0:2, 0:2] = 1
+        label1 = np.zeros((4, 4), dtype=np.uint8)
+        label1[2:4, 2:4] = 2
+
+        def _png(arr):
+            buf = io.BytesIO()
+            PILImage.fromarray(arr, mode="L").save(buf, format="PNG")
+            return buf.getvalue()
+
+        infer_jobs._cache_put(
+            "infer-tiled",
+            {
+                "kind": "tiled", "source": "browse/sample", "server_uri": "http://x",
+                "classes": [{"classId": 1, "label": "a", "color": "#f00"}, {"classId": 2, "label": "b", "color": "#0f0"}],
+                "label_pngs": {0: _png(label0), 1: _png(label1)},
+            },
+        )
+
+        captured = {}
+
+        def fake_write_masks_to_tiled(source, server_uri, volumes, classes, container_suffix=""):
+            captured.update(source=source, server_uri=server_uri, volumes=volumes, container_suffix=container_suffix)
+            return {"path": "browse/sample__masks_deep"}
+
+        import tiled_mask_sync
+
+        monkeypatch.setattr(tiled_mask_sync, "write_masks_to_tiled", fake_write_masks_to_tiled)
+
+        jid = export_jobs.new_job("x")
+        infer_jobs.run_write_tiled_job(jid, "infer-tiled")
+        job = export_jobs.get_job(jid)
+        assert job["state"] == "done"
+        assert job["result"] == {"path": "browse/sample__masks_deep"}
+        assert captured["container_suffix"] == "_deep"
+        assert captured["volumes"]["semantic"].shape == (2, 4, 4)
+        assert np.array_equal(captured["volumes"]["class_vols"]["a"][0], (label0 == 1) * 255)
+
+    def test_write_failure_is_reported_as_a_job_error(self, monkeypatch):
+        infer_jobs._cache_put(
+            "infer-tiled-fail",
+            {
+                "kind": "tiled", "source": "browse/sample", "server_uri": None,
+                "classes": [{"classId": 1, "label": "a", "color": "#f00"}],
+                "label_pngs": {0: _blank_label_png()},
+            },
+        )
+        import tiled_mask_sync
+
+        def boom(*a, **k):
+            raise RuntimeError("tiled write blew up")
+
+        monkeypatch.setattr(tiled_mask_sync, "write_masks_to_tiled", boom)
+        jid = export_jobs.new_job("x")
+        infer_jobs.run_write_tiled_job(jid, "infer-tiled-fail")
+        job = export_jobs.get_job(jid)
+        assert job["state"] == "error"
+        assert "tiled write blew up" in job["error"]
+
+
+def _blank_label_png() -> bytes:
+    from PIL import Image as PILImage
+
+    buf = io.BytesIO()
+    PILImage.fromarray(np.zeros((4, 4), dtype=np.uint8), mode="L").save(buf, format="PNG")
+    return buf.getvalue()

@@ -58,6 +58,11 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
+    // vitest runs in Node, where bare `import 'konva'` resolves via the package's
+    // "main" field (a canvas-backed Node build requiring the native `canvas`
+    // module, which isn't installed) instead of "browser" (the jsdom-friendly
+    // build bundlers use). Force the browser build under test.
+    alias: [{ find: /^konva$/, replacement: 'konva/lib/index.js' }],
     // Scoped to src/ so the vendored renderer's own suite (which needs WebGPU and
     // its own runner config) isn't swept into ours by the default glob. Upstream
     // tests are upstream's to run.

@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { magicSelect, maskToPolygons, maskToPolygonsWithHoles, gradientField, otsuThreshold, type GrayField } from './magicwand';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, gradientField, otsuThreshold, type GrayField } from './magicwand';
 
 /** 40x40 grid (scale 1): background 0 with two value-200 blocks. */
 function twoBlocks(): GrayField {
@@ -199,6 +199,130 @@ describe('fractional scale (upscaled working resolution)', () => {
     const polys = magicSelect(field, 8, 8, { toleranceFrac: 0.2, mode: 'contiguous', smooth: 0, minRegion: 8 });
     const coords = polys[0];
     expect(coords.some((v) => !Number.isInteger(v))).toBe(true);
+  });
+});
+
+/**
+ * jsdom has no real 2D canvas, so `buildField` (which draws the source image
+ * into a small canvas and reads it back) needs `getContext('2d')` stubbed.
+ * drawImage is a no-op; getImageData returns a fixed RGBA pattern (128 gray
+ * everywhere) — buildField only cares that SOME data comes back and is
+ * converted to a `gray` field of the right size, not the actual pixel values.
+ */
+function stubCanvas2d() {
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (
+    this: HTMLCanvasElement,
+  ): any {
+    return {
+      drawImage: () => {},
+      getImageData: (_x: number, _y: number, w: number, h: number) => ({
+        data: new Uint8ClampedArray(w * h * 4).fill(128),
+        width: w,
+        height: h,
+      }),
+    } as unknown as CanvasRenderingContext2D;
+  });
+}
+
+describe('buildField', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('builds a downsampled gray + gradient field sized to fit maxDim', () => {
+    stubCanvas2d();
+    const field = buildField({} as CanvasImageSource, 3200, 1600, 1600);
+    expect(field).not.toBeNull();
+    // scale = ceil(3200/1600) = 2 -> gw = 3200/2 = 1600, gh = 1600/2 = 800
+    expect(field!.gw).toBe(1600);
+    expect(field!.gh).toBe(800);
+    expect(field!.scale).toBe(2);
+    expect(field!.gray.length).toBe(1600 * 800);
+    expect(field!.grad).toBeInstanceOf(Float32Array);
+  });
+
+  it('applies upscale to raise grid resolution and divide the effective scale', () => {
+    stubCanvas2d();
+    const field = buildField({} as CanvasImageSource, 3200, 1600, 1600, 2);
+    // scale = ceil(3200/1600)/2 = 1
+    expect(field!.scale).toBe(1);
+    expect(field!.gw).toBe(3200);
+    expect(field!.gh).toBe(1600);
+  });
+
+  it('omits the gradient field when needGradient is false', () => {
+    stubCanvas2d();
+    const field = buildField({} as CanvasImageSource, 800, 800, 1600, 1, false);
+    expect(field!.grad).toBeUndefined();
+  });
+
+  it('returns null when a 2D context is unavailable', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+    const field = buildField({} as CanvasImageSource, 800, 800);
+    expect(field).toBeNull();
+  });
+
+  it('returns null on a tainted canvas (getImageData throws)', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (): any {
+      return {
+        drawImage: () => {},
+        getImageData: () => {
+          throw new Error('SecurityError');
+        },
+      };
+    });
+    const field = buildField({} as CanvasImageSource, 800, 800);
+    expect(field).toBeNull();
+  });
+});
+
+describe('magicSelect smoothing (boxBlur pre-filter + Chaikin rounding)', () => {
+  it('produces a valid, smaller/rounder contour when smooth > 0', () => {
+    const field = twoBlocks();
+    const smoothed = magicSelect(field, 9, 9, { toleranceFrac: 0.2, mode: 'contiguous', smooth: 3, minRegion: 8 });
+    expect(smoothed.length).toBe(1);
+    expect(smoothed[0].length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('caps Chaikin iterations at 4 for very high smooth values without throwing', () => {
+    const field = twoBlocks();
+    expect(() =>
+      magicSelect(field, 9, 9, { toleranceFrac: 0.2, mode: 'contiguous', smooth: 10, minRegion: 8 }),
+    ).not.toThrow();
+  });
+});
+
+describe('maskToPolygonsWithHoles — multiple outer regions', () => {
+  it('assigns a hole to its owning outer via the centroid test when there are 2+ regions', () => {
+    const W = 100, H = 60;
+    const m = new Uint8Array(W * H);
+    // Region A (donut) at x[10,40), region B (solid) at x[60,90).
+    for (let y = 10; y < 50; y++) for (let x = 10; x < 40; x++) m[y * W + x] = 1;
+    for (let y = 22; y < 38; y++) for (let x = 18; x < 32; x++) m[y * W + x] = 0; // hole in A
+    for (let y = 10; y < 50; y++) for (let x = 60; x < 90; x++) m[y * W + x] = 1; // solid B
+
+    const out = maskToPolygonsWithHoles(m, W, H, { minRegion: 8 });
+    expect(out.length).toBe(2);
+    const withHole = out.find((r) => r.holes.length > 0);
+    const withoutHole = out.find((r) => r.holes.length === 0);
+    expect(withHole).toBeDefined();
+    expect(withoutHole).toBeDefined();
+  });
+
+  it('falls back to the bbox-containment test when the hole centroid lands outside every outer (concave, multi-region)', () => {
+    const W = 100, H = 60;
+    const m = new Uint8Array(W * H);
+    // Region A: concave "C" block with a notch, plus an enclosed hole whose
+    // centroid falls in the notch (outside A) — same shape as the single-region
+    // concave test, but with an unrelated solid region B elsewhere so `result.length`
+    // is 2 and the direct single-region shortcut cannot apply.
+    for (let y = 8; y < 52; y++) for (let x = 8; x < 52; x++) m[y * W + x] = 1; // block A
+    for (let y = 8; y < 30; y++) for (let x = 40; x < 52; x++) m[y * W + x] = 0; // notch (concavity)
+    for (let y = 34; y < 46; y++) for (let x = 16; x < 28; x++) m[y * W + x] = 0; // enclosed hole in A
+    for (let y = 8; y < 52; y++) for (let x = 70; x < 95; x++) m[y * W + x] = 1; // solid region B
+
+    const out = maskToPolygonsWithHoles(m, W, H, { minRegion: 8 });
+    expect(out.length).toBe(2);
+    const withHole = out.find((r) => r.holes.length > 0);
+    expect(withHole).toBeDefined();
   });
 });
 

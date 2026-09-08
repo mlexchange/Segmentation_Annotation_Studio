@@ -186,3 +186,238 @@ async def test_batch_apply_tolerates_one_bad_slice(monkeypatch: pytest.MonkeyPat
     assert job["state"] == "done"
     assert job["result"]["runs"] == {"0": "run-feat-0", "2": "run-feat-2"}
     assert job["result"]["errors"] == [{"slice": 1, "error": "boom"}]
+
+
+@pytest.mark.asyncio
+async def test_batch_train_rejects_empty_slices() -> None:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/ipred/batch/train", json={"session_id": "s1", "slices": {}},
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_batch_apply_rejects_empty_slice_indices() -> None:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/ipred/batch/apply",
+            json={"session_id": "s1", "model_id": "m1", "slice_indices": []},
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_generic_exception_reports_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exception that is neither an HTTPStatusError nor a ConnectError
+    (e.g. ipred is unreachable via a different transport failure) reports 500
+    with the exception's own message rather than crashing the request."""
+    def _raise() -> dict:
+        raise ValueError("something unexpected")
+
+    monkeypatch.setattr(ipred_client_mod, "list_trainers", _raise)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/ipred/trainers")
+    assert response.status_code == 500
+    assert "something unexpected" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_http_status_error_falls_back_to_text_when_not_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise() -> dict:
+        req = httpx.Request("GET", "http://127.0.0.1:8003/setups")
+        resp = httpx.Response(500, content=b"plain text error", request=req)
+        raise httpx.HTTPStatusError("bad", request=req, response=resp)
+
+    monkeypatch.setattr(ipred_client_mod, "list_setups", _raise)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/ipred/setups")
+    assert response.status_code == 500
+    assert response.json()["detail"] == "plain text error"
+
+
+class TestSimpleProxyRoutes:
+    """Each of these is a thin call-through + exception translation; one happy
+    path per route is enough since _ipred_http_error's branches are already
+    covered above and shared by all of them."""
+
+    @pytest.mark.asyncio
+    async def test_get_setup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "get_setup", lambda setup_id: {"id": setup_id})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/ipred/setups/s1")
+        assert response.json() == {"id": "s1"}
+
+    @pytest.mark.asyncio
+    async def test_upsert_setup_excludes_none_fields(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = {}
+        monkeypatch.setattr(ipred_client_mod, "upsert_setup", lambda payload: captured.update(payload) or {"id": "s1"})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/setups", json={"name": "s", "kind": "onnx"},
+            )
+        assert response.status_code == 200
+        assert "procedure_id" not in captured
+        assert captured["name"] == "s"
+
+    @pytest.mark.asyncio
+    async def test_list_trainers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "list_trainers", lambda: ["catboost"])
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/ipred/trainers")
+        assert response.json() == {"trainers": ["catboost"]}
+
+    @pytest.mark.asyncio
+    async def test_list_compositions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "list_compositions", lambda: [{"id": "c1"}])
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/ipred/compositions")
+        assert response.json() == {"compositions": [{"id": "c1"}]}
+
+    @pytest.mark.asyncio
+    async def test_get_composition(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "get_composition", lambda cid: {"id": cid})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/ipred/compositions/c1")
+        assert response.json() == {"id": "c1"}
+
+    @pytest.mark.asyncio
+    async def test_upsert_composition(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "upsert_composition", lambda payload: {"id": "c2"})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/compositions",
+                json={"name": "comp", "nodes": [], "outputs": []},
+            )
+        assert response.json() == {"id": "c2"}
+
+    @pytest.mark.asyncio
+    async def test_preview_composition(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "preview_composition", lambda payload: {"preview": True})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/compositions/preview",
+                json={"name": "comp", "nodes": [], "outputs": []},
+            )
+        assert response.json() == {"preview": True}
+
+    @pytest.mark.asyncio
+    async def test_upload_array_injects_session_id_into_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = {}
+
+        def _upload(session_id, payload):
+            captured.update(payload)
+            return {"ok": True}
+
+        monkeypatch.setattr(ipred_client_mod, "upload_session_array", _upload)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/sessions/s1/arrays",
+                json={"session_id": "ignored", "shape": [2, 2], "data_b64": "AAA="},
+            )
+        assert response.status_code == 200
+        assert captured["session_id"] == "s1"
+
+    @pytest.mark.asyncio
+    async def test_manifold_sample(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "manifold_sample", lambda payload: {"sample_id": "sm1"})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/manifold/sample", json={"feature_id": "f1"},
+            )
+        assert response.json() == {"sample_id": "sm1"}
+
+    @pytest.mark.asyncio
+    async def test_manifold_heatmap_png(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "manifold_heatmap_png", lambda sample_id: b"heatbytes")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/ipred/manifold/sm1/heatmap.png")
+        assert response.content == b"heatbytes"
+        assert response.headers["content-type"] == "image/png"
+
+    @pytest.mark.asyncio
+    async def test_preprocess(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = {}
+
+        def _preprocess(**kwargs):
+            captured.update(kwargs)
+            return {"feature_id": "f1"}
+
+        monkeypatch.setattr(ipred_client_mod, "preprocess", _preprocess)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/preprocess", json={"session_id": "s1", "slice_index": 3},
+            )
+        assert response.json() == {"feature_id": "f1"}
+        assert captured["slice_index"] == 3
+
+    @pytest.mark.asyncio
+    async def test_feature_channel_png(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "feature_channel_bytes", lambda fid, idx: b"chanbytes")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/ipred/features/f1/channels/2")
+        assert response.content == b"chanbytes"
+
+    @pytest.mark.asyncio
+    async def test_train(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = {}
+
+        def _train(**kwargs):
+            captured.update(kwargs)
+            return {"model_id": "m1"}
+
+        monkeypatch.setattr(ipred_client_mod, "train", _train)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/train", json={"session_id": "s1", "shapes": []},
+            )
+        assert response.json() == {"model_id": "m1"}
+        assert captured["trainer_id"] == "catboost"
+
+    @pytest.mark.asyncio
+    async def test_infer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "infer", lambda **kwargs: {"run_id": "r1"})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/infer", json={"session_id": "s1"},
+            )
+        assert response.json() == {"run_id": "r1"}
+
+    @pytest.mark.asyncio
+    async def test_rethreshold(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "rethreshold", lambda **kwargs: {"ok": True})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/rethreshold", json={"session_id": "s1", "alpha": 0.1},
+            )
+        assert response.json() == {"ok": True}
+
+    @pytest.mark.asyncio
+    async def test_run_commit_png(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "run_commit_png", lambda run_id: b"commitbytes")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/ipred/runs/r1/commit.png")
+        assert response.content == b"commitbytes"
+
+    @pytest.mark.asyncio
+    async def test_run_status_png(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ipred_client_mod, "run_status_png", lambda run_id: b"statusbytes")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/ipred/runs/r1/status.png")
+        assert response.content == b"statusbytes"
+
+    @pytest.mark.asyncio
+    async def test_threshold_class(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = {}
+
+        def _threshold(run_id, *, class_id, threshold):
+            captured.update(run_id=run_id, class_id=class_id, threshold=threshold)
+            return {"ok": True}
+
+        monkeypatch.setattr(ipred_client_mod, "threshold_class_map", _threshold)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/ipred/runs/r1/threshold-class", json={"class_id": 2, "threshold": 0.7},
+            )
+        assert response.json() == {"ok": True}
+        assert captured == {"run_id": "r1", "class_id": 2, "threshold": 0.7}
