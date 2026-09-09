@@ -247,16 +247,28 @@ export default function InferencePanel({
                   >
                     Import as annotations
                   </button>
-                  {isTiledSource && (
-                    <button
-                      type="button"
-                      disabled={writeJob.status === 'running'}
-                      onClick={() => job.jobId && void startWriteJob(`/api/train/infer/write-tiled/${job.jobId}`, {})}
-                      className="px-3 py-1.5 text-xs rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-900/30 transition-colors disabled:opacity-50"
-                    >
-                      {writeJob.status === 'running' ? 'Writing…' : 'Write masks to Tiled'}
-                    </button>
-                  )}
+                  {/* Not gated on the live `isTiledSource` prop: that reflects
+                      whatever sample is CURRENTLY open in the global dataset
+                      store, not the sample this job actually ran against — a
+                      long-running job (e.g. hundreds of slices) can easily
+                      outlive the user switching samples/tabs and coming back,
+                      at which point `isTiledSource` no longer describes this
+                      job at all and could wrongly hide the button for a job
+                      that really did run on a Tiled source. The write route
+                      is already correctly bound to the job's own source
+                      server-side (infer_jobs.py's cached entry) and reports a
+                      clear error if it truly isn't Tiled — surfaced below via
+                      writeJob's own error state — so there's no need to
+                      duplicate that check here against state that can go
+                      stale. */}
+                  <button
+                    type="button"
+                    disabled={writeJob.status === 'running'}
+                    onClick={() => job.jobId && void startWriteJob(`/api/train/infer/write-tiled/${job.jobId}`, {})}
+                    className="px-3 py-1.5 text-xs rounded-md border border-emerald-500 text-emerald-300 hover:bg-emerald-900/30 transition-colors disabled:opacity-50"
+                  >
+                    {writeJob.status === 'running' ? 'Writing…' : 'Write masks to Tiled'}
+                  </button>
                 </div>
               )}
               {importedCount !== null && (

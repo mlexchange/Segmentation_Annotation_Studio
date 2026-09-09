@@ -28,6 +28,7 @@ import SliceNavigator from '@/components/annotate/SliceNavigator';
 import MaskToolsPanel from '@/components/annotate/MaskToolsPanel';
 import MeasurementPanel from '@/components/annotate/MeasurementPanel';
 import FeatureChannelsPanel from '@/components/annotate/FeatureChannelsPanel';
+import SuggestLabelsPanel from '@/components/annotate/SuggestLabelsPanel';
 import PixelClassifierPanel from '@/components/annotate/PixelClassifierPanel';
 import AnnotationCanvas from '@/components/annotate/AnnotationCanvas';
 import { useFeatureChannels } from '@/hooks/useFeatureChannels';
@@ -582,16 +583,42 @@ export default function AnnotatePage() {
           )}
 
           {stage === 'assist' && (
-            <FeatureChannelsPanel
-              job={features.job}
-              channelIndex={features.channelIndex}
-              computing={features.computing}
-              error={features.error}
-              onCompute={features.compute}
-              onSelectChannel={features.selectChannel}
-              onCycle={features.cycleChannel}
-              onOriginal={features.clearSelection}
-            />
+            <>
+              <FeatureChannelsPanel
+                job={features.job}
+                channelIndex={features.channelIndex}
+                computing={features.computing}
+                error={features.error}
+                onCompute={features.compute}
+                onSelectChannel={features.selectChannel}
+                onCycle={features.cycleChannel}
+                onOriginal={features.clearSelection}
+              />
+              <SuggestLabelsPanel
+                hasFeatureJob={!!features.job}
+                manifoldParams={manifold.params}
+                onManifoldParamsChange={manifold.setParams}
+                manifoldSampling={manifold.sampling}
+                manifoldHasSample={manifold.hasSample}
+                manifoldShowHeatmap={manifold.showHeatmap}
+                onManifoldShowHeatmapChange={manifold.setShowHeatmap}
+                manifoldShowMarkers={manifold.showMarkers}
+                onManifoldShowMarkersChange={manifold.setShowMarkers}
+                manifoldHeatmapOpacity={manifold.heatmapOpacity}
+                onManifoldHeatmapOpacityChange={manifold.setHeatmapOpacity}
+                manifoldMeta={manifold.meta}
+                manifoldError={manifold.error}
+                onManifoldSample={() => { void manifold.sample(); }}
+                onManifoldDismiss={manifold.dismiss}
+                manifoldRoiShapeCount={manifold.placementMask?.length ?? 0}
+                canCaptureManifoldRoi={selectedShapeIds.length > 0}
+                onCaptureManifoldRoi={() => {
+                  const selected = sliceShapes.filter((s) => selectedShapeIds.includes(s.id));
+                  manifold.setPlacementMaskFromShapes(selected);
+                }}
+                onClearManifoldRoi={manifold.clearPlacementMask}
+              />
+            </>
           )}
 
           {stage === 'predict' && (
@@ -664,27 +691,6 @@ export default function AnnotatePage() {
                 syncedToTiled={maskSyncJob.state.status === 'done'}
                 syncToTiledError={maskSyncJob.state.status === 'error' ? maskSyncJob.state.error : null}
                 onViewIn3D={handleViewIn3D}
-                manifoldParams={manifold.params}
-                onManifoldParamsChange={manifold.setParams}
-                manifoldSampling={manifold.sampling}
-                manifoldHasSample={manifold.hasSample}
-                manifoldShowHeatmap={manifold.showHeatmap}
-                onManifoldShowHeatmapChange={manifold.setShowHeatmap}
-                manifoldShowMarkers={manifold.showMarkers}
-                onManifoldShowMarkersChange={manifold.setShowMarkers}
-                manifoldHeatmapOpacity={manifold.heatmapOpacity}
-                onManifoldHeatmapOpacityChange={manifold.setHeatmapOpacity}
-                manifoldMeta={manifold.meta}
-                manifoldError={manifold.error}
-                onManifoldSample={() => { void manifold.sample(); }}
-                onManifoldDismiss={manifold.dismiss}
-                manifoldRoiShapeCount={manifold.placementMask?.length ?? 0}
-                canCaptureManifoldRoi={selectedShapeIds.length > 0}
-                onCaptureManifoldRoi={() => {
-                  const selected = sliceShapes.filter((s) => selectedShapeIds.includes(s.id));
-                  manifold.setPlacementMaskFromShapes(selected);
-                }}
-                onClearManifoldRoi={manifold.clearPlacementMask}
               />
           )}
 

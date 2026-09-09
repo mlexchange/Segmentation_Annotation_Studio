@@ -5,23 +5,21 @@
  * multi-slice train/predict, model summary + feature importances, class-
  * probability cycling, commit/dismiss, volume-apply flow (apply -> progress ->
  * result -> commit/dismiss), predicted-pointer "make editable" banner, push-to-
- * Tiled + view-in-3D, train-deep-model hand-off, error surfacing, and the
- * Suggest-labels (manifold) sub-panel (collapsed by default; opened via click).
+ * Tiled + view-in-3D, train-deep-model hand-off, and error surfacing.
+ * (Suggest-labels/manifold sampling was pulled out into its own
+ * SuggestLabelsPanel — see that component's own test file.)
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import PixelClassifierPanel, { type PixelClassifierPanelProps } from './index';
 import type { ClfTrainResult, ClfPredictCounts } from '@/hooks/usePixelClassifier';
-import type { ManifoldParams } from '@/hooks/useFeatureManifold';
 
 afterEach(() => {
   cleanup();
 });
 
 const BASE_PARAMS = { iterations: 200, depth: 6, learningRate: 0.1, alpha: 0.05 };
-
-const BASE_MANIFOLD_PARAMS: ManifoldParams = { k: 24, boxSize: 64 } as ManifoldParams;
 
 function makeModel(overrides: Partial<ClfTrainResult> = {}): ClfTrainResult {
   return {
@@ -85,24 +83,6 @@ function baseProps(overrides: Partial<PixelClassifierPanelProps> = {}): PixelCla
     vectorizingSlice: false,
     onMakeSliceEditable: vi.fn(),
     hasAnyPredictedPointers: false,
-    manifoldParams: BASE_MANIFOLD_PARAMS,
-    onManifoldParamsChange: vi.fn(),
-    manifoldSampling: false,
-    manifoldHasSample: false,
-    manifoldShowHeatmap: false,
-    onManifoldShowHeatmapChange: vi.fn(),
-    manifoldShowMarkers: false,
-    onManifoldShowMarkersChange: vi.fn(),
-    manifoldHeatmapOpacity: 0.5,
-    onManifoldHeatmapOpacityChange: vi.fn(),
-    manifoldMeta: null,
-    manifoldError: null,
-    onManifoldSample: vi.fn(),
-    onManifoldDismiss: vi.fn(),
-    manifoldRoiShapeCount: 0,
-    canCaptureManifoldRoi: false,
-    onCaptureManifoldRoi: vi.fn(),
-    onClearManifoldRoi: vi.fn(),
     ...overrides,
   };
 }
@@ -557,116 +537,6 @@ describe('PixelClassifierPanel', () => {
     it('renders the top-level error message', () => {
       render(<PixelClassifierPanel {...baseProps({ error: 'Feature bank missing.' })} />);
       expect(screen.getByText('Feature bank missing.')).toBeInTheDocument();
-    });
-  });
-
-  describe('suggest labels (manifold)', () => {
-    it('is collapsed by default and opens on click', async () => {
-      const user = userEvent.setup();
-      render(<PixelClassifierPanel {...baseProps()} />);
-      expect(screen.queryByText(/suggest regions to label/i)).not.toBeInTheDocument();
-      await user.click(screen.getByRole('button', { name: /suggest labels/i }));
-      expect(screen.getByText(/suggest regions to label/i)).toBeInTheDocument();
-    });
-
-    it('is disabled (non-clickable) when there is no feature job', async () => {
-      const user = userEvent.setup();
-      render(<PixelClassifierPanel {...baseProps({ hasFeatureJob: false })} />);
-      const header = screen.getByRole('button', { name: /suggest labels/i });
-      expect(header).toBeDisabled();
-      await user.click(header);
-      expect(screen.queryByText(/suggest regions to label/i)).not.toBeInTheDocument();
-    });
-
-    it('calls onManifoldSample and shows a sampling busy bar', async () => {
-      const user = userEvent.setup();
-      const onManifoldSample = vi.fn();
-      const { rerender } = render(
-        <PixelClassifierPanel {...baseProps({ onManifoldSample })} />,
-      );
-      await user.click(screen.getByRole('button', { name: /suggest labels/i }));
-      const sampleBtn = screen.getByRole('button', { name: /suggest regions to label/i });
-      await user.click(sampleBtn);
-      expect(onManifoldSample).toHaveBeenCalledTimes(1);
-
-      rerender(<PixelClassifierPanel {...baseProps({ onManifoldSample, manifoldSampling: true })} />);
-      expect(screen.getByText(/sampling manifold coverage…/i)).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /sampling…/i })).toBeDisabled();
-    });
-
-    it('shows manifold meta summary once sampled', async () => {
-      const user = userEvent.setup();
-      render(
-        <PixelClassifierPanel
-          {...baseProps({
-            manifoldMeta: { nPicked: 12, nSubsample: 5000, explainedVariance: 0.87 },
-          })}
-        />,
-      );
-      await user.click(screen.getByRole('button', { name: /suggest labels/i }));
-      expect(screen.getByText(/12 boxes from 5,000 px · 87% variance explained/)).toBeInTheDocument();
-    });
-
-    it('shows heatmap/marker toggles and opacity slider once a sample exists, and dismiss clears it', async () => {
-      const user = userEvent.setup();
-      const onManifoldShowHeatmapChange = vi.fn();
-      const onManifoldShowMarkersChange = vi.fn();
-      const onManifoldDismiss = vi.fn();
-      render(
-        <PixelClassifierPanel
-          {...baseProps({
-            manifoldHasSample: true,
-            onManifoldShowHeatmapChange,
-            onManifoldShowMarkersChange,
-            onManifoldDismiss,
-          })}
-        />,
-      );
-      await user.click(screen.getByRole('button', { name: /suggest labels/i }));
-      await user.click(screen.getByRole('checkbox', { name: /show coverage heatmap/i }));
-      expect(onManifoldShowHeatmapChange).toHaveBeenCalledWith(true);
-      await user.click(screen.getByRole('checkbox', { name: /show suggested boxes/i }));
-      expect(onManifoldShowMarkersChange).toHaveBeenCalledWith(true);
-      await user.click(screen.getByRole('button', { name: /dismiss suggestions/i }));
-      expect(onManifoldDismiss).toHaveBeenCalledTimes(1);
-    });
-
-    it('restrict-to-selection button is disabled without a capturable ROI, and enabled+clearable with one', async () => {
-      const user = userEvent.setup();
-      const onCaptureManifoldRoi = vi.fn();
-      const onClearManifoldRoi = vi.fn();
-      const { rerender } = render(
-        <PixelClassifierPanel
-          {...baseProps({ canCaptureManifoldRoi: false, manifoldRoiShapeCount: 0 })}
-        />,
-      );
-      await user.click(screen.getByRole('button', { name: /suggest labels/i }));
-      expect(screen.getByRole('button', { name: /restrict to selection \(0\)/i })).toBeDisabled();
-      expect(screen.queryByRole('button', { name: /^clear$/i })).not.toBeInTheDocument();
-
-      rerender(
-        <PixelClassifierPanel
-          {...baseProps({
-            canCaptureManifoldRoi: true,
-            manifoldRoiShapeCount: 2,
-            onCaptureManifoldRoi,
-            onClearManifoldRoi,
-          })}
-        />,
-      );
-      const restrictBtn = screen.getByRole('button', { name: /restrict to selection \(2\)/i });
-      expect(restrictBtn).toBeEnabled();
-      await user.click(restrictBtn);
-      expect(onCaptureManifoldRoi).toHaveBeenCalledTimes(1);
-      await user.click(screen.getByRole('button', { name: /^clear$/i }));
-      expect(onClearManifoldRoi).toHaveBeenCalledTimes(1);
-    });
-
-    it('shows a manifold error message', async () => {
-      const user = userEvent.setup();
-      render(<PixelClassifierPanel {...baseProps({ manifoldError: 'Sampling failed.' })} />);
-      await user.click(screen.getByRole('button', { name: /suggest labels/i }));
-      expect(screen.getByText('Sampling failed.')).toBeInTheDocument();
     });
   });
 });
