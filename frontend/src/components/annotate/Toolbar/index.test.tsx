@@ -211,6 +211,59 @@ describe('Toolbar', () => {
       render(<Toolbar samplerFit={{ collapsed: true, lo: 10, hi: 20 } as any} />);
       expect(screen.getByText('Band not applied')).toBeInTheDocument();
     });
+
+    it('offers "View band in 3D" for a plain (non-projected) fit and sends the native lo/hi', async () => {
+      const user = userEvent.setup();
+      const onSendBandTo3D = vi.fn();
+      useToolStore.setState({ tool: 'threshold' });
+      render(
+        <Toolbar
+          samplerFit={{
+            mode: 'plain',
+            collapsed: false,
+            lo: 10,
+            hi: 200,
+            displayLo: 40,
+            displayHi: 230,
+            dice: 0.9,
+            skill: 0.8,
+            coverage: 0.5,
+            extraSigma: 0,
+            appliedBlur: 0,
+          } as any}
+          onSendBandTo3D={onSendBandTo3D}
+        />,
+      );
+      const button = screen.getByRole('button', { name: /view band in 3d/i });
+      await user.click(button);
+      // Native (lo/hi), not the displayed range shown in the readout above it.
+      expect(onSendBandTo3D).toHaveBeenCalledWith(10, 200);
+    });
+
+    it('does not offer "View band in 3D" for a texture-projected fit', () => {
+      useToolStore.setState({ tool: 'threshold' });
+      render(
+        <Toolbar
+          samplerFit={{
+            mode: 'projected',
+            collapsed: false,
+            lo: 10,
+            hi: 200,
+            displayLo: 10,
+            displayHi: 200,
+            dice: 0.9,
+            skill: 0.8,
+            coverage: 0.5,
+            extraSigma: 0,
+            appliedBlur: 0,
+            intensitySkill: 0.4,
+            weights: [],
+          } as any}
+          onSendBandTo3D={vi.fn()}
+        />,
+      );
+      expect(screen.queryByRole('button', { name: /view band in 3d/i })).not.toBeInTheDocument();
+    });
   });
 
   describe('select panel', () => {

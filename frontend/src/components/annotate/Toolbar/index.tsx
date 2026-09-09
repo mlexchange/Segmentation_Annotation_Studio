@@ -4,7 +4,7 @@
  *           f=fill, s=select, g=magic, m=magnetic, Space=pan (hold), x=next slice,
  *           t=fit to screen, Ctrl/Cmd+Z=undo
  */
-import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, PaintBrush, Drop, Eyedropper, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight, ArrowCounterClockwise } from '@phosphor-icons/react';
+import { Hand, Cursor, Polygon, MagnetStraight, MagicWand, Rectangle, Circle, PaintBrush, Drop, Eyedropper, PaintBucket, Eraser, ArrowBendUpLeft, ArrowBendUpRight, ArrowCounterClockwise, Cube } from '@phosphor-icons/react';
 import { useMemo } from 'react';
 import { useStore } from 'zustand';
 import { useToolStore, type Tool } from '@/stores/toolStore';
@@ -95,7 +95,16 @@ function ToolButton({ tool, label, icon, keybind, activeTool, disabled, onSelect
 }
 
 /** Readout for one Sampler fit: what it chose, how well it did, and an undo. */
-function SamplerResult({ fit, onRevert }: { fit: SamplerFit; onRevert?: () => void }) {
+function SamplerResult({
+  fit,
+  onRevert,
+  onSendBandTo3D,
+}: {
+  fit: SamplerFit;
+  onRevert?: () => void;
+  /** Isolate this band in the 3D transfer function (native lo/hi, 0–255). */
+  onSendBandTo3D?: (lo: number, hi: number) => void;
+}) {
   const { label, quality } = describeFit(fit);
   const tone =
     quality === 'good' ? 'text-emerald-600' : quality === 'fair' ? 'text-amber-600' : 'text-red-600';
@@ -149,6 +158,20 @@ function SamplerResult({ fit, onRevert }: { fit: SamplerFit; onRevert?: () => vo
         covers {(fit.coverage * 100).toFixed(0)}%
         {fit.extraSigma > 0 && ` · blur ${fit.appliedBlur.toFixed(2)}`}
       </span>
+      {!projected && onSendBandTo3D && (
+        // Only a plain-intensity fit is expressible in the 3D viewer, which
+        // has just the raw scalar per voxel — a texture-projected band has
+        // no equivalent there.
+        <button
+          type="button"
+          onClick={() => onSendBandTo3D(fit.lo, fit.hi)}
+          title={`Isolate intensity ${fit.lo}–${fit.hi} in the 3D transfer function (opaque inside, transparent outside)`}
+          className="flex w-fit items-center gap-1 rounded px-1 py-0.5 text-[10px] text-sky-700 hover:bg-sky-100"
+        >
+          <Cube size={11} />
+          View band in 3D
+        </button>
+      )}
       {projected && (
         // The gate is no longer brightness, which changes how the rest of the
         // panel behaves — say so rather than letting it be discovered.
@@ -171,6 +194,8 @@ interface ToolbarProps {
   samplerFit?: SamplerFit | null;
   /** Restore the band/blur that were in force before the last fit. */
   onRevertSamplerFit?: () => void;
+  /** Isolate the last fitted band in the 3D transfer function (native lo/hi, 0–255). */
+  onSendBandTo3D?: (lo: number, hi: number) => void;
   /** 256-bin luminance histogram of the current slice — drives the threshold band
    *  picker. Owned by AnnotatePage (the canvas emits it); null before load. It is
    *  sampled from the PREPROCESSED base, so it must be remapped through the display
@@ -185,7 +210,7 @@ interface ToolbarProps {
 /** Renders the tool radiogroup, undo/redo, and the active tool's parameter controls. */
 export default function Toolbar({
   disabled = false, histogramBins = null, display, upscale = 1,
-  samplerFit = null, onRevertSamplerFit,
+  samplerFit = null, onRevertSamplerFit, onSendBandTo3D,
 }: ToolbarProps) {
   const {
     tool, setTool, brushSize, setBrushSize, fillThreshold, setFillThreshold,
@@ -369,7 +394,9 @@ export default function Toolbar({
               avoid the ring just outside — which also highlights similar features elsewhere.
               Nothing is annotated.
             </p>
-            {samplerFit && <SamplerResult fit={samplerFit} onRevert={onRevertSamplerFit} />}
+            {samplerFit && (
+              <SamplerResult fit={samplerFit} onRevert={onRevertSamplerFit} onSendBandTo3D={onSendBandTo3D} />
+            )}
           </div>
 
           <HistogramControl

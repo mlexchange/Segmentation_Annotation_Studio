@@ -331,6 +331,28 @@ class TestWriteMasksToTiled:
         assert info["n_slices"] == 1
         assert info["updated"] == 1
 
+    def test_slice_count_mismatch_discards_existing_and_replaces(
+        self, fake_client, monkeypatch, stub_register_mask_pyramid,
+    ):
+        # Metadata claims 2 slices (9 and 10) but the registered semantic array
+        # only actually holds 1 frame — e.g. stale metadata from a prior
+        # interrupted/partial write. Merging positionally by slice_indices would
+        # index past the array (`old_sem[1]` on a size-1 array) and crash with a
+        # numpy IndexError; this must be treated the same as an H/W mismatch.
+        short_semantic = np.zeros((1, H, W), dtype=np.uint8)
+        existing_container = FakeMaskContainer(
+            metadata={"legend": [], "slice_indices": [9, 10]},
+            children={"semantic": object()},
+        )
+        monkeypatch.setattr(tiled_mask_sync.mask_pyramid, "read_mask_scale0", lambda container, key: short_semantic)
+        fake_client._children["img__masks"] = existing_container
+
+        info = tiled_mask_sync.write_masks_to_tiled("browse/ds/img", None, self._volumes_dict(), _classes())
+        # Old slices 9/10 are gone entirely — replaced, not merged, due to the
+        # slice-count mismatch. Confirms no IndexError was raised too.
+        assert info["n_slices"] == 1
+        assert info["updated"] == 1
+
     def test_returns_correct_summary_counts(self, fake_client, stub_register_mask_pyramid):
         info = tiled_mask_sync.write_masks_to_tiled("browse/ds/img", None, self._volumes_dict(), _classes())
         assert info["n_classes"] == 2  # Cell + Wall

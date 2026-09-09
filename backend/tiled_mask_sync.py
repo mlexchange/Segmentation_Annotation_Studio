@@ -300,6 +300,19 @@ def write_masks_to_tiled(
     if existing is not None and existing["semantic"].shape[1:] != volumes["semantic"].shape[1:]:
         logger.warning("mask merge: shape changed for %s — replacing existing masks", source)
         existing = None
+    # slice_indices (container metadata) and the registered semantic array's own
+    # slice count can disagree — e.g. a prior interrupted/partial write, or stale
+    # metadata left over from before a fix landed — and merge_mask_volumes indexes
+    # the array positionally by `enumerate(slice_indices)`, so a longer metadata
+    # list than the array actually holds raises "index N is out of bounds for
+    # axis 0" deep inside the merge. Same "can't trust it, replace" contract as
+    # the H/W-mismatch guard above, rather than crashing the whole write.
+    if existing is not None and existing["semantic"].shape[0] != len(existing["slice_indices"]):
+        logger.warning(
+            "mask merge: slice_indices (%d) != stored semantic slices (%d) for %s — replacing existing masks",
+            len(existing["slice_indices"]), existing["semantic"].shape[0], source,
+        )
+        existing = None
 
     merged = merge_mask_volumes(existing, volumes)
 

@@ -79,7 +79,7 @@ export default function RebuildVolumeControl({ source, serverUri, onRebuilt }: R
   const percent = job && job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
 
   return (
-    <div className="pointer-events-auto flex flex-col items-end gap-1">
+    <div className="pointer-events-auto flex flex-col items-start gap-1">
       <button
         type="button"
         disabled={running}

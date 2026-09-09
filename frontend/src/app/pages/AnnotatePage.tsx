@@ -408,6 +408,12 @@ export default function AnnotatePage() {
     navigate('/volume?mask=fast');
   }, [navigate]);
 
+  /** Isolate a Sampler-fitted intensity band in the 3D transfer function —
+   *  see VolumePage's bandLo/bandHi query-param handling. */
+  const handleSendBandTo3D = useCallback((lo: number, hi: number) => {
+    navigate(`/volume?bandLo=${lo}&bandHi=${hi}`);
+  }, [navigate]);
+
   const classLabelForId = useCallback(
     (classId: number) => {
       const c = classes.find((x) => x.classId === classId);
@@ -549,6 +555,7 @@ export default function AnnotatePage() {
                 upscale={upscale}
                 samplerFit={samplerFit}
                 onRevertSamplerFit={revertSamplerFit}
+                onSendBandTo3D={handleSendBandTo3D}
               />
               <hr />
               <DisplayControls

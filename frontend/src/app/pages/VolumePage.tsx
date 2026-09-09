@@ -31,6 +31,7 @@ import VolumeViewer, { webGpuAvailability, type WebGpuViewerInstance } from '@/c
 import BuildVolumePanel from '@/components/volume/BuildVolumePanel';
 import MaskLayersPanel from '@/components/volume/MaskLayersPanel';
 import RebuildVolumeControl from '@/components/volume/RebuildVolumeControl';
+import { buildBandOpacityCurve } from '@/lib/bandTransferFunction';
 
 /** Shape of `GET /api/volume/resolve`. */
 interface VolumeNode {
@@ -94,6 +95,36 @@ export default function VolumePage() {
   // A new dataset deserves a fresh attempt — otherwise one bad volume leaves the
   // page stuck on its error for every dataset opened afterwards.
   useEffect(() => setBootError(null), [source, serverUri]);
+
+  // "View band in 3D" hand-off from Annotate's Sampler tool (a fitted
+  // intensity band, native 0-255 space) arrives as `?bandLo=&bandHi=` —
+  // isolate it in the transfer function once the viewer is ready.
+  // See bandTransferFunction.ts and the plan's #21 threshold-fit bridge.
+  //
+  // The vendored viewer restores a per-sample cached transfer function from
+  // localStorage the moment the first real data level streams in (a one-shot
+  // "boot restore" internal to the renderer, with no public event exposed to
+  // detect it — WebGpuViewerInstance has no "level loaded"/histogram-ready
+  // signal) — which races with and can silently clobber the band we just
+  // set. There's no way to sequence after that restore from the app today,
+  // so re-apply on a bounded retry schedule that comfortably outlasts a
+  // typical first-level load; each retry is cheap (a state merge +
+  // re-render), so the redundant calls cost nothing.
+  const bandLoParam = searchParams.get('bandLo');
+  const bandHiParam = searchParams.get('bandHi');
+  useEffect(() => {
+    if (!viewerInstance || bandLoParam == null || bandHiParam == null) return;
+    const lo = Number(bandLoParam);
+    const hi = Number(bandHiParam);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return;
+    const curve = buildBandOpacityCurve(lo, hi);
+    const apply = () => {
+      viewerInstance.setRendering({ ...viewerInstance.getRendering(), opacityPoints: curve });
+    };
+    const retryDelaysMs = [0, 200, 500, 1000, 2000, 4000, 8000];
+    const timers = retryDelaysMs.map((ms) => setTimeout(apply, ms));
+    return () => timers.forEach(clearTimeout);
+  }, [viewerInstance, bandLoParam, bandHiParam]);
 
   // Fallback only: a dataset opened against the default local Tiled carries a
   // null serverUri, and the resolved address (whatever port start_all.sh
@@ -200,7 +231,10 @@ export default function VolumePage() {
         nSlices={meta?.nSlices}
       />
       {node?.mode === 'sidecar' && source && (
-        <div className="pointer-events-none absolute right-3 top-3 z-10">
+        // Bottom-left: the vendor's own docked HUD (Data/TF/Render tabs) spans
+        // the whole right column, and MaskLayersPanel already owns top-left —
+        // this is the one corner clear of both.
+        <div className="pointer-events-none absolute left-3 bottom-3 z-10">
           <RebuildVolumeControl
             source={source}
             serverUri={resolvedUri}
