@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router';
 import ColumnBrowser from './ColumnBrowser';
 import type { BrowseItem } from './hooks/useBrowseData';
 import type { ServerInfo } from '@/types/server';
@@ -99,7 +100,7 @@ function renderBrowser(overrides: Partial<React.ComponentProps<typeof ColumnBrow
     onAnnotationFilterChange: vi.fn(),
     ...overrides,
   };
-  return { ...render(<ColumnBrowser {...props} />), props };
+  return { ...render(<ColumnBrowser {...props} />, { wrapper: MemoryRouter }), props };
 }
 
 beforeEach(() => {
@@ -140,6 +141,7 @@ describe('ColumnBrowser', () => {
     renderBrowser();
 
     expect(await screen.findByText(/Cannot reach the API server/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /go to connect/i })).toBeInTheDocument();
     expect(screen.queryByTestId('items-column')).not.toBeInTheDocument();
   });
 

@@ -46,6 +46,7 @@ import VersionPreviewBar from '@/components/annotate/VersionPreviewBar';
 import PerfOverlay from '@/components/annotate/PerfOverlay';
 import type { SamplerFit } from '@/components/annotate/AnnotationCanvas';
 import { initPerf } from '@/lib/perf';
+import { loadDisplayPrefs, saveDisplayPrefs } from '@/lib/displayPrefs';
 import SaveModal from '@/components/annotate/SaveModal';
 import type { SaveDraftPayload } from '@/hooks/useSave';
 
@@ -106,19 +107,28 @@ export default function AnnotatePage() {
     if (classes.length > 0) setActiveClassId(classes[0].classId);
   }, [classes, activeClassId]);
 
-  const [brightness, setBrightness] = useState(0);
-  const [contrast, setContrast] = useState(0);
+  // Cosmetic display sliders survive reload via localStorage (global viewer
+  // preference, not per-sample/draft) — read once, lazily, on first mount.
+  const [initialDisplayPrefs] = useState(() => loadDisplayPrefs());
+  const [brightness, setBrightness] = useState(() => initialDisplayPrefs.brightness ?? 0);
+  const [contrast, setContrast] = useState(() => initialDisplayPrefs.contrast ?? 0);
   // Min/max levels window (0–255) + histogram of the current slice (client-side).
-  const [levelsLo, setLevelsLo] = useState(0);
-  const [levelsHi, setLevelsHi] = useState(255);
+  const [levelsLo, setLevelsLo] = useState(() => initialDisplayPrefs.levelsLo ?? 0);
+  const [levelsHi, setLevelsHi] = useState(() => initialDisplayPrefs.levelsHi ?? 255);
   const [histogramBins, setHistogramBins] = useState<number[] | null>(null);
   // Display-only false-color map + gamma.
-  const [colormap, setColormap] = useState<ColormapName>('gray');
-  const [gamma, setGamma] = useState(1);
+  const [colormap, setColormap] = useState<ColormapName>(() => initialDisplayPrefs.colormap ?? 'gray');
+  const [gamma, setGamma] = useState(() => initialDisplayPrefs.gamma ?? 1);
   // Display-only nonlinear preprocessors (Gaussian blur / adaptive CLAHE / Sharpen).
-  const [clahe, setClahe] = useState(false);
-  const [sharpen, setSharpen] = useState(false);
-  const [blur, setBlur] = useState(0);
+  const [clahe, setClahe] = useState(() => initialDisplayPrefs.clahe ?? false);
+  const [sharpen, setSharpen] = useState(() => initialDisplayPrefs.sharpen ?? false);
+  const [blur, setBlur] = useState(() => initialDisplayPrefs.blur ?? 0);
+  // Persist on every change — deliberately excludes `denoise`, which stays
+  // unpersisted (see datasetStore.ts): a strength tuned to one volume's noise
+  // level would silently mis-filter a different one carried over.
+  useEffect(() => {
+    saveDisplayPrefs({ brightness, contrast, levelsLo, levelsHi, gamma, colormap, clahe, sharpen, blur });
+  }, [brightness, contrast, levelsLo, levelsHi, gamma, colormap, clahe, sharpen, blur]);
   const [bakeOpen, setBakeOpen] = useState(false);
   // Working resolution for the drawing tools (1x, 2x, 4x). Annotation coordinates
   // stay native; upscaling only buys sub-pixel precision on small features.

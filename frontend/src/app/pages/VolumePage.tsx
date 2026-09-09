@@ -18,7 +18,7 @@
  * containers `tiled_mask_sync.write_masks_to_tiled` writes.
  */
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { Cube } from '@phosphor-icons/react';
 import { API_BASE } from '@/config';
@@ -41,7 +41,19 @@ interface VolumeNode {
 }
 
 /** Centered message panel — every non-rendering state uses this shape. */
-function Notice({ title, detail, hint }: { title: string; detail: string; hint?: string }) {
+function Notice({
+  title,
+  detail,
+  hint,
+  showReconnect,
+}: {
+  title: string;
+  detail: string;
+  hint?: string;
+  /** Shows a "Go to Connect" button instead of leaving a dead-end message. */
+  showReconnect?: boolean;
+}) {
+  const navigate = useNavigate();
   return (
     <div className="flex h-full items-center justify-center p-8">
       <div className="max-w-md text-center text-sky-200">
@@ -49,6 +61,14 @@ function Notice({ title, detail, hint }: { title: string; detail: string; hint?:
         <p className="mb-1 font-medium">{title}</p>
         <p className="text-sm opacity-80">{detail}</p>
         {hint && <p className="mt-3 text-xs opacity-60">{hint}</p>}
+        {showReconnect && (
+          <button
+            onClick={() => navigate('/connect')}
+            className="mt-4 px-3 py-1.5 text-xs rounded-md bg-sky-600 text-white hover:bg-sky-500 transition-colors"
+          >
+            Go to Connect
+          </button>
+        )}
       </div>
     </div>
   );
@@ -90,7 +110,7 @@ export default function VolumePage() {
 
   const resolvedUri = serverUri ?? servers[0]?.uri ?? null;
 
-  const { data: node, isLoading: resolving } = useQuery<VolumeNode>({
+  const { data: node, isLoading: resolving, isError: resolveError } = useQuery<VolumeNode>({
     queryKey: ['volume-node', resolvedUri, source],
     queryFn: async () => {
       const params = new URLSearchParams({ source: source! });
@@ -100,11 +120,25 @@ export default function VolumePage() {
       return res.json();
     },
     enabled: kind === 'tiled' && !!source,
+    retry: 1,
   });
 
   const availability = webGpuAvailability();
   if (!availability.ok) {
     return <Notice title="3D view unavailable" detail={availability.reason} />;
+  }
+
+  // A genuine failure to reach Tiled (server down, network drop) previously
+  // fell through to the generic "resolving" reason forever — a dead end with
+  // no way back to Connect short of the browser's own back button.
+  if (kind === 'tiled' && resolveError) {
+    return (
+      <Notice
+        title="Couldn't reach the Tiled server"
+        detail="The volume could not be resolved — the connection may have dropped."
+        showReconnect
+      />
+    );
   }
 
   // Resolution only applies to Tiled sources; everything else already has a
@@ -123,7 +157,13 @@ export default function VolumePage() {
   }
 
   if (!url || reason) {
-    return <Notice title="Nothing to render" detail={describeUnavailable(reason ?? 'no-source')} />;
+    return (
+      <Notice
+        title="Nothing to render"
+        detail={describeUnavailable(reason ?? 'no-source')}
+        showReconnect={(reason ?? 'no-source') === 'no-source'}
+      />
+    );
   }
 
   if (bootError) {
