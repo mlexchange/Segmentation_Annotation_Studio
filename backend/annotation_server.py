@@ -588,6 +588,7 @@ async def image_meta(
         meta = arrays_mod.array_shape_meta(node, pyramid)
         sl = arrays_mod.read_slice(node, meta, 0)
         flat = sl.ravel().astype(float)
+        global_range = images_mod._sample_global_stats(node, meta) if not meta["is_rgb"] else None
         return ImageMeta(
             n_slices=meta["n_slices"],
             height=meta["height"],
@@ -595,6 +596,7 @@ async def image_meta(
             dtype=meta["dtype"],
             is_rgb=meta["is_rgb"],
             value_range=[float(flat.min()), float(flat.max())],
+            global_value_range=list(global_range) if global_range is not None else None,
             keywords=arrays_mod.node_keywords(node),
             level_key=meta.get("level_key"),
             level_index=meta.get("level_index"),

@@ -86,6 +86,7 @@ export function useOpenInAnnotate() {
         dtype: meta.dtype,
         isRgb: meta.is_rgb,
         valueRange: meta.value_range,
+        globalValueRange: meta.global_value_range ?? null,
         // Multiscale volumes: width/height/nSlices above are the FINEST level's
         // (annotations live in full-res coordinates); these say what is drawn.
         levelKey: meta.level_key ?? null,
@@ -129,6 +130,7 @@ export function useOpenInAnnotate() {
         dtype: meta.dtype,
         isRgb: meta.is_rgb,
         valueRange: meta.value_range,
+        globalValueRange: meta.global_value_range ?? null,
       });
 
       const sourceKey = buildSourceKey('local', relPath);

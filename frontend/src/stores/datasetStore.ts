@@ -10,6 +10,13 @@ export interface ImageMeta {
   dtype: string;
   isRgb: boolean;
   valueRange: [number, number];
+  /** The [vmin, vmax] actually used by `/api/image/slice`'s norm="global"
+   *  rendering (a 1st/99th-percentile stretch across the whole volume) —
+   *  distinct from `valueRange` above (slice 0's raw min/max). Needed to
+   *  convert a displayed 0-255 byte value back to a physical intensity, e.g.
+   *  the Sampler-fitted band sent to the 3D viewer. `null` for RGB sources
+   *  (the backend doesn't compute it for those). */
+  globalValueRange?: [number, number] | null;
   /** Multiscale (Zarr) volumes only — which pyramid level is being displayed.
    *  `width`/`height`/`nSlices` above always describe the FINEST level, because
    *  annotations are stored in full-resolution coordinates whichever level is

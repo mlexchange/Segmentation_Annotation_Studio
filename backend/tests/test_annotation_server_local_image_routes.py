@@ -262,6 +262,15 @@ class TestImageMeta:
         assert body["keywords"] == ["tag1"]
 
     @pytest.mark.asyncio
+    async def test_includes_global_value_range_used_by_slice_rendering(self, client, fake_image_source, monkeypatch):
+        monkeypatch.setattr(images_mod, "_sample_global_stats", lambda node, meta: (-73.0, 71.3))
+        response = await client.get(
+            "/api/image/meta", params={"source": "local:foo.tif", "kind": "local"},
+        )
+        assert response.status_code == 200
+        assert response.json()["global_value_range"] == [-73.0, 71.3]
+
+    @pytest.mark.asyncio
     async def test_resolve_failure_is_500(self, client, monkeypatch):
         monkeypatch.setattr(
             arrays_mod, "resolve_array",

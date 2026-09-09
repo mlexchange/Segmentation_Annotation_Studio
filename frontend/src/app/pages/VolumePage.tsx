@@ -31,7 +31,7 @@ import VolumeViewer, { webGpuAvailability, type WebGpuViewerInstance } from '@/c
 import BuildVolumePanel from '@/components/volume/BuildVolumePanel';
 import MaskLayersPanel from '@/components/volume/MaskLayersPanel';
 import RebuildVolumeControl from '@/components/volume/RebuildVolumeControl';
-import { buildBandOpacityCurve } from '@/lib/bandTransferFunction';
+import { buildBandOpacityCurve, mapByteBandToViewerDomain } from '@/lib/bandTransferFunction';
 
 /** Shape of `GET /api/volume/resolve`. */
 interface VolumeNode {
@@ -97,9 +97,19 @@ export default function VolumePage() {
   useEffect(() => setBootError(null), [source, serverUri]);
 
   // "View band in 3D" hand-off from Annotate's Sampler tool (a fitted
-  // intensity band, native 0-255 space) arrives as `?bandLo=&bandHi=` —
-  // isolate it in the transfer function once the viewer is ready.
-  // See bandTransferFunction.ts and the plan's #21 threshold-fit bridge.
+  // intensity band, in the 2D canvas's own 0-255 byte space) arrives as
+  // `?bandLo=&bandHi=` — isolate it in the transfer function once the viewer
+  // is ready. See bandTransferFunction.ts and the plan's #21 threshold-fit
+  // bridge.
+  //
+  // The byte band does NOT translate to the viewer's [0,1] domain by a plain
+  // /255 — the 2D canvas's bytes are normalized against `meta.globalValueRange`
+  // (a percentile stretch), while the 3D viewer normalizes raw voxels against
+  // its OWN, separately-estimated `getValueRange()` — different statistics
+  // computed from different data, typically close but never identical.
+  // `mapByteBandToViewerDomain` converts byte -> raw physical value -> the
+  // viewer's actual domain, rather than assuming the two normalizations agree
+  // (confirmed live: assuming they did produced a wildly wrong band).
   //
   // The vendored viewer restores a per-sample cached transfer function from
   // localStorage the moment the first real data level streams in (a one-shot
@@ -114,17 +124,18 @@ export default function VolumePage() {
   const bandHiParam = searchParams.get('bandHi');
   useEffect(() => {
     if (!viewerInstance || bandLoParam == null || bandHiParam == null) return;
-    const lo = Number(bandLoParam);
-    const hi = Number(bandHiParam);
-    if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return;
-    const curve = buildBandOpacityCurve(lo, hi);
+    const loByte = Number(bandLoParam);
+    const hiByte = Number(bandHiParam);
+    if (!Number.isFinite(loByte) || !Number.isFinite(hiByte) || hiByte <= loByte) return;
     const apply = () => {
-      viewerInstance.setRendering({ ...viewerInstance.getRendering(), opacityPoints: curve });
+      const viewerRange = viewerInstance.getValueRange();
+      const [lo01, hi01] = mapByteBandToViewerDomain(loByte, hiByte, meta?.globalValueRange, viewerRange);
+      viewerInstance.setRendering({ ...viewerInstance.getRendering(), opacityPoints: buildBandOpacityCurve(lo01, hi01) });
     };
     const retryDelaysMs = [0, 200, 500, 1000, 2000, 4000, 8000];
     const timers = retryDelaysMs.map((ms) => setTimeout(apply, ms));
     return () => timers.forEach(clearTimeout);
-  }, [viewerInstance, bandLoParam, bandHiParam]);
+  }, [viewerInstance, bandLoParam, bandHiParam, meta?.globalValueRange]);
 
   // Fallback only: a dataset opened against the default local Tiled carries a
   // null serverUri, and the resolved address (whatever port start_all.sh

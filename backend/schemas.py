@@ -429,6 +429,15 @@ class ImageMeta(BaseModel):
         dtype: NumPy dtype string (e.g. ``"float32"``).
         is_rgb: ``True`` if the array has a colour channel dimension.
         value_range: ``[min, max]`` of the first slice.
+        global_value_range: ``[vmin, vmax]`` actually used by
+            ``GET /api/image/slice``'s default ``norm="global"`` rendering —
+            the 1st/99th percentile (by default) sampled across up to 64
+            slices spanning the whole volume (see ``images._sample_global_stats``),
+            cached 5 minutes. Distinct from ``value_range`` above (which is
+            just slice 0's raw min/max): this is the real contrast window the
+            2D canvas's pixel bytes are normalized against, needed by anything
+            that must convert a displayed 0-255 value back to a physical
+            intensity (e.g. the Sampler-fitted band sent to the 3D viewer).
         keywords: Dataset tags stored at ingest; each is pre-created as an
             annotation class in the Annotate tab.
         level_key: For a multiscale Zarr volume, the pyramid level being read
@@ -449,6 +458,7 @@ class ImageMeta(BaseModel):
     dtype: str
     is_rgb: bool
     value_range: list[float]
+    global_value_range: list[float] | None = None
     keywords: list[str] = Field(default_factory=list)
     level_key: str | None = None
     level_index: int | None = None

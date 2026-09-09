@@ -51,6 +51,16 @@ interface SlotState {
   classes: MaskClasses;
   /** Ignored for slots where `canLive` is false. */
   mode: SourceMode;
+  /** Set once the loading poll (see `waitForClasses`) has been running a
+   *  while — a "hasn't shown up yet" hint, not an error, since a large Tiled
+   *  mask (e.g. a 690-slice dlsia result) can legitimately take a while over
+   *  the network. */
+  slowLoad: boolean;
+  /** True only when `error` came from `waitForClasses` timing out — the
+   *  underlying (fire-and-forget) load may still finish moments later, so
+   *  this is the one error case worth offering a re-check for. Other errors
+   *  (no source open, nothing annotated yet) won't change by re-polling. */
+  canRetry: boolean;
 }
 
 const initialSlotState: SlotState = {
@@ -61,6 +71,8 @@ const initialSlotState: SlotState = {
   opacity: 0.6,
   classes: [],
   mode: 'live',
+  slowLoad: false,
+  canRetry: false,
 };
 
 interface MaskLayersPanelProps {
@@ -116,6 +128,38 @@ export default function MaskLayersPanel({
 
   if (!instance) return null;
 
+  /** Shared tail for both load paths: poll for classes, softening to a
+   *  "still loading" hint rather than a bare spinner once it's taking a
+   *  while, and update state on both success and eventual (rare) failure. */
+  const pollForClasses = async (cfg: SlotConfig, noClassesMessage: string | null) => {
+    setState((s) => ({ ...s, [cfg.slot]: { ...s[cfg.slot], loading: true, slowLoad: false, canRetry: false } }));
+    try {
+      const classes = await waitForClasses(instance, cfg.slot, {
+        onSlow: () => setState((s) => ({ ...s, [cfg.slot]: { ...s[cfg.slot], slowLoad: true } })),
+      });
+      setState((s) => ({
+        ...s,
+        [cfg.slot]: {
+          ...s[cfg.slot], loading: false, loaded: true, classes, slowLoad: false, canRetry: false,
+          error: classes.length === 0 ? noClassesMessage : null,
+        },
+      }));
+    } catch (err) {
+      setState((s) => ({
+        ...s,
+        [cfg.slot]: {
+          ...s[cfg.slot], loading: false, slowLoad: false, canRetry: true,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      }));
+    }
+  };
+
+  /** Re-poll without re-triggering the underlying load — for when
+   *  `waitForClasses`'s own (generous) budget ran out, but the fire-and-forget
+   *  load may well have finished moments later in the background regardless. */
+  const checkAgain = (cfg: SlotConfig) => void pollForClasses(cfg, null);
+
   const load = async (cfg: SlotConfig, modeOverride?: SourceMode) => {
     const mode = modeOverride ?? state[cfg.slot].mode;
 
@@ -126,49 +170,28 @@ export default function MaskLayersPanel({
       if (!volume) {
         setState((s) => ({
           ...s,
-          [cfg.slot]: { ...s[cfg.slot], error: 'Nothing annotated for this sample yet.', loading: false },
+          [cfg.slot]: { ...s[cfg.slot], error: 'Nothing annotated for this sample yet.', loading: false, canRetry: false },
         }));
         return;
       }
-      setState((s) => ({ ...s, [cfg.slot]: { ...s[cfg.slot], loading: true, error: null } }));
-      try {
-        instance.loadMaskFromArray(cfg.slot, volume.data, volume.dims);
-        const classes = await waitForClasses(instance, cfg.slot);
-        setState((s) => ({
-          ...s,
-          [cfg.slot]: { ...s[cfg.slot], loading: false, loaded: true, classes, error: null },
-        }));
-      } catch (err) {
-        setState((s) => ({
-          ...s,
-          [cfg.slot]: { ...s[cfg.slot], loading: false, error: err instanceof Error ? err.message : String(err) },
-        }));
-      }
+      instance.loadMaskFromArray(cfg.slot, volume.data, volume.dims);
+      await pollForClasses(cfg, null);
       return;
     }
 
     const { url, reason } = buildMaskZarrUrl(kind, source, serverUri, cfg.suffix);
     if (!url) {
-      setState((s) => ({ ...s, [cfg.slot]: { ...s[cfg.slot], error: reason ?? 'No source open', loading: false } }));
+      setState((s) => ({
+        ...s,
+        [cfg.slot]: { ...s[cfg.slot], error: reason ?? 'No source open', loading: false, canRetry: false },
+      }));
       return;
     }
-    setState((s) => ({ ...s, [cfg.slot]: { ...s[cfg.slot], loading: true, error: null } }));
-    try {
-      instance.loadMask(cfg.slot, url);
-      // loadMask is fire-and-forget on the instance (see the upstream brief:
-      // internal state, not a returned promise) — poll briefly for classes to
-      // appear rather than assuming synchronous completion.
-      const classes = await waitForClasses(instance, cfg.slot);
-      setState((s) => ({
-        ...s,
-        [cfg.slot]: { ...s[cfg.slot], loading: false, loaded: true, classes, error: classes.length === 0 ? 'Loaded, but no classes found (every voxel is background, or nothing has been pushed to Tiled for this dataset yet).' : null },
-      }));
-    } catch (err) {
-      setState((s) => ({
-        ...s,
-        [cfg.slot]: { ...s[cfg.slot], loading: false, error: err instanceof Error ? err.message : String(err) },
-      }));
-    }
+    instance.loadMask(cfg.slot, url);
+    await pollForClasses(
+      cfg,
+      'Loaded, but no classes found (every voxel is background, or nothing has been pushed to Tiled for this dataset yet).',
+    );
   };
 
   const remove = (cfg: SlotConfig) => {
@@ -225,7 +248,7 @@ export default function MaskLayersPanel({
                   className="flex items-center gap-1 rounded bg-sky-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50"
                 >
                   {s.loading && <CircleNotch size={12} className="animate-spin" />}
-                  {s.loading ? 'Loading…' : 'Load'}
+                  {s.loading ? (s.slowLoad ? 'Still loading…' : 'Loading…') : 'Load'}
                 </button>
               )}
             </div>
@@ -251,7 +274,20 @@ export default function MaskLayersPanel({
               </div>
             )}
 
-            {s.error && <p className="mb-2 text-xs text-amber-300">{s.error}</p>}
+            {s.error && (
+              <div className="mb-2 flex flex-col gap-1">
+                <p className="text-xs text-amber-300">{s.error}</p>
+                {s.canRetry && (
+                  <button
+                    type="button"
+                    onClick={() => checkAgain(cfg)}
+                    className="w-fit rounded px-2 py-0.5 text-xs text-sky-300 hover:bg-sky-900/60"
+                  >
+                    Check again
+                  </button>
+                )}
+              </div>
+            )}
 
             {s.loaded && s.classes.length > 0 && (
               <div className="flex flex-col gap-1.5">
@@ -300,21 +336,46 @@ export default function MaskLayersPanel({
 
 /**
  * `loadMask` mutates viewer-internal state asynchronously with no returned
- * promise (see the upstream brief's Step 3 — it's fire-and-forget on the
- * public interface, matching how the HUD's own click handler calls it).
- * Poll `getMaskClasses` briefly rather than assuming it's ready on the next
- * tick — mirrors how `InferencePanel`/`useExportJob` poll a job status
- * elsewhere in this app rather than trusting synchronous completion.
+ * promise and no error/progress signal on the public interface (see the
+ * upstream brief's Step 3 — it's fire-and-forget, matching how the HUD's own
+ * click handler calls it, and `getMaskClasses` is the only observable outcome:
+ * `undefined` covers both "still loading" and "failed" indistinguishably).
+ * Poll rather than assuming synchronous completion — mirrors how
+ * `InferencePanel`/`useExportJob` poll a job status elsewhere in this app.
+ *
+ * Budget is generous (5 minutes) rather than the original 5 seconds: a real
+ * Tiled-backed "Deep" mask (e.g. a 690-slice dlsia result, freshly written)
+ * can legitimately take much longer than a few seconds to fetch over the
+ * network, and a short timeout here doesn't stop the load — it keeps running
+ * in the vendored viewer regardless — it just makes OUR panel declare defeat
+ * (and hide the opacity/visibility controls) while the mask goes on to load
+ * and render successfully moments later, exactly the bug this widening fixes.
+ * `onSlow` fires once after `slowAfterMs` so the caller can soften the UI
+ * from a bare spinner into an explicit "still loading" hint, since 5 minutes
+ * of unexplained silence would look broken even though it's still working.
  */
 async function waitForClasses(
   instance: WebGpuViewerInstance,
   slot: 0 | 1,
-  { attempts = 50, intervalMs = 100 }: { attempts?: number; intervalMs?: number } = {},
+  {
+    attempts = 300,
+    intervalMs = 1000,
+    slowAfterMs = 5000,
+    onSlow,
+  }: { attempts?: number; intervalMs?: number; slowAfterMs?: number; onSlow?: () => void } = {},
 ): Promise<MaskClasses> {
+  let slowFired = false;
   for (let i = 0; i < attempts; i++) {
     const classes = instance.getMaskClasses(slot);
     if (classes !== undefined) return classes;
+    if (!slowFired && i * intervalMs >= slowAfterMs) {
+      slowFired = true;
+      onSlow?.();
+    }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
-  throw new Error('Timed out waiting for the mask to load — check the browser console for a renderer-side error.');
+  throw new Error(
+    'Still waiting for the mask to load after 5 minutes — it may finish shortly on its own ' +
+      '(click "Check again" below), or check the browser console for a renderer-side error.',
+  );
 }
