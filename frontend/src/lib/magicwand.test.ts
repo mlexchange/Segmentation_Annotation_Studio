@@ -59,6 +59,36 @@ describe('magicwand', () => {
     expect(Math.max(...walled[0].filter((_, i) => i % 2 === 0))).toBeLessThan(21);
   });
 
+  it('blocked keeps the flood from crossing a cell already claimed by another class', () => {
+    // Uniform intensity field — nothing but `blocked` should stop the flood.
+    const gw = 40, gh = 40;
+    const gray = new Float32Array(gw * gh).fill(50);
+    const field: GrayField = { gw, gh, scale: 1, gray };
+
+    // Without `blocked` the whole uniform field floods (crosses x=20).
+    const open = magicSelect(field, 5, 5, { toleranceFrac: 0.5, mode: 'contiguous', smooth: 0, minRegion: 8 });
+    expect(open.length).toBe(1);
+    expect(Math.max(...open[0].filter((_, i) => i % 2 === 0))).toBeGreaterThan(25);
+
+    // A vertical "wall" of another class's pixels at x=20 stops the flood at it.
+    const blocked = new Uint8Array(gw * gh);
+    for (let y = 0; y < gh; y++) blocked[y * gw + 20] = 1;
+    const walled = magicSelect(field, 5, 5, { toleranceFrac: 0.5, mode: 'contiguous', smooth: 0, minRegion: 8, blocked });
+    expect(walled.length).toBe(1);
+    expect(Math.max(...walled[0].filter((_, i) => i % 2 === 0))).toBeLessThan(21);
+  });
+
+  it('blocked does not prevent flooding when the seed itself sits on a blocked cell', () => {
+    const gw = 20, gh = 20;
+    const gray = new Float32Array(gw * gh).fill(50);
+    const field: GrayField = { gw, gh, scale: 1, gray };
+    const blocked = new Uint8Array(gw * gh);
+    blocked[9 * gw + 9] = 1; // the seed cell itself
+
+    const polys = magicSelect(field, 9, 9, { toleranceFrac: 0.5, mode: 'contiguous', smooth: 0, minRegion: 8, blocked });
+    expect(polys.length).toBe(1); // seed is exempt, matching edgeStop's own wall exemption
+  });
+
   it('fills a uniform region with edgeStop on (noise must not wall the flood)', () => {
     // Left half uniform (100, with faint noise), right half 200, sharp edge at x=30.
     const gw = 60, gh = 40;

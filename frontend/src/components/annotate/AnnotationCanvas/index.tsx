@@ -1523,6 +1523,19 @@ export default function AnnotationCanvas({
     const field = ensureMagicField();
     if (!field) { setMagicPreview([]); return; }
     setMagicLoading(true);
+    // Fill should stop at a pixel already claimed by a different annotated
+    // class (Peter's "like a wall" ask) — rasterize the other classes onto
+    // the same grid `field` uses and pass it as a flood-time barrier, so the
+    // preview itself is bounded, not just the post-commit clip (`clipToOtherClasses`
+    // already trims the committed shape, but the flood could wander arbitrarily
+    // far across a neighbor first).
+    const blocked =
+      isFill && activeClassId !== null
+        ? (() => {
+            const others = storeShapes.filter((s) => s.classId !== activeClassId);
+            return others.length > 0 ? rasterizeUnion(others, field.gw, field.gh, field.scale) : undefined;
+          })()
+        : undefined;
     const id = requestAnimationFrame(() => {
       const polys: number[][] = [];
       for (const seed of magicSeeds) {
@@ -1532,6 +1545,7 @@ export default function AnnotationCanvas({
             mode: isFill ? 'contiguous' : magicMode,
             smooth: isFill ? 1 : magicSigma,
             edgeStop: isFill ? 0 : magicEdgeStop,
+            blocked,
           }),
         );
       }
@@ -1539,7 +1553,7 @@ export default function AnnotationCanvas({
       setMagicLoading(false);
     });
     return () => cancelAnimationFrame(id);
-  }, [tool, magicSeeds, magicBox, autoNegPoints, samDetail, samThreshold, samConnectedOnly, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, fillThreshold, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tool, magicSeeds, magicBox, autoNegPoints, samDetail, samThreshold, samConnectedOnly, samEncodeKey, makeSamSource, magicEngine, magicTolerance, magicMode, magicSigma, magicEdgeStop, fillThreshold, ensureMagicField, imageEl, meta, sam.ensureEncoded, sam.segment, storeShapes, activeClassId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Commit the magic preview polygons as new shapes (one batched undo step). */
   const commitMagic = useCallback(() => {

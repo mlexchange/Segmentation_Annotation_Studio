@@ -88,6 +88,8 @@ nav:
       - 3. Annotate: guide/annotate.md
       - 4. Annotation guide: guide/reference-guide.md
       - 5. Export & download: guide/export.md
+      - 6. Train a deep model: guide/train.md
+      - 7. 3D volume view: guide/volume.md
   - Reference:
       - Software architecture: reference/architecture.md
       - Keyboard shortcuts: reference/shortcuts.md

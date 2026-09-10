@@ -300,6 +300,11 @@ interface SelectOpts {
   /** 0–1 edge barrier (contiguous only): higher = flood stops at weaker edges. */
   edgeStop?: number;
   minRegion?: number;  // min component size in grid pixels
+  /** Same `gw*gh` grid as `field` (contiguous mode only): cells already claimed
+   *  by a different annotated class the flood must not cross, e.g. so filling
+   *  one region doesn't spill across an already-labeled wall into a neighbor.
+   *  `1` = blocked. Like `edgeStop`'s wall, the seed cell itself is exempt. */
+  blocked?: Uint8Array;
 }
 
 interface MaskPolyOpts {
@@ -455,7 +460,7 @@ export function magicSelect(
   field: GrayField,
   seedXimg: number,
   seedYimg: number,
-  { toleranceFrac, mode, smooth = 0, edgeStop = 0, minRegion = 12 }: SelectOpts,
+  { toleranceFrac, mode, smooth = 0, edgeStop = 0, minRegion = 12, blocked }: SelectOpts,
 ): number[][] {
   const { gw, gh, scale, grad } = field;
   // Smoothing drives a pre-blur (denoise so the boundary is less ragged) here;
@@ -471,7 +476,8 @@ export function magicSelect(
   // flood won't cross — keeps a void's selection bounded by its rim instead of
   // leaking across a soft/ringy edge. Disabled when edgeStop is 0 or no grad.
   const wallLimit = edgeStop > 0 ? 1 - edgeStop : Infinity;
-  const isWall = (i: number) => grad !== undefined && grad[i] >= wallLimit;
+  const isWall = (i: number) =>
+    (grad !== undefined && grad[i] >= wallLimit) || (blocked !== undefined && blocked[i] === 1);
 
   const mask = new Uint8Array(gw * gh);
   if (mode === 'global') {
