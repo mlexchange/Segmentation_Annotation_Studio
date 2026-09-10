@@ -8,12 +8,12 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any
+
+import pytest
 
 import export_jobs
 import ipred_batch_jobs
 import ipred_client as ipred_client_mod
-import pytest
 
 
 @contextmanager

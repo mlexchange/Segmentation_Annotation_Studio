@@ -330,6 +330,7 @@ def tile_denoise_pair(inp: np.ndarray, tgt: np.ndarray, window: int) -> list[tup
     is real loss mass, so tiling an undersized image is worth avoiding.
     """
     import torch  # noqa: PLC0415
+
     import tiling  # noqa: PLC0415 — optional (qlty) dependency
 
     if inp.shape != tgt.shape:

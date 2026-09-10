@@ -14,10 +14,10 @@ from PIL import Image as PILImage
 import annotation_thumbnails
 import arrays as arrays_mod
 
-
 # ---------------------------------------------------------------------------
 # decode_thumbnail_base64
 # ---------------------------------------------------------------------------
+
 
 class TestDecodeThumbnailBase64:
     def test_empty_string_returns_none(self):

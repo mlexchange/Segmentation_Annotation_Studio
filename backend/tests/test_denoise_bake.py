@@ -11,8 +11,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import arrays as arrays_mod  # noqa: E402
-import denoise_bake  # noqa: E402
 import denoise as denoise_mod  # noqa: E402
+import denoise_bake  # noqa: E402
 import export_jobs  # noqa: E402
 import schemas  # noqa: E402
 import train_common  # noqa: E402
