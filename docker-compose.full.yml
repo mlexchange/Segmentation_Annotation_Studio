@@ -1,0 +1,37 @@
+# Batteries-included stack: Tiled + backend (with the ml/dlsia extra) + ipred,
+# all bundled into ONE container (Dockerfile's app-full stage) — nothing
+# external required, unlike docker-compose.yml's lean `app` service, which
+# needs a separately-run Tiled. Use this for a single-command full-stack
+# try-it (iPred + dlsia both work), or docker-compose.yml for a lighter
+# deployment that already has its own Tiled.
+#
+#   docker compose -f docker-compose.full.yml up --build
+#
+services:
+  app-full:
+    build:
+      context: .
+      target: app-full
+    ports:
+      - "8002:8002"  # the app itself (SPA + API) — the only port most setups need
+      - "8003:8003"  # ipred, direct access (optional)
+      - "8010:8010"  # Tiled, direct access (optional)
+    environment:
+      LOCAL_DATA_ROOT: "/data"
+      BROWSE_ALLOWED_ORIGINS: "${BROWSE_ALLOWED_ORIGINS:-}"
+      # Only relevant if you point this stack's bundled Tiled at pre-existing
+      # data rather than this app's own ingest — leave unset otherwise:
+      TILED_BROWSE_PATH: "${TILED_BROWSE_PATH:-}"
+      # Set this to keep the same Tiled API key across container restarts —
+      # otherwise docker-entrypoint-full.sh generates a fresh one each time,
+      # which is fine (Tiled's catalog itself persists in the volume below)
+      # but means any client that cached the old key needs to reconnect.
+      TILED_API_KEY: "${TILED_API_KEY:-}"
+    volumes:
+      - annotation-data-full:/data
+      # Bind-mount your own source datasets to /data/raw (matches
+      # tiled/config.docker.yml's readable_storage), e.g.:
+      #   - /path/to/your/data:/data/raw
+
+volumes:
+  annotation-data-full:

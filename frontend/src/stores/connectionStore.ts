@@ -27,6 +27,13 @@ export interface ConnectionState {
   label: string | null;
   /** Total number of samples reported by /api/connect/summary */
   sampleCount: number | null;
+  /**
+   * Live Tiled reachability, driven by a periodic health check (see
+   * useConnectionHealth). 'unknown' until the first check resolves, and
+   * always 'unknown' for local connections (no network dependency to check).
+   */
+  status: 'unknown' | 'ok' | 'error';
+  setStatus: (status: 'unknown' | 'ok' | 'error') => void;
   setConnection: (payload: {
     kind: 'tiled' | 'local';
     serverUri?: string | null;
@@ -49,6 +56,9 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   localRel: null,
   label: null,
   sampleCount: null,
+  status: 'unknown',
+
+  setStatus: (status) => set({ status }),
 
   /** Records the active data-source connection; unspecified fields default to null. */
   setConnection: ({
@@ -70,6 +80,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
       localRel,
       label,
       sampleCount,
+      status: 'unknown',
     }),
 
   /** Resets all connection fields to null (disconnect). */
@@ -82,6 +93,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
       localRoot: null,
       localRel: null,
       label: null,
+      status: 'unknown',
       sampleCount: null,
     }),
 }));

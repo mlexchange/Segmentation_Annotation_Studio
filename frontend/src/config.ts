@@ -1,11 +1,16 @@
 /**
  * Base URL for the backend API.
- * - Default is '' (same origin): dev uses Vite's `/api` proxy; the production
- *   container serves the SPA from FastAPI itself, so `/api` is same-origin too.
+ * - Default is derived from Vite's `BASE_URL` (itself driven by `VITE_BASE_PATH`
+ *   at build time, see vite.config.ts): '/' when root-hosted (dev's `/api`
+ *   proxy, or the production container serving the SPA same-origin), or the
+ *   trimmed subpath (e.g. `/bl832/seg_studio`) when hosted behind a
+ *   path-stripping reverse proxy, so `fetch(`${API_BASE}/api/...`)` still
+ *   resolves to a path the proxy actually routes.
  * - Set `VITE_API_BASE` at build time only for split deployments where the API
  *   lives on a different origin (e.g. `https://api.example.com`).
  */
-export const API_BASE = import.meta.env.VITE_API_BASE?.trim() || '';
+export const API_BASE =
+  import.meta.env.VITE_API_BASE?.trim() || import.meta.env.BASE_URL.replace(/\/$/, '');
 
 /**
  * URL of the user documentation site (MkDocs).

@@ -29,12 +29,20 @@ export interface EraseStroke {
   radius: number;
 }
 
+/** Provenance: 'predicted' shapes came from committing an iPred run (single-slice
+ *  or volume-apply); undefined/'human' means hand-drawn. Kept forever rather than
+ *  cleared on first edit, so Phase 6's 3D label channel and the Layers panel can
+ *  filter by it at any time. */
+export type ShapeOrigin = 'human' | 'predicted';
+
 export interface BaseShape {
   id: string;
   classId: number;
   kind: Shape['kind'];
   /** Optional erase carve-outs (rendered destination-out, subtracted on export). */
   erased?: EraseStroke[];
+  /** Undefined means human-drawn (backward compatible with every existing shape). */
+  origin?: ShapeOrigin;
 }
 
 export interface PolygonShape extends BaseShape {
@@ -98,6 +106,10 @@ export interface AnnotationState {
   addShape: (sourceKey: string, sliceIdx: number, shape: Shape) => void;
   /** Append several shapes in one update (one undo step) — used by magic-wand. */
   addShapes: (sourceKey: string, sliceIdx: number, shapes: Shape[]) => void;
+  /** Append shapes across MULTIPLE slices in one update (one undo step) — used
+   *  by the iPred volume-apply commit, so accepting a whole-volume prediction
+   *  is one undo, not one per slice. */
+  addShapesAcrossSlices: (sourceKey: string, bySlice: Record<number, Shape[]>) => void;
   removeShape: (sourceKey: string, sliceIdx: number, shapeId: string) => void;
   /** Remove several shapes in one update (one undo step). */
   removeShapes: (sourceKey: string, sliceIdx: number, shapeIds: string[]) => void;
@@ -113,6 +125,9 @@ export interface AnnotationState {
   copySliceShapes: (sourceKey: string, fromSlice: number, toSlices: number[], classId?: number | null) => void;
   /** Remove every shape with *classId* across all loaded samples (all slices). */
   removeShapesByClassId: (classId: number) => void;
+  /** Remove every shape of *origin* within one sample, across its slices — e.g.
+   *  "reject all predicted" after reviewing a volume-apply commit. One undo step. */
+  removeShapesByOrigin: (sourceKey: string, origin: ShapeOrigin) => void;
   /** Remove every shape with *classId* within a single sample (*sourceKey*), across
    *  its slices. Scoped so deleting a class never touches other samples' annotations.
    *  Tracked by zundo, so Ctrl/Cmd+Z restores the removed regions. */
@@ -185,6 +200,19 @@ export const useAnnotationStore = create<AnnotationState>()(
               },
             },
           };
+        }),
+
+      /** Appends shapes across multiple slices in one update (one undo step). */
+      addShapesAcrossSlices: (sourceKey, bySlice) =>
+        set((s) => {
+          const entries = Object.entries(bySlice).filter(([, shapes]) => shapes.length > 0);
+          if (entries.length === 0) return {};
+          const slices = { ...(s.byImage[sourceKey] ?? {}) };
+          for (const [sliceIdx, shapes] of entries) {
+            const sliceKey = String(Number(sliceIdx));
+            slices[sliceKey] = [...(slices[sliceKey] ?? []), ...shapes];
+          }
+          return { byImage: { ...s.byImage, [sourceKey]: slices } };
         }),
 
       /** Removes the shape with the given id from the (sourceKey, slice). */
@@ -313,6 +341,28 @@ export const useAnnotationStore = create<AnnotationState>()(
           const nextSlices: Record<string, Shape[]> = {};
           for (const [sliceKey, shapes] of Object.entries(slices)) {
             const filtered = shapes.filter((sh) => sh.classId !== classId);
+            if (filtered.length > 0) {
+              nextSlices[sliceKey] = filtered;
+            }
+          }
+          const nextByImage = { ...s.byImage };
+          if (Object.keys(nextSlices).length > 0) {
+            nextByImage[sourceKey] = nextSlices;
+          } else {
+            delete nextByImage[sourceKey];
+          }
+          return { byImage: nextByImage };
+        }),
+
+      /** Removes every shape of *origin* within one sample, pruning emptied slices
+       *  and the source itself; other samples are left untouched. */
+      removeShapesByOrigin: (sourceKey, origin) =>
+        set((s) => {
+          const slices = s.byImage[sourceKey];
+          if (!slices) return {};
+          const nextSlices: Record<string, Shape[]> = {};
+          for (const [sliceKey, shapes] of Object.entries(slices)) {
+            const filtered = shapes.filter((sh) => (sh.origin ?? 'human') !== origin);
             if (filtered.length > 0) {
               nextSlices[sliceKey] = filtered;
             }

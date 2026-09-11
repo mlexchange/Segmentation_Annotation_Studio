@@ -18,9 +18,9 @@ Other models
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Self, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class BrushStroke(BaseModel):
@@ -151,6 +151,24 @@ class RenderOpts(BaseModel):
     cmap: Literal["gray", "viridis"] = "gray"
 
 
+class PredictedSlicePointer(BaseModel):
+    """An un-vectorized iPred volume-apply result for one slice — the frontend's
+    ``predictedRasterStore`` pointer, sent straight through instead of first
+    fetching+tracing the commit PNG into polygon shapes client-side (see the
+    lazy-vectorization plan item this supports).
+
+    Attributes:
+        run_id: ipred run id — ``tiled_mask_sync`` fetches its commit.png
+            directly from the ipred service via ``ipred_client.run_commit_png``.
+        class_ids: Frontend class ids the commit PNG's pixel values are drawn
+            from directly (NOT a 1-based sequential index — matches the
+            frontend's own ``labelMapToPolygonShapes`` convention).
+    """
+
+    run_id: str
+    class_ids: list[int]
+
+
 class ExportSourceItem(BaseModel):
     """A single annotated sample within a multi-source export.
 
@@ -161,6 +179,11 @@ class ExportSourceItem(BaseModel):
         slices: Mapping of slice key → list of serialised shape dicts.
         split_by_slice: Mapping of slice key → dataset split name.
         negative_slices: Slice keys included as negative (unannotated) examples.
+        predicted_slices: Mapping of slice key → an un-vectorized iPred result
+            pointer (see :class:`PredictedSlicePointer`). Only consulted by
+            ``tiled_mask_sync.build_mask_volumes`` (the "Push to Tiled" path)
+            for slice keys absent from ``slices`` — a slice with real shapes
+            always wins, matching the frontend's own precedence.
     """
 
     kind: Literal["tiled", "local"]
@@ -169,6 +192,7 @@ class ExportSourceItem(BaseModel):
     slices: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     split_by_slice: dict[str, str] = Field(default_factory=dict)
     negative_slices: list[str] = Field(default_factory=list)
+    predicted_slices: dict[str, PredictedSlicePointer] = Field(default_factory=dict)
 
 
 class ExportRequest(BaseModel):
@@ -281,6 +305,92 @@ class IngestPreflightRequest(BaseModel):
     server_uri: str | None = None
 
 
+class ZarrRegisterRequest(BaseModel):
+    """Request body for registering an on-disk Zarr volume with Tiled.
+
+    No bytes are uploaded: the volume stays where it is and Tiled reads it in
+    place, so this carries a server-side path rather than file content.
+
+    Attributes:
+        path: Absolute path to the ``.zarr`` directory on the server.
+        container_path: Target container, e.g. ``browse``.
+        description: Optional keyword(s) stored on the node (same treatment as
+            the drag-and-drop ingest, so the volume is filterable in Browse).
+        on_conflict: ``"fail"``, ``"replace"`` or ``"skip"`` when the key exists.
+        server_uri: Target Tiled server URI; ``None`` uses the default server.
+    """
+
+    path: str
+    container_path: str = "browse"
+    description: str = ""
+    on_conflict: str = "fail"
+    server_uri: str | None = None
+
+
+class TiffStackRegisterRequest(ZarrRegisterRequest):
+    """Request body for registering a TIFF directory as a 3-D volume.
+
+    Same fields as :class:`ZarrRegisterRequest` — ``path`` is a directory of 2-D
+    TIFF slices rather than a ``.zarr`` store. Kept as its own type so the two
+    endpoints document themselves and can diverge without a breaking change.
+
+    Unlike the Zarr path this does real work: the full-resolution slices are
+    registered in place, but the downsampled pyramid levels the 3-D viewer
+    actually renders have to be computed, so registration runs as a job.
+    """
+
+
+class DenoiseBakeRequest(BaseModel):
+    """Request body to denoise a whole volume into a new Tiled dataset.
+
+    The Annotate preview is non-destructive — it changes what you see, not the
+    data, and exports still use the original pixels. This is the other half: it
+    writes a denoised copy as a first-class dataset you can open, annotate and
+    export.
+
+    Attributes:
+        source: Tiled path of the volume to denoise.
+        server_uri: Tiled server URI; ``None`` uses the default server.
+        method: A ``denoise.ALL_METHODS`` entry other than ``"none"``.
+        strength: 0..1, mapped onto the method's native parameter.
+        target_path: Destination Tiled path; defaults to ``<source>_denoised``, a
+            sibling so it lands next to its source in Browse. Must sit beneath
+            the configured ingest root.
+        description: Optional comma-separated tags, treated exactly as ingest
+            treats them — searchable in Browse.
+    """
+
+    source: str
+    server_uri: str | None = None
+    method: str
+    strength: float = Field(default=0.5, ge=0.0, le=1.0)
+    target_path: str | None = None
+    description: str = ""
+    run_id: str | None = None
+    """Saved denoiser run, for the trained-model path. Not yet wired up here."""
+
+
+class VolumeBuildRequest(BaseModel):
+    """Request body for building a 3-D volume from a stack already in Tiled.
+
+    Deliberately minimal: the slices are already in the catalog, so the only
+    thing needed is which dataset. No source path, because requiring one would
+    mean asking the user to re-supply data the app already holds.
+
+    Attributes:
+        source: Tiled path of the per-slice dataset.
+        kind: Source kind; only ``"tiled"`` has a catalog to register into.
+        container_path: Where to place the volume sidecar; defaults to the
+            dataset's own parent container.
+        server_uri: Target Tiled server URI; ``None`` uses the default server.
+    """
+
+    source: str
+    kind: str = "tiled"
+    container_path: str | None = None
+    server_uri: str | None = None
+
+
 class GuideClass(BaseModel):
     """One class entry in an annotation guide.
 
@@ -319,8 +429,27 @@ class ImageMeta(BaseModel):
         dtype: NumPy dtype string (e.g. ``"float32"``).
         is_rgb: ``True`` if the array has a colour channel dimension.
         value_range: ``[min, max]`` of the first slice.
+        global_value_range: ``[vmin, vmax]`` actually used by
+            ``GET /api/image/slice``'s default ``norm="global"`` rendering —
+            the 1st/99th percentile (by default) sampled across up to 64
+            slices spanning the whole volume (see ``images._sample_global_stats``),
+            cached 5 minutes. Distinct from ``value_range`` above (which is
+            just slice 0's raw min/max): this is the real contrast window the
+            2D canvas's pixel bytes are normalized against, needed by anything
+            that must convert a displayed 0-255 value back to a physical
+            intensity (e.g. the Sampler-fitted band sent to the 3D viewer).
         keywords: Dataset tags stored at ingest; each is pre-created as an
             annotation class in the Annotate tab.
+        level_key: For a multiscale Zarr volume, the pyramid level being read
+            (e.g. ``"scale2"``). ``height``/``width``/``n_slices`` always
+            describe the FINEST level, since annotations are stored in
+            full-resolution coordinates; these fields describe what is actually
+            being displayed underneath them.
+        level_index: Index of that level, finest = 0.
+        level_count: Number of levels in the pyramid.
+        level_height / level_width / level_n_slices: The open level's own shape.
+        z_downsample: Finest-z / level-z. When > 1 the level can only address
+            every f-th full-resolution slice.
     """
 
     n_slices: int
@@ -329,4 +458,283 @@ class ImageMeta(BaseModel):
     dtype: str
     is_rgb: bool
     value_range: list[float]
+    global_value_range: list[float] | None = None
     keywords: list[str] = Field(default_factory=list)
+    level_key: str | None = None
+    level_index: int | None = None
+    level_count: int | None = None
+    level_height: int | None = None
+    level_width: int | None = None
+    level_n_slices: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# Train tab (Phase 5) — dlsia TUNet segmentation + the dlsia/autoencoder
+# denoiser family only. DINOv3 LoRA is deferred to Phase 5.5 and has no
+# schema here at all, not even a stubbed-out variant.
+# ---------------------------------------------------------------------------
+
+
+class TunetHyperParams(BaseModel):
+    """Bounded training hyperparameters for a dlsia TUNet trained from scratch.
+
+    Attributes:
+        epochs: Number of training epochs (from-scratch training typically
+            needs more epochs than fine-tuning a pretrained backbone).
+        lr: Learning rate for the whole network.
+        depth: U-Net depth (encoder/decoder stages).
+        base_channels: Channel count of the first conv stage.
+        growth_rate: Channel growth factor per depth level.
+        batch_size: Training batch size.
+        image_size: Square side length images/labels are letterboxed to.
+            dlsia's TUNet fixes its layer sizes to ``image_shape`` at
+            construction, so train and inference images must match exactly.
+            With ``tiling`` on this is the tile window — every window is exactly
+            this size, so the constraint still holds.
+        seed: Seed for shuffling and augmentation.
+        flip_augment: Whether to randomly flip image+label together.
+        tiling: Train on native-resolution ``image_size`` windows cut from each
+            slice, instead of rescaling the whole slice down to ``image_size``
+            (see ``tiling.py``). Recorded on the run, so inference reproduces
+            whichever geometry the run was trained with.
+    """
+
+    epochs: int = Field(default=60, ge=1, le=1000)
+    lr: float = Field(default=1e-3, gt=0, le=1)
+    depth: int = Field(default=4, ge=2, le=6)
+    base_channels: int = Field(default=8, ge=1, le=128)
+    growth_rate: float = Field(default=1.5, gt=0, le=4)
+    batch_size: int = Field(default=4, ge=1, le=32)
+    image_size: int = Field(default=512, ge=64, le=2048)
+    seed: int = 1234
+    flip_augment: bool = True
+    tiling: bool = True
+
+    @field_validator("image_size")
+    @classmethod
+    def validate_image_size(cls, value: int) -> int:
+        """A TUNet at ``depth`` stages needs the side divisible by 2**depth
+        so every downsample/upsample step lands on a whole-pixel size."""
+        if value % 64 != 0:
+            raise ValueError("image_size must be a multiple of 64 (covers depth up to 6)")
+        return value
+
+
+class DlsiaTunetConfig(BaseModel):
+    """Model-family config: dlsia tunable U-Net trained from scratch.
+
+    Attributes:
+        model_family: Discriminator literal.
+        hyperparams: Training hyperparameters.
+    """
+
+    model_family: Literal["dlsia_tunet"] = "dlsia_tunet"
+    hyperparams: TunetHyperParams = Field(default_factory=TunetHyperParams)
+
+
+class DlsiaDenoiserConfig(BaseModel):
+    """Model-family config: a single-channel image denoiser trained
+    self-supervised, instead of a multi-class segmenter.
+
+    Two architectures share this family. Keeping them under one
+    ``model_family`` is deliberate: the frontend partitions runs with
+    ``isSegmentationRun == !isDenoiserRun`` (``lib/runCompatibility.ts``), so a
+    *new* family value would be silently treated as segmentation and offered in
+    the fine-tune / apply / inference pickers, which key off a class list a
+    denoiser does not have. An ``architecture`` discriminator inside the family
+    avoids that entirely.
+
+    ``TunetHyperParams`` is reused verbatim rather than defining a parallel
+    hyperparameter class — ``depth``/``base_channels`` mean downsampling levels
+    and first-conv width for both architectures. Architecture-specific knobs
+    (``ae_compression``) live here on the config, not there.
+
+    Attributes:
+        model_family: Discriminator literal.
+        architecture: Which network to build — ``"tunet"`` (dlsia TUNet with
+            ``in_channels=1, out_channels=1``; see ``denoise_runtime.py``) or
+            ``"cnn_ae"`` (a plain convolutional autoencoder with an explicit
+            latent bottleneck and NO skip connections; see
+            ``autoencoder_runtime.py``). Defaults to ``"tunet"`` so runs saved
+            before this field existed keep their meaning.
+        hyperparams: Training hyperparameters (reuses the segmentation
+            family's TUNet knobs — depth/base_channels/growth_rate/etc.).
+        ae_compression: How much the ``"cnn_ae"`` bottleneck compresses, as a
+            ratio of input values to latent values. Higher removes more noise
+            but also discards more real detail. Only meaningful for
+            ``"cnn_ae"``.
+        training_scheme: Self-supervised training objective — ``"n2n"``
+            (Noise2Noise: paired noisy/noisy training), ``"n2v"``
+            (Noise2Void: blind-spot training from single noisy images), or
+            ``"ae"`` (pure self-reconstruction: target IS the input, and the
+            bottleneck is what forces noise out).
+
+            ``"ae"`` is valid ONLY with ``architecture="cnn_ae"``, enforced
+            below. On a skip-connected network like TUNet, training on
+            ``target == input`` makes ``f(x) = x`` trivially learnable: it
+            converges to copying the input, removes no noise whatsoever, and
+            still reports a falling loss. Without skips, the bottleneck cannot
+            pass the input through unchanged, so reconstruction becomes a real
+            denoising objective. That pairing is a correctness constraint, not
+            a convenience.
+    """
+
+    model_family: Literal["dlsia_denoiser"] = "dlsia_denoiser"
+    architecture: Literal["tunet", "cnn_ae"] = "tunet"
+    hyperparams: TunetHyperParams = Field(default_factory=TunetHyperParams)
+    training_scheme: Literal["n2n", "n2v", "ae"]
+    ae_compression: int = Field(default=16, ge=4, le=64)
+
+    @model_validator(mode="after")
+    def _check_scheme_matches_architecture(self) -> "DlsiaDenoiserConfig":
+        """Keep scheme and architecture to the combinations that make sense.
+
+        ``ae`` + ``tunet`` is the identity-collapse footgun described above and
+        must be impossible to request. The reverse (``cnn_ae`` with a masking or
+        paired scheme) is not unsound in principle, just untested here, so it is
+        refused rather than silently shipped.
+        """
+        if self.training_scheme == "ae" and self.architecture != "cnn_ae":
+            raise ValueError(
+                "training_scheme='ae' (pure self-reconstruction) requires "
+                "architecture='cnn_ae'. On a skip-connected network it would just learn to "
+                "copy its input and remove no noise."
+            )
+        if self.architecture == "cnn_ae" and self.training_scheme != "ae":
+            raise ValueError(
+                "architecture='cnn_ae' is only supported with training_scheme='ae'; "
+                f"got {self.training_scheme!r}."
+            )
+        return self
+
+
+ModelConfig = Annotated[
+    Union[DlsiaTunetConfig, DlsiaDenoiserConfig],
+    Field(discriminator="model_family"),
+]
+
+
+class BatchProbeRequest(BaseModel):
+    """Request body to measure the largest batch size a model config can fit.
+
+    Deliberately not a :class:`TrainRequest`: the probe feeds synthetic tensors, so
+    it needs no sources, and requiring them would force the caller to invent data
+    just to ask a question about memory.
+
+    Attributes:
+        model: Model-family configuration to size (patch size and the per-family
+            hyperparameters come from its ``hyperparams``).
+        n_classes: Segmentation head output channels. Affects memory only
+            marginally, so it defaults to a typical value — meaning a batch size
+            can be estimated before any classes have been defined.
+    """
+
+    model: ModelConfig
+    n_classes: int = Field(default=2, ge=1)
+
+
+class DenoiseTrainOpts(BaseModel):
+    """Denoising applied to a model's INPUT pixels, at training and inference alike.
+
+    Distinct from the Annotate tab's denoise preview, which is display-only and
+    never reaches a model. When this is set on a training request it is recorded
+    on the saved run, and inference reads it back off the run rather than off the
+    request — the same rule ``tiling`` already follows, and for the same reason:
+    a model must see the same pixel distribution it was trained on. Letting the
+    two be chosen independently would produce a silent distribution shift with
+    no error, just quietly worse predictions.
+
+    Attributes:
+        method: A ``denoise.ALL_METHODS`` entry other than ``"none"``/``"model"``
+            (a learned denoiser as a preprocessor for another model is not
+            supported — it would need its own run and GPU pass per slice).
+        strength: 0..1, mapped onto the method's native parameter.
+    """
+
+    method: str
+    strength: float = Field(default=0.5, ge=0, le=1)
+
+
+class TrainRequest(BaseModel):
+    """Request body to start a fine-tuning job.
+
+    Attributes:
+        task: What the trained model is for — ``"segmentation"`` (requires at
+            least one class) or ``"denoising"`` (a self-supervised
+            Noise2Noise/Noise2Void/autoencoder denoiser, which has no class
+            taxonomy at all).
+        sources: Annotated samples to train on (each with its own slices/splits).
+        classes: Annotation classes/taxonomy shared across every source.
+            Required (at least one) when ``task == "segmentation"``; may be
+            empty when ``task == "denoising"``.
+        render: Render options used to rasterise training images.
+        denoise: Optional denoising applied to the model's INPUT pixels. Recorded
+            on the run and reapplied automatically at inference — see
+            :class:`DenoiseTrainOpts`. Ignored when ``task == "denoising"``: a
+            denoiser learns to remove noise, so pre-cleaning its input would
+            defeat the point.
+        auto_split: Auto-split configuration for slices without an explicit split.
+        model: Model-family configuration (discriminated on ``model_family``).
+        run_name: Optional human-readable label for the resulting run.
+        resume_from_run_id: Continue fine-tuning from this saved run's weights
+            instead of starting from scratch. The saved run's architecture-defining
+            settings win over anything sent in ``model`` — a resume that changed
+            them could not load the saved weights at all. Result is always a NEW
+            run; the parent is never modified.
+    """
+
+    task: Literal["segmentation", "denoising"] = "segmentation"
+    sources: list[ExportSourceItem] = Field(min_length=1)
+    classes: list[AnnotationClass] = Field(default_factory=list)
+    render: RenderOpts = Field(default_factory=RenderOpts)
+    denoise: DenoiseTrainOpts | None = None
+    auto_split: dict[str, Any] = Field(
+        default_factory=lambda: {"ratios": [0.8, 0.1, 0.1], "seed": 1234}
+    )
+    model: ModelConfig
+    run_name: str | None = None
+    resume_from_run_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_train_taxonomy(self) -> Self:
+        """A self-supervised denoiser has no classes at all — still required
+        (and still validated) for segmentation, allowed empty for denoising."""
+        if self.task == "segmentation" and len(self.classes) < 1:
+            raise ValueError("Segmentation training requires at least one class")
+        return self
+
+
+class InferRequest(BaseModel):
+    """Request body to run inference with a saved fine-tuned run.
+
+    Attributes:
+        run_id: Identifier of a previously trained run.
+        kind: Source kind — ``"tiled"`` or ``"local"``.
+        source: Tiled path or local relative path to run inference on.
+        server_uri: Tiled server URI (kind == "tiled" only).
+        slice_indices: Zero-based slice indices to run inference on.
+        render: Render options; ``None`` reuses the run's stored render options.
+        min_area: Minimum connected-component pixel area kept per predicted region.
+        simplify_tol: Polygon simplification tolerance (pixels).
+        min_confidence: Softmax confidence below which a pixel is treated as
+            background (no class) — training never sees an explicit background
+            class, since unannotated pixels are the ignore index, not a label.
+    """
+
+    run_id: str
+    kind: Literal["tiled", "local"]
+    source: str
+    server_uri: str | None = None
+    slice_indices: list[int] = Field(min_length=1)
+    render: RenderOpts | None = None
+    min_area: int = Field(default=64, ge=0)
+    simplify_tol: float = Field(default=1.5, ge=0, le=50)
+    min_confidence: float = Field(default=0.5, ge=0, le=1)
+
+    @field_validator("slice_indices")
+    @classmethod
+    def validate_slice_indices(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("slice_indices must be unique")
+        return value
+    z_downsample: float | None = None

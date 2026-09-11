@@ -10,21 +10,31 @@
 export interface CostMap {
   gw: number;
   gh: number;
-  /** Image pixels per grid cell (downsample factor). */
+  /** Image pixels per grid cell. >1 when downsampled; FRACTIONAL (e.g. 0.5) when
+   *  the caller asked for an upscaled working resolution. */
   scale: number;
   /** Per-node traversal cost in [~0, 1]; ~0 on strong edges. */
   cost: Float32Array;
 }
 
 /** Build an edge-cost map from an image (or preprocessed canvas), downsampled so
- *  the long side <= maxDim. */
+ *  the long side <= maxDim.
+ *
+ *  `imgW`/`imgH` are always NATIVE image pixels. `upscale` (1, 2, 4) raises the
+ *  working resolution — both the grid and the maxDim cap scale with it — so a
+ *  traced path can land on sub-pixel coordinates. `image` should already be
+ *  rendered at that working resolution; it is resampled into the grid either way. */
 export function buildCostMap(
   image: CanvasImageSource,
   imgW: number,
   imgH: number,
   maxDim = 512,
+  upscale = 1,
 ): CostMap | null {
-  const scale = Math.max(1, Math.ceil(Math.max(imgW, imgH) / maxDim));
+  const u = Math.max(1, upscale);
+  // Native cell size from the maxDim cap, then `u` sub-cells per native cell.
+  const cell = Math.max(1, Math.ceil(Math.max(imgW, imgH) / maxDim));
+  const scale = cell / u;
   const gw = Math.max(1, Math.floor(imgW / scale));
   const gh = Math.max(1, Math.floor(imgH / scale));
 

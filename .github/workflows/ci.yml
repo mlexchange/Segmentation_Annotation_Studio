@@ -16,8 +16,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -e ".[dev,test]"
+      # `ml` (torch/dlsia/qlty) installed here so dlsia's train/infer code
+      # paths are actually exercised in CI, CPU-only — without it every
+      # dlsia-dependent test silently skips (torch_available() is False).
+      - run: pip install -e ".[dev,test,ml]"
       - run: flake8 . --max-line-length=120 --extend-ignore=E501,W503
+      - run: pytest
+
+  ipred:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ipred
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[test]"
       - run: pytest
 
   frontend:
@@ -26,10 +42,106 @@ jobs:
       run:
         working-directory: frontend
     steps:
+      # The volume renderer lives in a submodule (frontend/vendor/); without it
+      # typecheck and build fail on an unresolved import.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - run: npm ci
       - run: npm run typecheck
       - run: npm run test
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/setup-buildx-action@v3
+      # Build only — catches a Dockerfile/compose file silently falling
+      # behind the app it packages (the exact drift found in this session's
+      # review: no ipred service, no ml extra, no Tiled service). Two
+      # standalone compose files (not overlays — app-full is a separate,
+      # complete service, not an override of app), built independently. Does
+      # not push anywhere; image publishing is a separate, main-only job below.
+      - run: docker compose -f docker-compose.yml build
+      - run: docker compose -f docker-compose.ml.yml build
+      - run: docker compose -f docker-compose.full.yml build
+
+  # Publishes images on merge to main ONLY — never on a PR run, to avoid
+  # wasted builds and registry clutter. A separate job (not a branch filter
+  # on docker-build above) so the build-and-test signal on PRs stays exactly
+  # what it is today, just with a real build verification added.
+  docker-publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [backend, ipred, frontend, docker-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          # --- Unchanged, generic builds: root-hosted, no VITE_BASE_PATH ---
+          - target: app
+            image: app
+            tags: |
+              type=raw,value=latest
+              type=sha
+            vite_base_path: ""
+          - target: app-ml
+            image: app-ml
+            tags: |
+              type=raw,value=latest
+              type=sha
+            vite_base_path: ""
+          - target: app-full
+            image: app-full
+            tags: |
+              type=raw,value=latest
+              type=sha
+            vite_base_path: ""
+          # --- Purpose-tagged, base-path-baked builds ---
+          # :als — ipred/ML bundled, Tiled external (ALS's own production
+          # Tiled), hosted under ALS's hub path prefix.
+          - target: app-ml
+            image: app-ml
+            tags: |
+              type=raw,value=als
+              type=raw,value=als-{{sha}}
+            vite_base_path: /bl832/seg_studio/
+          # :local — fully bundled (+ Tiled), for anyone running this
+          # repo locally; still exercises subpath hosting by default.
+          - target: app-full
+            image: app-full
+            tags: |
+              type=raw,value=local
+              type=raw,value=local-{{sha}}
+            vite_base_path: /seg_studio/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}/${{ matrix.image }}
+          tags: ${{ matrix.tags }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VITE_BASE_PATH=${{ matrix.vite_base_path }}

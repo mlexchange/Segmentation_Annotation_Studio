@@ -116,14 +116,75 @@ export function eraseStampToMultiPolygon(points: number[], radius: number, width
     .map((p) => [flatToRing(p.points), ...p.holes.map(flatToRing)]);
 }
 
+/**
+ * Build a MultiPolygon from already-vectorized regions (flat outer ring + flat
+ * hole rings), e.g. the Threshold Brush's mask→polygon output, so it can be
+ * boolean-subtracted from shapes.
+ */
+export function regionsToMultiPolygon(
+  regions: Array<{ points: number[]; holes: number[][] }>,
+): MultiPolygon {
+  return regions
+    .filter((p) => p.points.length >= 6)
+    .map((p) => [flatToRing(p.points), ...p.holes.map(flatToRing)]);
+}
+
 /** Boolean-union a set of shapes into one MultiPolygon (empty if none / on failure). */
 export function unionShapesToMultiPolygon(shapes: Shape[], width: number, height: number): MultiPolygon {
-  const geoms = shapes.map((s) => shapeToMultiPolygon(s, width, height)).filter((g) => g.length > 0);
-  if (geoms.length === 0) return [];
+  return unionShapesChecked(shapes, width, height).mp;
+}
+
+/**
+ * Union with an explicit success flag.
+ *
+ * The plain version returns `[]` both when there is nothing to union AND when the
+ * boolean op failed — and callers gate on `mp.length`, so a failure reads exactly
+ * like "nothing to clip against" and clipping is silently skipped. That is how a
+ * single awkward polygon (a speckled Threshold Brush region, say) can disable
+ * clip-to-other-classes for a whole slice, with no error anywhere.
+ *
+ * This version unions incrementally so one unusable shape only costs that shape,
+ * and reports `ok: false` when anything was dropped, letting callers fall back to
+ * the mask-based clip instead of quietly leaving the new annotation unclipped.
+ */
+export function unionShapesChecked(
+  shapes: Shape[],
+  width: number,
+  height: number,
+): { mp: MultiPolygon; ok: boolean } {
+  const geoms: MultiPolygon[] = [];
+  let ok = true;
+  for (const s of shapes) {
+    try {
+      const g = shapeToMultiPolygon(s, width, height);
+      if (g.length > 0) geoms.push(g);
+    } catch {
+      ok = false; // this shape can't be expressed as geometry at all
+    }
+  }
+  if (geoms.length === 0) return { mp: [], ok };
+  if (geoms.length === 1) return { mp: geoms[0], ok };
+
+  // Fast path: one variadic union. polygon-clipping sweeps all inputs together,
+  // which is dramatically cheaper than folding them in pairwise — the pairwise
+  // version re-sweeps a growing accumulator once per shape, so a slice with a few
+  // hundred speckled regions turns a single sweep into hundreds of them.
   try {
-    return geoms.length === 1 ? geoms[0] : polygonClipping.union(geoms[0], ...geoms.slice(1));
+    return { mp: polygonClipping.union(geoms[0], ...geoms.slice(1)), ok };
   } catch {
-    return [];
+    // Something in the set is unusable. Fold in one at a time so we lose only the
+    // offending shape(s) rather than the whole union, and flag it so callers can
+    // choose the mask path instead of clipping against an under-covering union.
+    let acc: MultiPolygon = [];
+    for (const g of geoms) {
+      if (acc.length === 0) { acc = g; continue; }
+      try {
+        acc = polygonClipping.union(acc, g);
+      } catch {
+        ok = false; // keep what we have; this one is dropped
+      }
+    }
+    return { mp: acc, ok };
   }
 }
 

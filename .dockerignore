@@ -14,9 +14,11 @@ backend/static
 htmlcov
 .coverage
 
-# Tiled server config, data & catalog (external in production — never bundled)
+# Tiled's own runtime catalog/data (local dev state — never bundled). NOT
+# excluding tiled/ itself: the app-full Docker image's Tiled server needs
+# tiled/config.docker.yml (see Dockerfile's app-full stage) in the build
+# context, and it's tiny source config, not runtime data.
 .tiled
-tiled/
 
 # Local data, backups, runtime files
 data

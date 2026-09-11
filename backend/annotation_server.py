@@ -8,6 +8,7 @@ Endpoints
 * ``GET /api/browse/items``     — sample records matching a filter set
 * ``GET /api/browse/thumbnail`` — PNG thumbnail for a Tiled array path
 * ``GET /health``               — liveness check
+* ``/api/ipred/*``              — proxy to the standalone iPred service (see ``ipred_routes.py``)
 
 Run with
 --------
@@ -26,7 +27,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
@@ -37,12 +38,23 @@ from starlette.middleware.gzip import GZipMiddleware
 
 import annotation_thumbnails
 import arrays as arrays_mod
+import batch_probe
+import denoise as denoise_mod
+import denoise_bake as denoise_bake_mod
 import drafts as drafts_mod
 import export_jobs
 import guides as guides_mod
 import images as images_mod
+import infer_jobs
 import ingest as ingest_mod
+import ipred_routes
 import local_fs
+import tiff_stack_source
+import train_common
+import train_jobs
+import volume_build
+import volume_nodes
+import zarr_source
 from browse_helpers import (
     _SINGLE_VALUE_FACET_RAW_KEYS,
     FieldMapping,
@@ -62,14 +74,21 @@ from coco_export import (
     write_lightly_split,
 )
 from schemas import (
+    BatchProbeRequest,
+    DenoiseBakeRequest,
     DraftPayload,
     ExportRequest,
     ExportSourceItem,
     GuidePayload,
     ImageMeta,
+    InferRequest,
     IngestPreflightRequest,
     MeasureRequest,
     SaveVersionRequest,
+    TiffStackRegisterRequest,
+    TrainRequest,
+    VolumeBuildRequest,
+    ZarrRegisterRequest,
 )
 from source_keys import parse_source_key
 from thumbnails import render_thumbnail
@@ -113,6 +132,11 @@ app.add_middleware(
 # the ~500-byte floor skips tiny/binary payloads. (Dev uses the Vite server instead.)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
+# iPred (interactive segmentation) proxy — see ipred_routes.py. iPred is an
+# optional, separately-run service (port 8003 by default); a down/missing
+# service surfaces as 503 from these routes rather than breaking the app.
+app.include_router(ipred_routes.router)
+
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -136,6 +160,10 @@ _FIELD_MAPPING_TTL = float(os.getenv("BROWSE_FIELD_MAPPING_TTL_SECONDS", "300"))
 _column_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=256)
 _items_cache: TTLCache = TTLCache(ttl_seconds=_CACHE_TTL, max_entries=128)
 _field_mapping_cache: TTLCache = TTLCache(ttl_seconds=_FIELD_MAPPING_TTL, max_entries=32)
+# Denoised slice PNGs only — the plain render path stays uncached because it is
+# already cheap. Entries are a few MB each at full resolution, so 32 covers
+# scrubbing a stack back and forth without unbounded growth.
+_denoised_slice_cache: TTLCache = TTLCache(ttl_seconds=300.0, max_entries=32)
 
 
 def _resolve_field_mapping(
@@ -556,9 +584,11 @@ async def image_meta(
     """Return shape / dtype metadata for an image source."""
     def _run() -> ImageMeta:
         node = arrays_mod.resolve_array(source, kind, server_uri, root)
-        meta = arrays_mod.array_shape_meta(node)
+        pyramid = arrays_mod.pyramid_info(source, kind, server_uri, root)
+        meta = arrays_mod.array_shape_meta(node, pyramid)
         sl = arrays_mod.read_slice(node, meta, 0)
         flat = sl.ravel().astype(float)
+        global_range = images_mod._sample_global_stats(node, meta) if not meta["is_rgb"] else None
         return ImageMeta(
             n_slices=meta["n_slices"],
             height=meta["height"],
@@ -566,7 +596,15 @@ async def image_meta(
             dtype=meta["dtype"],
             is_rgb=meta["is_rgb"],
             value_range=[float(flat.min()), float(flat.max())],
+            global_value_range=list(global_range) if global_range is not None else None,
             keywords=arrays_mod.node_keywords(node),
+            level_key=meta.get("level_key"),
+            level_index=meta.get("level_index"),
+            level_count=meta.get("level_count"),
+            level_height=meta.get("level_height"),
+            level_width=meta.get("level_width"),
+            level_n_slices=meta.get("level_n_slices"),
+            z_downsample=meta.get("z_downsample"),
         )
 
     try:
@@ -590,6 +628,14 @@ async def image_slice(
     vmin_pct: float = Query(1.0),
     vmax_pct: float = Query(99.0),
     cmap: str = Query("gray"),
+    denoise_method: str = Query("none", description="Classical denoise filter (see denoise.ALL_METHODS)"),
+    denoise_strength: float = Query(0.5, ge=0.0, le=1.0),
+    denoise_crop: int = Query(
+        0,
+        ge=0,
+        description="If >0, denoise and return only a centred square crop of this size at 1:1. "
+                    "For tuning: filtering a full slice costs seconds for NLM/TV.",
+    ),
 ) -> Response:
     """Render one slice of an image source as a PNG."""
     opts = {
@@ -599,13 +645,42 @@ async def image_slice(
         "vmax_pct": vmax_pct,
         "cmap": cmap,
     }
+    if denoise_method not in denoise_mod.ALL_METHODS:
+        raise HTTPException(400, f"Unknown denoise method {denoise_method!r}")
+    denoising = denoise_method != "none"
+
+    # Denoised renders are cached; the plain path stays uncached because it is
+    # already cheap. Without this, every slider tweak or revisit re-pays the full
+    # filter cost — seconds, not milliseconds, for NLM and TV.
+    cache_key = (
+        source, kind, slice_index, server_uri, root, norm, scale, vmin_pct, vmax_pct, cmap,
+        denoise_method, round(denoise_strength, 4), denoise_crop,
+    )
+    if denoising:
+        cached = _denoised_slice_cache.get(cache_key)
+        if cached is not None:
+            return Response(content=cached, media_type="image/png")
 
     def _run() -> bytes:
         node = arrays_mod.resolve_array(source, kind, server_uri, root)
-        meta = arrays_mod.array_shape_meta(node)
-        sl = arrays_mod.read_slice(node, meta, slice_index)
+        pyramid = arrays_mod.pyramid_info(source, kind, server_uri, root)
+        meta = arrays_mod.array_shape_meta(node, pyramid)
+        # Denoise the RAW slice, before normalization: noise statistics live in
+        # the source's own intensity units, not in the 8-bit display range.
+        if denoising:
+            sl = _denoised_slice(node, meta, slice_index, denoise_method, denoise_strength, denoise_crop)
+        else:
+            sl = arrays_mod.read_slice(node, meta, slice_index)
         global_range = None
         if norm == "global":
+            # NB: deriving this from the pyramid's coarsest level was tried and
+            # reverted. It is ~8x faster, but those levels are built by AVERAGING,
+            # which pulls the extremes in hard — on the reference volume the range
+            # came back (-20.7, 18.0) against (-73.0, 71.3) at full resolution.
+            # Since this range IS the contrast window, the cheap version visibly
+            # clips the image. The full-resolution sampler decimates instead of
+            # averaging, so it keeps the extremes; it costs ~3s once per volume
+            # and is then cached.
             global_range = images_mod._sample_global_stats(node, meta)
         rgb = images_mod.render_slice(sl, opts, global_range)
         return images_mod.encode_png(rgb)
@@ -617,6 +692,9 @@ async def image_slice(
     except Exception as exc:
         logger.error("image_slice failed: %s", exc)
         raise HTTPException(500, f"Failed to render slice: {exc}") from exc
+
+    if denoising:
+        _denoised_slice_cache.set(cache_key, png)
 
     return Response(
         content=png,
@@ -1096,6 +1174,19 @@ def _run_export_job(
         export_jobs.update(jid, state="error", phase="error", error=str(exc))
 
 
+@app.post("/api/export/cancel/{job_id}")
+async def export_cancel(job_id: str) -> dict:
+    """Ask a running job to stop at its next clean boundary.
+
+    Cooperative rather than immediate: a job that stops mid-write would leave a
+    partial dataset that looks complete. Jobs that honour it discard their
+    partial output; those that do not simply run to completion.
+    """
+    if not export_jobs.request_cancel(job_id):
+        raise HTTPException(404, "Unknown job_id")
+    return {"cancelled": True}
+
+
 @app.get("/api/export/status/{job_id}")
 async def export_status(job_id: str) -> dict:
     """Poll an export job's progress (state, phase, done/total, log, result)."""
@@ -1236,6 +1327,433 @@ async def ingest_status(job_id: str) -> dict:
     if job is None:
         raise HTTPException(404, "Unknown job_id")
     return job
+
+
+@app.get("/api/zarr/inspect")
+async def zarr_inspect(
+    path: str = Query(..., description="Absolute path to a .zarr directory on the server"),
+) -> dict:
+    """Describe a Zarr store's resolution pyramid without registering it.
+
+    Lets the Connect page show what was found — dimensions, dtype, voxel size and
+    the available levels — before the user commits to loading it.
+
+    Raises:
+        HTTPException: 4xx from :func:`zarr_source.inspect_zarr` with a
+            user-facing message (missing path, zipped archive, empty group…).
+    """
+    return await asyncio.to_thread(zarr_source.inspect_zarr, path)
+
+
+@app.post("/api/zarr/preflight")
+async def zarr_preflight(req: ZarrRegisterRequest) -> dict:
+    """Report whether loading this Zarr would collide with an existing node.
+
+    Distinguishes a previous Zarr registration (safe to replace — only catalog
+    rows are dropped) from internally-managed data such as an uploaded image
+    stack, where replacing would delete the files themselves.
+    """
+    return await asyncio.to_thread(
+        zarr_source.preflight_zarr, req.server_uri, req.path, req.container_path
+    )
+
+
+@app.post("/api/zarr/register")
+async def zarr_register(req: ZarrRegisterRequest) -> dict:
+    """Register an on-disk Zarr volume with Tiled, copying no data.
+
+    Unlike ``/api/ingest/upload`` this needs no background job: registration
+    writes catalog rows, not pixels, so it returns in well under a second even
+    for a 56 GB store.
+    """
+    if req.on_conflict not in ingest_mod.ON_CONFLICT_MODES:
+        raise HTTPException(
+            400, f"on_conflict must be one of {sorted(ingest_mod.ON_CONFLICT_MODES)}"
+        )
+    return await asyncio.to_thread(
+        zarr_source.register_zarr,
+        req.server_uri,
+        req.path,
+        req.container_path,
+        req.description,
+        req.on_conflict,
+    )
+
+
+def _centre_crop(arr: np.ndarray, size: int) -> np.ndarray:
+    """Centred square crop of *size*, or *arr* unchanged if it already fits."""
+    h, w = arr.shape[:2]
+    if size <= 0 or (h <= size and w <= size):
+        return arr
+    top = max(0, (h - size) // 2)
+    left = max(0, (w - size) // 2)
+    return arr[top: top + min(size, h), left: left + min(size, w)]
+
+
+def _denoised_slice(
+    node: Any,
+    meta: dict,
+    slice_index: int,
+    method: str,
+    strength: float,
+    crop: int = 0,
+) -> np.ndarray:
+    """Read *slice_index* and denoise it, pulling z-neighbours for 3-D methods.
+
+    The 3-D filters are the training-free way to exploit slice-to-slice
+    correlation — adjacent tomographic slices share structure while their noise
+    is independent — which is why this reads a window rather than one slice. The
+    window is clamped to the volume, and the target's position inside the stack
+    is tracked explicitly: it is NOT always the centre, since the window is
+    truncated at the first and last slice.
+
+    When *crop* > 0 the crop is taken BEFORE filtering — filtering a full 6.5 MP
+    slice is what's slow. Worth knowing: results near the crop border, and NLM's
+    patch search in particular, differ slightly from the full-slice result, so a
+    crop is a tuning aid rather than a byte-exact preview of the bake.
+    """
+    radius = denoise_mod.z_radius_for(method)
+    if radius == 0:
+        sl = _centre_crop(np.asarray(arrays_mod.read_slice(node, meta, slice_index)), crop)
+        return denoise_mod.denoise_slice(sl, method, strength)
+
+    n_slices = int(meta["n_slices"])
+    lo = max(0, slice_index - radius)
+    hi = min(n_slices - 1, slice_index + radius)
+    frames = []
+    for idx in range(lo, hi + 1):
+        try:
+            frames.append(_centre_crop(np.asarray(arrays_mod.read_slice(node, meta, idx)), crop))
+        except Exception as exc:  # noqa: BLE001 — a bad neighbour must not fail the view
+            logger.warning("denoise: skipping unreadable neighbour slice %d: %s", idx, exc)
+            if idx == slice_index:
+                raise
+    if len(frames) < 2:
+        # Not enough usable z-context (single-slice source, or unreadable
+        # neighbours) — fall back to the 2-D sibling rather than erroring out.
+        fallback = "gaussian" if method == "gaussian3d" else "median"
+        sl = _centre_crop(np.asarray(arrays_mod.read_slice(node, meta, slice_index)), crop)
+        return denoise_mod.denoise_slice(sl, fallback, strength)
+
+    target_pos = min(slice_index - lo, len(frames) - 1)
+    return denoise_mod.denoise_stack(np.stack(frames, axis=0), method, strength)[target_pos]
+
+
+@app.get("/api/denoise/methods")
+async def denoise_methods() -> dict:
+    """Denoise filters available in this environment, with cost hints.
+
+    ``available`` is probed rather than assumed: ``denoise_wavelet`` imports
+    fine without PyWavelets and only fails when called.
+    """
+    return {"methods": denoise_mod.describe_methods()}
+
+
+@app.get("/api/denoise/auto")
+async def denoise_auto(
+    source: str = Query(...),
+    kind: str = Query(...),
+    slice_index: int = Query(0),
+    method: str = Query("tv"),
+    server_uri: Optional[str] = None,
+    root: Optional[str] = Query(None),
+) -> dict:
+    """Suggest a strength for this slice, from its own measured noise level."""
+    if method not in denoise_mod.ALL_METHODS:
+        raise HTTPException(400, f"Unknown denoise method {method!r}")
+
+    def _run() -> dict:
+        node = arrays_mod.resolve_array(source, kind, server_uri, root)
+        pyramid = arrays_mod.pyramid_info(source, kind, server_uri, root)
+        meta = arrays_mod.array_shape_meta(node, pyramid)
+        sl = np.asarray(arrays_mod.read_slice(node, meta, slice_index))
+        unit, _, span = denoise_mod._to_unit(sl)
+        return {
+            "strength": denoise_mod.auto_strength(sl, method),
+            # Noise as a fraction of the slice's own dynamic range, so the UI can
+            # say how noisy this is rather than only what to do about it.
+            "noise_sigma": denoise_mod.estimate_noise_sigma(unit) if span > 0 else 0.0,
+        }
+
+    return await asyncio.to_thread(_run)
+
+
+@app.post("/api/denoise/bake")
+async def denoise_bake(payload: DenoiseBakeRequest) -> dict:
+    """Denoise a whole volume and save it as a new, annotatable Tiled dataset.
+
+    The Annotate preview is display-only; this is how a denoised volume becomes
+    real data you can annotate and export. Runs on a background thread; poll
+    ``GET /api/export/status/{job_id}``.
+    """
+    if payload.method == "none":
+        raise HTTPException(422, "Pick a denoise method before saving a denoised copy.")
+    if payload.method not in denoise_mod.ALL_METHODS:
+        raise HTTPException(422, f"Unknown denoise method: {payload.method}")
+    if payload.method not in denoise_mod.available_methods():
+        raise HTTPException(
+            422,
+            f"Denoise method {payload.method!r} is unavailable on this server "
+            "(missing optional dependency).",
+        )
+
+    target = payload.target_path or denoise_bake_mod.default_target_path(payload.source)
+    try:
+        ingest_mod.validate_container_path(target)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    jid = export_jobs.new_job(target)
+    threading.Thread(
+        target=denoise_bake_mod.run_denoise_bake_job, args=(jid, payload), daemon=True
+    ).start()
+    return {"job_id": jid, "target_path": target}
+
+
+@app.get("/api/train/capability")
+async def train_capability() -> dict:
+    """Best-effort snapshot of Train-tab readiness (torch/dlsia/tiling/device)."""
+    return train_common.capability()
+
+
+@app.get("/api/train/runs")
+async def train_list_runs() -> dict:
+    """List saved fine-tune runs (both dlsia_tunet and dlsia_denoiser), newest first."""
+    return {"runs": train_common.list_runs()}
+
+
+@app.delete("/api/train/runs/{run_id}")
+async def train_delete_run(run_id: str) -> dict:
+    """Permanently remove a saved run's directory (config, metrics, weights)."""
+    train_common.delete_run(run_id)
+    return {"deleted": run_id}
+
+
+@app.post("/api/train/start")
+async def train_start(payload: TrainRequest) -> dict:
+    """Start a fine-tuning job. Runs on a background thread; poll
+    ``GET /api/export/status/{job_id}``; cancel via
+    ``POST /api/export/cancel/{job_id}`` (same shared registry every
+    background job in this app already uses).
+    """
+    if not train_common.torch_available():
+        raise HTTPException(503, "torch is not installed on this server — see the ml extra in pyproject.toml")
+    needs_dlsia = payload.model.model_family == "dlsia_tunet" or (
+        payload.model.model_family == "dlsia_denoiser" and payload.model.architecture == "tunet"
+    )
+    if needs_dlsia and not train_common.dlsia_available():
+        raise HTTPException(503, "dlsia is not installed on this server")
+    if payload.model.hyperparams.tiling:
+        import tiling
+
+        if not tiling.qlty_available():
+            raise HTTPException(503, "Tiling requires the 'qlty' package, which is not installed on this server")
+
+    run_id = train_jobs.new_run_id(payload.model.model_family)
+    if payload.resume_from_run_id:
+        try:
+            parent_config = train_common.load_run_config(payload.resume_from_run_id)
+            train_jobs.check_resume_compatible(parent_config, payload)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    if not train_common.ML_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Another training or inference job is already running")
+    train_common.ML_LOCK.release()  # run_train_job re-acquires it itself; this was just a pre-check
+
+    jid = export_jobs.new_job(run_id)
+    threading.Thread(target=train_jobs.run_train_job, args=(jid, payload, run_id), daemon=True).start()
+    return {"job_id": jid, "run_id": run_id}
+
+
+@app.post("/api/train/estimate-batch")
+async def train_estimate_batch(payload: BatchProbeRequest) -> dict:
+    """Measure the largest batch size that fits in device memory for *payload.model*.
+
+    Runs on a background thread; poll ``GET /api/export/status/{job_id}``.
+    """
+    if not train_common.torch_available():
+        raise HTTPException(503, "torch is not installed on this server")
+    jid = export_jobs.new_job(f"batch-probe:{payload.model.model_family}")
+    threading.Thread(target=batch_probe.run_probe_job, args=(jid, payload), daemon=True).start()
+    return {"job_id": jid}
+
+
+@app.post("/api/train/infer")
+async def train_infer(payload: InferRequest) -> dict:
+    """Run a saved fine-tuned run over the requested slices. Runs on a
+    background thread; poll ``GET /api/export/status/{job_id}``.
+    """
+    if not train_common.torch_available():
+        raise HTTPException(503, "torch is not installed on this server")
+    try:
+        train_common.load_run_config(payload.run_id)
+    except HTTPException:
+        raise
+    jid = export_jobs.new_job(payload.run_id)
+    threading.Thread(target=infer_jobs.run_infer_job, args=(jid, payload), daemon=True).start()
+    return {"job_id": jid}
+
+
+@app.get("/api/train/infer/preview/{job_id}/{slice_index}")
+async def train_infer_preview(job_id: str, slice_index: int) -> Response:
+    """Colourised RGBA overlay PNG for one predicted slice of a cached inference job."""
+    return Response(content=infer_jobs.preview_png(job_id, slice_index), media_type="image/png")
+
+
+@app.post("/api/train/infer/write-tiled/{job_id}")
+async def train_infer_write_tiled(job_id: str) -> dict:
+    """Push a completed inference job's label maps into Tiled. Runs on a
+    background thread; poll ``GET /api/export/status/{job_id}`` with the
+    RETURNED job id (distinct from *job_id*, the inference job being written).
+    """
+    write_jid = export_jobs.new_job(f"write-tiled:{job_id}")
+    threading.Thread(target=infer_jobs.run_write_tiled_job, args=(write_jid, job_id), daemon=True).start()
+    return {"job_id": write_jid}
+
+
+@app.get("/api/volume/resolve")
+async def volume_resolve(
+    source: str = Query(..., description="Tiled path of the open dataset"),
+    server_uri: Optional[str] = Query(None),
+) -> dict:
+    """Locate the renderable 3-D volume for the open dataset.
+
+    Which node holds it depends on how the dataset was catalogued — a registered
+    Zarr volume is one already, a TIFF stack's lives in its ``__volume`` sidecar,
+    and a stack nobody has built one for has none. The frontend cannot tell these
+    apart from the path, and guessing produces
+    ``missing multiscales in root .zattrs`` at the viewer instead of an answer.
+    """
+    return await asyncio.to_thread(volume_nodes.resolve_volume, server_uri, source)
+
+
+@app.get("/api/volume/build/inspect")
+async def volume_build_inspect(
+    source: str = Query(..., description="Tiled path of the per-slice dataset"),
+    kind: str = Query("tiled"),
+    server_uri: Optional[str] = Query(None),
+) -> dict:
+    """Describe the 3-D volume that would be built for this dataset."""
+    return await asyncio.to_thread(
+        volume_build.inspect_volume_build, source, kind, server_uri
+    )
+
+
+@app.post("/api/volume/build")
+async def volume_build_start(req: VolumeBuildRequest) -> dict:
+    """Build a 3-D volume from a slice stack already in the catalog.
+
+    Needs nothing but the open dataset: the slices are already in Tiled, so
+    asking for a source directory would be asking the user to re-supply data the
+    app has. Returns a ``job_id``; poll ``GET /api/export/status/{job_id}``.
+    """
+    info = await asyncio.to_thread(
+        volume_build.inspect_volume_build, req.source, req.kind, req.server_uri
+    )
+    jid = export_jobs.new_job(req.source)
+    export_jobs.set_total(jid, max(info["slices_to_read"], 1))
+
+    def _run() -> None:
+        try:
+            export_jobs.update(jid, state="running", phase="building")
+
+            def _progress(message: str, done: int, total: int) -> None:
+                export_jobs.update(jid, phase=message, done=done, total=max(total, 1))
+
+            result = volume_build.build_volume(
+                req.source, req.kind, req.server_uri, req.container_path, progress=_progress
+            )
+            export_jobs.update(jid, state="done", phase="done", result=result)
+            export_jobs.log(jid, f"Built 3-D volume {result['key']!r}.")
+        except HTTPException as exc:
+            export_jobs.update(jid, state="error", phase="error", error=str(exc.detail))
+        except Exception as exc:  # noqa: BLE001 — surfaced to the UI via the job
+            logger.exception("volume build failed")
+            export_jobs.update(jid, state="error", phase="error", error=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": jid, **info}
+
+
+@app.get("/api/tiff-stack/inspect")
+async def tiff_stack_inspect(
+    path: str = Query(..., description="Absolute path to a directory of TIFF slices"),
+) -> dict:
+    """Describe a TIFF directory and the pyramid that would be built for it.
+
+    Reads only the first file, so this is cheap enough to call while the user is
+    still typing a path. ``slices_to_read`` lets the UI say up front how much
+    work registration will be, rather than appearing to hang.
+
+    Raises:
+        HTTPException: 4xx from :func:`tiff_stack_source.inspect_tiff_stack` with
+            a user-facing message (missing path, no TIFFs, inconsistent
+            numbering…).
+    """
+    return await asyncio.to_thread(tiff_stack_source.inspect_tiff_stack, path)
+
+
+@app.post("/api/tiff-stack/preflight")
+async def tiff_stack_preflight(req: TiffStackRegisterRequest) -> dict:
+    """Report whether registering this TIFF stack would collide, changing nothing."""
+    return await asyncio.to_thread(
+        tiff_stack_source.preflight_tiff_stack, req.server_uri, req.path, req.container_path
+    )
+
+
+@app.post("/api/tiff-stack/register")
+async def tiff_stack_register(req: TiffStackRegisterRequest) -> dict:
+    """Register a TIFF directory as a 3-D multiscale volume, copying no slices.
+
+    Returns a ``job_id`` immediately; poll ``GET /api/export/status/{job_id}``.
+    A job rather than a straight call because — unlike Zarr registration, which
+    only writes catalog rows — the downsampled levels the 3-D viewer renders have
+    to be computed, and that means reading every source slice once.
+
+    The full-resolution slices themselves are registered in place: no pixels are
+    copied, and the existing per-slice nodes the 2-D canvas reads are untouched.
+    """
+    if req.on_conflict not in ingest_mod.ON_CONFLICT_MODES:
+        raise HTTPException(
+            400, f"on_conflict must be one of {sorted(ingest_mod.ON_CONFLICT_MODES)}"
+        )
+    # Validate before returning a job id, so a bad path is a 4xx the user sees
+    # immediately rather than a job that fails a second later.
+    info = await asyncio.to_thread(tiff_stack_source.inspect_tiff_stack, req.path)
+
+    jid = export_jobs.new_job(req.path)
+    # Every source slice is read exactly once: the finest generated level comes
+    # from the TIFFs, the coarser ones cascade from it in memory.
+    export_jobs.set_total(jid, max(info["slices_to_read"], 1))
+
+    def _run() -> None:
+        try:
+            export_jobs.update(jid, state="running", phase="registering")
+
+            def _progress(message: str, done: int, total: int) -> None:
+                export_jobs.update(jid, phase=message, done=done, total=max(total, 1))
+
+            result = tiff_stack_source.register_tiff_stack(
+                req.server_uri,
+                req.path,
+                req.container_path,
+                req.description,
+                req.on_conflict,
+                progress=_progress,
+            )
+            export_jobs.update(jid, state="done", phase="done", result=result)
+            export_jobs.log(jid, f"Registered {result['key']!r} as a 3-D volume.")
+        except HTTPException as exc:
+            export_jobs.update(jid, state="error", phase="error", error=str(exc.detail))
+        except Exception as exc:  # noqa: BLE001 — surfaced to the UI via the job
+            logger.exception("tiff stack registration failed")
+            export_jobs.update(jid, state="error", phase="error", error=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": jid, **info}
 
 
 @app.get("/health")

@@ -21,6 +21,7 @@ TILED_CONFIG="$SCRIPT_DIR/tiled/config.yml"
 MKDOCS_CONFIG="$SCRIPT_DIR/mkdocs.yml"
 TILED_PORT="${TILED_PORT:-8010}"
 BACKEND_PORT="${BACKEND_PORT:-8002}"
+IPRED_PORT="${IPRED_PORT:-8003}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 DOCS_PORT="${DOCS_PORT:-8000}"
 # PROD=1 (or SERVE_MODE=prod): build the optimized SPA and have the backend serve
@@ -30,6 +31,7 @@ STATIC_DIR="$BACKEND_DIR/static"
 RUN_DIR="$SCRIPT_DIR/.run"
 TILED_PID_FILE="$RUN_DIR/tiled.pid"
 BACKEND_PID_FILE="$RUN_DIR/backend.pid"
+IPRED_PID_FILE="$RUN_DIR/ipred.pid"
 FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
 DOCS_PID_FILE="$RUN_DIR/docs.pid"
 ENV_DIR=""
@@ -126,6 +128,7 @@ cleanup_managed_processes() {
   stop_managed_process "$DOCS_PID_FILE" "docs"
   stop_managed_process "$FRONTEND_PID_FILE" "frontend"
   stop_managed_process "$BACKEND_PID_FILE" "backend"
+  stop_managed_process "$IPRED_PID_FILE" "iPred"
   stop_managed_process "$TILED_PID_FILE" "Tiled"
 }
 
@@ -222,6 +225,7 @@ reclaim_orphaned_repo_ports() {
   fi
   stop_repo_listener_on_port "$FRONTEND_PORT" "frontend" "$FRONTEND_DIR" "vite" ""
   stop_repo_listener_on_port "$BACKEND_PORT" "backend" "$BACKEND_DIR" "annotation_server:app" "uvicorn"
+  stop_repo_listener_on_port "$IPRED_PORT" "iPred" "$SCRIPT_DIR/ipred" "ipred.api:app" "uvicorn"
   stop_repo_listener_on_port "$DOCS_PORT" "docs" "$SCRIPT_DIR" "mkdocs" ""
   # Repo-scoped: only reclaim OUR own stale Tiled (its command line contains this
   # repo's config path). A foreign Tiled on the port is left alone — we coexist by
@@ -283,6 +287,64 @@ ensure_backend_env() {
   fi
 }
 
+ensure_ml_env() {
+  # Best-effort + backgrounded-in-spirit: never blocks or fails startup — the
+  # Train tab (and denoise_bake.py's "model" denoise method) already degrade
+  # to a clear "unavailable" state via train_common.torch_available() /
+  # dlsia_available() when these aren't installed, so skipping this is always
+  # a safe default, not a broken one.
+  local want_install="${INSTALL_ML:-}"
+  # Default to installing on Apple Silicon Mac (torch gets MPS acceleration
+  # there); other platforms opt in explicitly, since a CUDA/CPU torch wheel is
+  # a multi-GB download the user may not want on every fresh machine.
+  if [ -z "$want_install" ] && [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    want_install=1
+  fi
+  if [ "$want_install" != "1" ]; then
+    echo -e "${YELLOW}    Skipping ML deps (Train tab) — set INSTALL_ML=1 to install torch/dlsia here.${NC}"
+    return 0
+  fi
+
+  if "$PYTHON" -c "import torch" >/dev/null 2>&1; then
+    echo -e "${GREEN}    torch already installed — Train tab available.${NC}"
+  else
+    echo -e "${CYAN}==> Installing torch for the Train tab (can take a few minutes on first run)...${NC}"
+    if uv pip install --python "$PYTHON" "torch>=2.4"; then
+      echo -e "${GREEN}    torch installed.${NC}"
+    else
+      echo -e "${YELLOW}    torch install failed — the Train tab will report 'unavailable'. Retry manually:${NC}"
+      echo -e "${YELLOW}      uv pip install --python \"$PYTHON\" \"torch>=2.4\"${NC}"
+    fi
+  fi
+
+  if "$PYTHON" -c "import dlsia" >/dev/null 2>&1; then
+    echo -e "${GREEN}    dlsia already installed — TUNet model family available.${NC}"
+  else
+    echo -e "${CYAN}==> Installing dlsia (+ qlty) for the Train tab's TUNet model family...${NC}"
+    if uv pip install --python "$PYTHON" "dlsia>=0.3" "qlty>=1.5"; then
+      echo -e "${GREEN}    dlsia installed.${NC}"
+    else
+      echo -e "${YELLOW}    dlsia install failed — the TUNet model family will report 'unavailable'.${NC}"
+    fi
+  fi
+
+  # Some ops (e.g. certain interpolate modes) aren't implemented on MPS yet;
+  # fall back to CPU for just that op instead of erroring.
+  export PYTORCH_ENABLE_MPS_FALLBACK=1
+}
+
+ensure_ipred_env() {
+  # NOTE: probe "ipred.api", not bare "ipred" — the repo's top-level ipred/
+  # directory (sibling of ipred/src/) is itself an importable namespace package
+  # from cwd, so "import ipred" can silently succeed even when the real
+  # editable install (ipred/src/ipred) was never pip-installed.
+  if ! "$PYTHON" -c "import ipred.api" >/dev/null 2>&1; then
+    echo -e "${YELLOW}    Installing iPred (interactive segmentation service) via uv...${NC}"
+    uv pip install --python "$PYTHON" -e "$SCRIPT_DIR/ipred" >/dev/null 2>&1 || return 1
+  fi
+  "$PYTHON" -c "import ipred.api" >/dev/null 2>&1
+}
+
 ensure_frontend_runtime() {
   if command -v npm >/dev/null 2>&1 && can_run_npm "$(command -v npm)"; then
     NPM_CMD=("$(command -v npm)")
@@ -325,10 +387,11 @@ tiled_cmd() {
 cleanup() {
   echo ""
   echo -e "${YELLOW}Shutting down...${NC}"
-  kill "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
-  wait "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
+  kill "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${IPRED_PID:+"$IPRED_PID"} ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
+  wait "$TILED_PID" "$BACKEND_PID" "$FRONTEND_PID" ${IPRED_PID:+"$IPRED_PID"} ${DOCS_PID:+"$DOCS_PID"} 2>/dev/null || true
   cleanup_pid_file "$TILED_PID_FILE"
   cleanup_pid_file "$BACKEND_PID_FILE"
+  cleanup_pid_file "$IPRED_PID_FILE"
   cleanup_pid_file "$FRONTEND_PID_FILE"
   cleanup_pid_file "$DOCS_PID_FILE"
   echo -e "${GREEN}Done.${NC}"
@@ -337,6 +400,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 ensure_backend_env
+ensure_ml_env
 ensure_frontend_runtime
 cleanup_managed_processes
 reclaim_orphaned_repo_ports
@@ -358,6 +422,15 @@ if [ "$BACKEND_PORT" != "$_orig_backend_port" ]; then
   echo -e "${YELLOW}    Backend port ${_orig_backend_port} is in use — using ${BACKEND_PORT} instead.${NC}"
 fi
 export API_PROXY_TARGET="http://127.0.0.1:${BACKEND_PORT}"
+
+# iPred: fall back to the next free port if busy. Exported as IPRED_URL before
+# the backend starts, so ipred_client.py picks up the chosen port.
+_orig_ipred_port="$IPRED_PORT"
+IPRED_PORT="$(pick_free_port "$IPRED_PORT" "iPred")"
+if [ "$IPRED_PORT" != "$_orig_ipred_port" ]; then
+  echo -e "${YELLOW}    iPred port ${_orig_ipred_port} is in use — using ${IPRED_PORT} instead.${NC}"
+fi
+export IPRED_URL="http://127.0.0.1:${IPRED_PORT}"
 
 # Frontend: fall back to the next free port if busy (Vite serves on --port below).
 _orig_frontend_port="$FRONTEND_PORT"
@@ -468,6 +541,11 @@ ensure_sam_model
 # resolved server-side by backend/tiled_config.py. Keys are never sent to the
 # frontend. (Port must match backend/tiled_config.py default: 8010.)
 # ---------------------------------------------------------------------------
+# Generated 3-D volume pyramids (backend/tiff_stack_source.py) are served by
+# Tiled in place, from a path listed in tiled/config.yml's readable_storage.
+# Created BEFORE Tiled starts, since that is when readable_storage is resolved.
+mkdir -p "$SCRIPT_DIR/.tiled/volumes"
+
 echo -e "${CYAN}==> Starting Tiled (port ${TILED_PORT})...${NC}"
 
 # Repair catalog asset paths in case the repo was moved or cloned to a new location.
@@ -529,6 +607,23 @@ if [ "$TILED_READY" != 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Git submodules: the WebGPU volume renderer that powers the 3D tab lives in
+# frontend/vendor/view_tomography_recon_app. A clone without --recurse-submodules
+# leaves it empty, which otherwise shows up as an unresolved import halfway
+# through a Vite build. Initialise it here so that never happens.
+# ---------------------------------------------------------------------------
+ZARR_VIEWER_ENTRY="$FRONTEND_DIR/vendor/view_tomography_recon_app/src/zarr-viewer/src/ome-zarr-viewer.ts"
+if [ ! -f "$ZARR_VIEWER_ENTRY" ]; then
+  echo -e "${CYAN}==> Initialising git submodules (3D volume renderer)...${NC}"
+  if git -C "$SCRIPT_DIR" submodule update --init --recursive; then
+    echo -e "${GREEN}    Submodules ready.${NC}"
+  else
+    echo -e "${YELLOW}    Could not initialise submodules — the 3D tab will not build.${NC}"
+    echo -e "${YELLOW}    Fix with: git submodule update --init --recursive${NC}"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Production SPA build (PROD=1): build the optimized frontend and stage it in
 # backend/static/ BEFORE the backend starts — the SPA mount is decided at import
 # time. In dev mode, remove any stale build so the backend stays API-only and the
@@ -549,6 +644,41 @@ if [ "$FRONTEND_MODE" = "prod" ]; then
   echo -e "${GREEN}    Built SPA → backend/static (served by the backend at :${BACKEND_PORT}).${NC}"
 else
   rm -rf "$STATIC_DIR"  # ensure the backend serves API-only in dev
+fi
+
+# ---------------------------------------------------------------------------
+# iPred — standalone interactive-segmentation service (CatBoost + conformal
+# prediction on composable feature banks). Optional: the Assist/Predict stages
+# show a clear "not running" state when this is down, and everything else in
+# the app works regardless (backend/ipred_routes.py returns 503 rather than
+# erroring). Startup failures here are warnings, never fatal.
+# ---------------------------------------------------------------------------
+IPRED_PID=""
+if ensure_ipred_env; then
+  echo -e "${CYAN}==> Starting iPred (port ${IPRED_PORT})...${NC}"
+  (cd "$SCRIPT_DIR" && "$ENV_DIR/bin/uvicorn" ipred.api:app --host 127.0.0.1 --port "$IPRED_PORT") &
+  IPRED_PID=$!
+  echo "$IPRED_PID" > "$IPRED_PID_FILE"
+  echo -e "${GREEN}    iPred PID: $IPRED_PID${NC}"
+
+  echo -e "${CYAN}    Waiting for iPred...${NC}"
+  IPRED_READY=0
+  for i in $(seq 1 20); do
+    if curl -sf "http://127.0.0.1:${IPRED_PORT}/health" >/dev/null 2>&1; then
+      echo -e "${GREEN}    iPred ready at http://127.0.0.1:${IPRED_PORT}${NC}"
+      IPRED_READY=1
+      break
+    fi
+    if ! kill -0 "$IPRED_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  if [ "$IPRED_READY" != 1 ]; then
+    echo -e "${YELLOW}    iPred did not come up in time — Assist/Predict will show a 'not running' state until it does.${NC}"
+  fi
+else
+  echo -e "${YELLOW}==> Skipping iPred (install failed) — Assist/Predict will show a 'not running' state.${NC}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -632,6 +762,11 @@ else
   echo -e "${GREEN}  Frontend : http://127.0.0.1:${FRONTEND_PORT}${NC}"
 fi
 echo -e "${GREEN}  Backend  : http://127.0.0.1:${BACKEND_PORT}${NC}"
+if [ "$IPRED_READY" = "1" ]; then
+  echo -e "${GREEN}  iPred    : http://127.0.0.1:${IPRED_PORT}${NC}"
+else
+  echo -e "${YELLOW}  iPred    : not running (Assist/Predict disabled)${NC}"
+fi
 if [ -n "$DOCS_PID" ]; then
   echo -e "${GREEN}  Docs     : http://127.0.0.1:${DOCS_PORT}${NC}"
 fi

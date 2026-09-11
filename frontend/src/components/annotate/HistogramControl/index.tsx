@@ -14,13 +14,27 @@ export interface HistogramControlProps {
   hi: number;
   onChange: (lo: number, hi: number) => void;
   onReset: () => void;
+  /** What the window means — "Levels" (display) or "Threshold" (paintable band). */
+  label?: string;
+  /** Accent for the band + knobs; red distinguishes a threshold band from levels. */
+  accent?: 'sky' | 'red';
+  /** Extra controls rendered next to the reset button (e.g. an Auto button). */
+  actions?: React.ReactNode;
 }
+
+const ACCENTS = {
+  sky: { band: '#38bdf8', line: '#0284c7', grip: 'bg-sky-600' },
+  red: { band: '#f87171', line: '#dc2626', grip: 'bg-red-600' },
+} as const;
 
 const VBW = 256;
 const VBH = 60;
 const MAXV = 255;
 
-export default function HistogramControl({ bins, lo, hi, onChange, onReset }: HistogramControlProps) {
+export default function HistogramControl({
+  bins, lo, hi, onChange, onReset, label = 'Levels', accent = 'sky', actions,
+}: HistogramControlProps) {
+  const theme = ACCENTS[accent];
   const trackRef = useRef<HTMLDivElement>(null);
   // Active drag target + the window state captured at press (for band drags).
   const drag = useRef<{ target: 'lo' | 'hi' | 'band'; startV: number; startLo: number; startHi: number } | null>(null);
@@ -119,22 +133,25 @@ export default function HistogramControl({ bins, lo, hi, onChange, onReset }: Hi
   const pct = (v: number) => `${(v / MAXV) * 100}%`;
   const knobCls =
     'absolute top-0 h-full w-3 -translate-x-1/2 flex items-center justify-center cursor-ew-resize';
-  const knobGrip = 'w-1.5 h-5 rounded-sm bg-sky-600 border border-white shadow';
+  const knobGrip = `w-1.5 h-5 rounded-sm ${theme.grip} border border-white shadow`;
 
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between">
         <span className="text-[11px] text-gray-500">
-          Levels <span className="tabular-nums text-gray-500">{lo} – {hi}</span>
+          {label} <span className="tabular-nums text-gray-500">{lo} – {hi}</span>
         </span>
-        <button
-          aria-label="Reset levels"
-          title="Reset levels"
-          onClick={onReset}
-          className="p-0.5 rounded hover:bg-gray-100 hover:text-sky-600"
-        >
-          <ArrowCounterClockwise size={12} />
-        </button>
+        <div className="flex items-center gap-1">
+          {actions}
+          <button
+            aria-label={`Reset ${label.toLowerCase()}`}
+            title={`Reset ${label.toLowerCase()}`}
+            onClick={onReset}
+            className="p-0.5 rounded hover:bg-gray-100 hover:text-sky-600"
+          >
+            <ArrowCounterClockwise size={12} />
+          </button>
+        </div>
       </div>
 
       {/* Track: histogram plot + dual-knob range slider overlaid on it. */}
@@ -150,10 +167,10 @@ export default function HistogramControl({ bins, lo, hi, onChange, onReset }: Hi
           preserveAspectRatio="none"
           className="absolute inset-0 w-full h-full rounded bg-gray-100 border border-gray-200"
         >
-          <rect x={lo} y={0} width={Math.max(0, hi - lo)} height={VBH} fill="#38bdf8" opacity={0.15} />
+          <rect x={lo} y={0} width={Math.max(0, hi - lo)} height={VBH} fill={theme.band} opacity={0.15} />
           <path d={path} stroke="#64748b" strokeWidth={1} fill="none" vectorEffect="non-scaling-stroke" />
-          <line x1={lo} y1={0} x2={lo} y2={VBH} stroke="#0284c7" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-          <line x1={hi} y1={0} x2={hi} y2={VBH} stroke="#0284c7" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+          <line x1={lo} y1={0} x2={lo} y2={VBH} stroke={theme.line} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+          <line x1={hi} y1={0} x2={hi} y2={VBH} stroke={theme.line} strokeWidth={1} vectorEffect="non-scaling-stroke" />
         </svg>
 
         {/* Knob grips (crisp HTML overlay, aligned to the plot by percentage). */}
@@ -162,7 +179,7 @@ export default function HistogramControl({ bins, lo, hi, onChange, onReset }: Hi
           style={{ left: pct(lo) }}
           role="slider"
           tabIndex={0}
-          aria-label="Levels minimum"
+          aria-label={`${label} minimum`}
           aria-valuemin={0}
           aria-valuemax={MAXV}
           aria-valuenow={lo}
@@ -175,7 +192,7 @@ export default function HistogramControl({ bins, lo, hi, onChange, onReset }: Hi
           style={{ left: pct(hi) }}
           role="slider"
           tabIndex={0}
-          aria-label="Levels maximum"
+          aria-label={`${label} maximum`}
           aria-valuemin={0}
           aria-valuemax={MAXV}
           aria-valuenow={hi}

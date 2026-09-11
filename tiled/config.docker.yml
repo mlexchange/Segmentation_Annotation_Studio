@@ -1,0 +1,32 @@
+# Portable counterpart to config.yml, for the app-full Docker image
+# (Dockerfile's app-full stage / docker-entrypoint-full.sh) — config.yml
+# hardcodes a local dev machine's absolute data path
+# (readable_storage: /Users/.../data), which has no meaning inside a
+# container. Everything here lives under /data, the same volume mount point
+# the backend's LOCAL_DATA_ROOT already uses (see docker-compose.full.yml) —
+# one volume to persist for the whole container's state.
+authentication:
+  allow_anonymous_access: true
+  # No hardcoded key here either — docker-entrypoint-full.sh generates one
+  # (or uses TILED_API_KEY if you set it) and passes it via `tiled serve
+  # --api-key`, exactly like start_all.sh does for local dev. Anonymous
+  # access is read-only; the key authorizes writes.
+
+allow_origins:
+  - "*"
+
+trees:
+  - path: /
+    tree: tiled.catalog:from_uri
+    args:
+      uri: "sqlite+aiosqlite:////data/.tiled/catalog.db"
+      writable_storage: "/data/.tiled/data"
+      readable_storage:
+        # Bind-mount your own source datasets here (see
+        # docker-compose.full.yml's volumes). Uploads/ingest also land here.
+        - "/data/raw"
+        # Generated 3-D volume pyramids (backend/tiff_stack_source.py) and
+        # mask pyramids (backend/mask_pyramid.py) — must stay in step with
+        # VOLUME_CACHE_DIR, set by docker-entrypoint-full.sh.
+        - "/data/.tiled/volumes"
+      init_if_not_exists: true

@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { magicSelect, maskToPolygons, maskToPolygonsWithHoles, gradientField, type GrayField } from './magicwand';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { buildField, magicSelect, maskToPolygons, maskToPolygonsWithHoles, gradientField, otsuThreshold, type GrayField } from './magicwand';
 
 /** 40x40 grid (scale 1): background 0 with two value-200 blocks. */
 function twoBlocks(): GrayField {
@@ -57,6 +57,36 @@ describe('magicwand', () => {
     const walled = magicSelect(field, 5, 5, { toleranceFrac: 0.5, mode: 'contiguous', smooth: 0, edgeStop: 0.5, minRegion: 8 });
     expect(walled.length).toBe(1);
     expect(Math.max(...walled[0].filter((_, i) => i % 2 === 0))).toBeLessThan(21);
+  });
+
+  it('blocked keeps the flood from crossing a cell already claimed by another class', () => {
+    // Uniform intensity field — nothing but `blocked` should stop the flood.
+    const gw = 40, gh = 40;
+    const gray = new Float32Array(gw * gh).fill(50);
+    const field: GrayField = { gw, gh, scale: 1, gray };
+
+    // Without `blocked` the whole uniform field floods (crosses x=20).
+    const open = magicSelect(field, 5, 5, { toleranceFrac: 0.5, mode: 'contiguous', smooth: 0, minRegion: 8 });
+    expect(open.length).toBe(1);
+    expect(Math.max(...open[0].filter((_, i) => i % 2 === 0))).toBeGreaterThan(25);
+
+    // A vertical "wall" of another class's pixels at x=20 stops the flood at it.
+    const blocked = new Uint8Array(gw * gh);
+    for (let y = 0; y < gh; y++) blocked[y * gw + 20] = 1;
+    const walled = magicSelect(field, 5, 5, { toleranceFrac: 0.5, mode: 'contiguous', smooth: 0, minRegion: 8, blocked });
+    expect(walled.length).toBe(1);
+    expect(Math.max(...walled[0].filter((_, i) => i % 2 === 0))).toBeLessThan(21);
+  });
+
+  it('blocked does not prevent flooding when the seed itself sits on a blocked cell', () => {
+    const gw = 20, gh = 20;
+    const gray = new Float32Array(gw * gh).fill(50);
+    const field: GrayField = { gw, gh, scale: 1, gray };
+    const blocked = new Uint8Array(gw * gh);
+    blocked[9 * gw + 9] = 1; // the seed cell itself
+
+    const polys = magicSelect(field, 9, 9, { toleranceFrac: 0.5, mode: 'contiguous', smooth: 0, minRegion: 8, blocked });
+    expect(polys.length).toBe(1); // seed is exempt, matching edgeStop's own wall exemption
   });
 
   it('fills a uniform region with edgeStop on (noise must not wall the flood)', () => {
@@ -167,5 +197,190 @@ describe('maskToPolygonsWithHoles', () => {
     const out = maskToPolygonsWithHoles(m, W, H, { minRegion: 8 });
     expect(out.length).toBe(1);
     expect(out[0].holes.length).toBe(0);
+  });
+});
+
+describe('fractional scale (upscaled working resolution)', () => {
+  /** 40x40 grid at scale 0.5 — i.e. a 20x20 NATIVE image sampled at 2x. */
+  function upscaledBlock(): GrayField {
+    const gw = 40, gh = 40;
+    const gray = new Float32Array(gw * gh);
+    // Grid cells 8..24 → native image coords 4..12.
+    for (let y = 8; y < 24; y++) for (let x = 8; x < 24; x++) gray[y * gw + x] = 200;
+    return { gw, gh, scale: 0.5, gray };
+  }
+
+  it('magicSelect seeds and returns polygons in NATIVE image coords', () => {
+    const field = upscaledBlock();
+    // Seed at native (8,8) → grid (16,16), inside the block.
+    const polys = magicSelect(field, 8, 8, { toleranceFrac: 0.2, mode: 'contiguous', smooth: 0, minRegion: 8 });
+    expect(polys.length).toBe(1);
+    const xs = polys[0].filter((_, i) => i % 2 === 0);
+    const ys = polys[0].filter((_, i) => i % 2 === 1);
+    // Native extent of the block is 4..12, not the 8..24 grid extent.
+    expect(Math.min(...xs)).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...xs)).toBeLessThanOrEqual(13);
+    expect(Math.min(...ys)).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...ys)).toBeLessThanOrEqual(13);
+  });
+
+  it('yields sub-pixel (half-integer) vertices a native-resolution grid could not', () => {
+    const field = upscaledBlock();
+    const polys = magicSelect(field, 8, 8, { toleranceFrac: 0.2, mode: 'contiguous', smooth: 0, minRegion: 8 });
+    const coords = polys[0];
+    expect(coords.some((v) => !Number.isInteger(v))).toBe(true);
+  });
+});
+
+/**
+ * jsdom has no real 2D canvas, so `buildField` (which draws the source image
+ * into a small canvas and reads it back) needs `getContext('2d')` stubbed.
+ * drawImage is a no-op; getImageData returns a fixed RGBA pattern (128 gray
+ * everywhere) — buildField only cares that SOME data comes back and is
+ * converted to a `gray` field of the right size, not the actual pixel values.
+ */
+function stubCanvas2d() {
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (
+    this: HTMLCanvasElement,
+  ): any {
+    return {
+      drawImage: () => {},
+      getImageData: (_x: number, _y: number, w: number, h: number) => ({
+        data: new Uint8ClampedArray(w * h * 4).fill(128),
+        width: w,
+        height: h,
+      }),
+    } as unknown as CanvasRenderingContext2D;
+  });
+}
+
+describe('buildField', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('builds a downsampled gray + gradient field sized to fit maxDim', () => {
+    stubCanvas2d();
+    const field = buildField({} as CanvasImageSource, 3200, 1600, 1600);
+    expect(field).not.toBeNull();
+    // scale = ceil(3200/1600) = 2 -> gw = 3200/2 = 1600, gh = 1600/2 = 800
+    expect(field!.gw).toBe(1600);
+    expect(field!.gh).toBe(800);
+    expect(field!.scale).toBe(2);
+    expect(field!.gray.length).toBe(1600 * 800);
+    expect(field!.grad).toBeInstanceOf(Float32Array);
+  });
+
+  it('applies upscale to raise grid resolution and divide the effective scale', () => {
+    stubCanvas2d();
+    const field = buildField({} as CanvasImageSource, 3200, 1600, 1600, 2);
+    // scale = ceil(3200/1600)/2 = 1
+    expect(field!.scale).toBe(1);
+    expect(field!.gw).toBe(3200);
+    expect(field!.gh).toBe(1600);
+  });
+
+  it('omits the gradient field when needGradient is false', () => {
+    stubCanvas2d();
+    const field = buildField({} as CanvasImageSource, 800, 800, 1600, 1, false);
+    expect(field!.grad).toBeUndefined();
+  });
+
+  it('returns null when a 2D context is unavailable', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+    const field = buildField({} as CanvasImageSource, 800, 800);
+    expect(field).toBeNull();
+  });
+
+  it('returns null on a tainted canvas (getImageData throws)', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (): any {
+      return {
+        drawImage: () => {},
+        getImageData: () => {
+          throw new Error('SecurityError');
+        },
+      };
+    });
+    const field = buildField({} as CanvasImageSource, 800, 800);
+    expect(field).toBeNull();
+  });
+});
+
+describe('magicSelect smoothing (boxBlur pre-filter + Chaikin rounding)', () => {
+  it('produces a valid, smaller/rounder contour when smooth > 0', () => {
+    const field = twoBlocks();
+    const smoothed = magicSelect(field, 9, 9, { toleranceFrac: 0.2, mode: 'contiguous', smooth: 3, minRegion: 8 });
+    expect(smoothed.length).toBe(1);
+    expect(smoothed[0].length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('caps Chaikin iterations at 4 for very high smooth values without throwing', () => {
+    const field = twoBlocks();
+    expect(() =>
+      magicSelect(field, 9, 9, { toleranceFrac: 0.2, mode: 'contiguous', smooth: 10, minRegion: 8 }),
+    ).not.toThrow();
+  });
+});
+
+describe('maskToPolygonsWithHoles — multiple outer regions', () => {
+  it('assigns a hole to its owning outer via the centroid test when there are 2+ regions', () => {
+    const W = 100, H = 60;
+    const m = new Uint8Array(W * H);
+    // Region A (donut) at x[10,40), region B (solid) at x[60,90).
+    for (let y = 10; y < 50; y++) for (let x = 10; x < 40; x++) m[y * W + x] = 1;
+    for (let y = 22; y < 38; y++) for (let x = 18; x < 32; x++) m[y * W + x] = 0; // hole in A
+    for (let y = 10; y < 50; y++) for (let x = 60; x < 90; x++) m[y * W + x] = 1; // solid B
+
+    const out = maskToPolygonsWithHoles(m, W, H, { minRegion: 8 });
+    expect(out.length).toBe(2);
+    const withHole = out.find((r) => r.holes.length > 0);
+    const withoutHole = out.find((r) => r.holes.length === 0);
+    expect(withHole).toBeDefined();
+    expect(withoutHole).toBeDefined();
+  });
+
+  it('falls back to the bbox-containment test when the hole centroid lands outside every outer (concave, multi-region)', () => {
+    const W = 100, H = 60;
+    const m = new Uint8Array(W * H);
+    // Region A: concave "C" block with a notch, plus an enclosed hole whose
+    // centroid falls in the notch (outside A) — same shape as the single-region
+    // concave test, but with an unrelated solid region B elsewhere so `result.length`
+    // is 2 and the direct single-region shortcut cannot apply.
+    for (let y = 8; y < 52; y++) for (let x = 8; x < 52; x++) m[y * W + x] = 1; // block A
+    for (let y = 8; y < 30; y++) for (let x = 40; x < 52; x++) m[y * W + x] = 0; // notch (concavity)
+    for (let y = 34; y < 46; y++) for (let x = 16; x < 28; x++) m[y * W + x] = 0; // enclosed hole in A
+    for (let y = 8; y < 52; y++) for (let x = 70; x < 95; x++) m[y * W + x] = 1; // solid region B
+
+    const out = maskToPolygonsWithHoles(m, W, H, { minRegion: 8 });
+    expect(out.length).toBe(2);
+    const withHole = out.find((r) => r.holes.length > 0);
+    expect(withHole).toBeDefined();
+  });
+});
+
+describe('otsuThreshold', () => {
+  it('splits a clean bimodal histogram between the modes', () => {
+    const bins = new Array(256).fill(0);
+    bins[40] = 1000;   // dark mode
+    bins[200] = 1000;  // bright mode
+    const t = otsuThreshold(bins);
+    expect(t).toBeGreaterThan(40);
+    expect(t).toBeLessThan(200);
+  });
+
+  it('handles broad overlapping modes', () => {
+    const bins = new Array(256).fill(0);
+    for (let i = 30; i < 70; i++) bins[i] = 100;
+    for (let i = 150; i < 220; i++) bins[i] = 100;
+    const t = otsuThreshold(bins);
+    expect(t).toBeGreaterThanOrEqual(69);
+    expect(t).toBeLessThanOrEqual(150);
+  });
+
+  it('returns a safe default for degenerate histograms', () => {
+    expect(otsuThreshold([])).toBe(128);
+    expect(otsuThreshold(new Array(256).fill(0))).toBe(128);
+    // Single-valued: no valid two-class split, so the default stands.
+    const one = new Array(256).fill(0);
+    one[77] = 500;
+    expect(otsuThreshold(one)).toBe(128);
   });
 });

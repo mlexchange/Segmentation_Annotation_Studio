@@ -28,6 +28,7 @@ Job state is held in-memory (lost on restart) — acceptable for a localhost too
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import uuid
@@ -122,6 +123,38 @@ def _read_array(path: Path) -> np.ndarray:
     if suffix in (".png", ".jpg", ".jpeg"):
         return np.asarray(PILImage.open(str(path)))
     raise ValueError(f"unsupported extension {suffix!r}")
+
+
+def validate_container_path(container_path: str) -> list[str]:
+    """Return safe Tiled key segments beneath the configured ingest root.
+
+    A write confinement check, not a formatting one: callers take a destination
+    from the client, so without this a request could name any container in the
+    catalog — including one holding unrelated data. Rejects traversal segments,
+    control characters, and anything that is not a strict descendant of
+    ``TILED_INGEST_ROOT`` (default ``browse``).
+    """
+    raw = (container_path or "").strip()
+    if not raw or raw != raw.strip("/"):
+        raise ValueError("container_path must be a relative canonical Tiled path")
+    parts = raw.split("/")
+    if any(
+        not part
+        or part in {".", ".."}
+        or len(part) > 128
+        or any(ord(char) < 32 for char in part)
+        for part in parts
+    ):
+        raise ValueError("container_path contains an unsafe segment")
+
+    root_parts = [
+        part for part in os.getenv("TILED_INGEST_ROOT", "browse").strip("/").split("/") if part
+    ]
+    # `len(parts) <= len(root_parts)` rejects the root itself: a dataset must be
+    # written *inside* it, never over it.
+    if not root_parts or parts[: len(root_parts)] != root_parts or len(parts) <= len(root_parts):
+        raise ValueError("container_path must be a child of the configured ingest root")
+    return parts
 
 
 def _ensure_container(client: Any, parts: list[str]) -> Any:

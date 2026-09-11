@@ -15,8 +15,32 @@ function gitCommit(): string {
   catch { return 'dev'; }
 }
 
+/**
+ * VITE_BASE_PATH must be a bare path (e.g. `/bl832/seg_studio/`), never a full
+ * URL with a scheme/host — the reverse proxy owns the hostname, and can
+ * differ per environment (staging vs. production) without ever touching this
+ * build-arg. Fail the build loudly rather than silently baking in a wrong
+ * `base` that would only surface as a confusing runtime 404.
+ */
+function basePath(): string {
+  const raw = process.env.VITE_BASE_PATH;
+  if (!raw) return '/';
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) || raw.startsWith('//')) {
+    throw new Error(
+      `VITE_BASE_PATH must be a path only (e.g. "/bl832/seg_studio/"), not a full URL — got "${raw}". ` +
+      'The reverse proxy owns the hostname; baking one in here would break as soon as it differs (e.g. staging vs. production) or changes.'
+    );
+  }
+  return raw;
+}
+
 export default defineConfig({
   plugins: [react(), tsconfigPaths()],
+  // Read at build time so the same Dockerfile stage can produce either a
+  // root-hosted image (unset, defaults to '/') or a subpath-hosted one (e.g.
+  // `/bl832/seg_studio/` behind a stripping reverse proxy) — see main.tsx's
+  // BrowserRouter basename and config.ts's API_BASE for the other two halves.
+  base: basePath(),
   define: {
     __APP_VERSION__: JSON.stringify(appVersion()),
     __GIT_COMMIT__: JSON.stringify(gitCommit()),
@@ -25,6 +49,10 @@ export default defineConfig({
   // (konva, polygon-clipping) land in their own chunks that load with the lazy
   // Annotate page rather than bloating the initial /connect entry.
   build: {
+    // Explicit, not left to Vite's implicit production-mode default — a stray
+    // future `--mode development` in a build script must not silently ship
+    // unminified bundles.
+    minify: 'esbuild',
     rollupOptions: {
       output: {
         manualChunks(id: string) {
@@ -58,5 +86,14 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
+    // vitest runs in Node, where bare `import 'konva'` resolves via the package's
+    // "main" field (a canvas-backed Node build requiring the native `canvas`
+    // module, which isn't installed) instead of "browser" (the jsdom-friendly
+    // build bundlers use). Force the browser build under test.
+    alias: [{ find: /^konva$/, replacement: 'konva/lib/index.js' }],
+    // Scoped to src/ so the vendored renderer's own suite (which needs WebGPU and
+    // its own runner config) isn't swept into ours by the default glob. Upstream
+    // tests are upstream's to run.
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
   },
 });

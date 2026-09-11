@@ -6,13 +6,19 @@ import HubAppLayout from '@/components/HubAppLayout';
 import { useHubSelectedTabs } from '@/hooks/useHubSelectedTabs';
 import { DOCS_URL, FEEDBACK_FORM_URL, FEEDBACK_ENTRY_ID } from '@/config';
 import { buildFeedbackContext, buildFeedbackUrl } from '@/lib/feedbackContext';
-import { PlugsConnected, PencilSimple, MagnifyingGlass, BookOpen } from '@phosphor-icons/react';
+import { PlugsConnected, PencilSimple, MagnifyingGlass, BookOpen, Cube, Brain } from '@phosphor-icons/react';
 // Lazy-loaded pages: keeps the heavy Annotate stack (konva, polygon-clipping,
 // magicwand, canvas) out of the initial /connect bundle — each page is its own chunk.
 const ConnectPage = lazy(() => import('./pages/ConnectPage'));
 const AnnotatePage = lazy(() => import('./pages/AnnotatePage'));
 const BrowsePage = lazy(() => import('./pages/BrowsePage'));
 const ReferencePage = lazy(() => import('./pages/ReferencePage'));
+// Lazy for the same reason as Annotate, and more so: this chunk carries the
+// whole vendored WebGPU renderer, which must never load on /connect.
+const VolumePage = lazy(() => import('./pages/VolumePage'));
+// Lazy for the same reason: the Train tab's own bundle, kept out of every
+// other page's initial load.
+const TrainPage = lazy(() => import('./pages/TrainPage'));
 import CustomizePages from '@/components/CustomizePages';
 import IframeModal from '@/components/IframeModal';
 
@@ -41,6 +47,20 @@ const allRoutes: RouteItem[] = [
     label: 'Annotate',
     icon: <PencilSimple size={32} />,
     element: <AnnotatePage />,
+    isBackgroundTransparent: true,
+  },
+  {
+    path: '/volume',
+    label: '3D',
+    icon: <Cube size={32} />,
+    element: <VolumePage />,
+    isBackgroundTransparent: true,
+  },
+  {
+    path: '/train',
+    label: 'Train',
+    icon: <Brain size={32} />,
+    element: <TrainPage />,
     isBackgroundTransparent: true,
   },
 ];

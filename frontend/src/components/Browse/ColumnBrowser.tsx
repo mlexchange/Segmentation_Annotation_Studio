@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router';
 import { ArrowsClockwise, PencilSimple, Plus, Stack } from '@phosphor-icons/react';
 import BrowseColumn from './BrowseColumn';
 import BrowseDetailPanel from './BrowseDetailPanel';
@@ -72,6 +73,7 @@ export default function ColumnBrowser({
 }: ColumnBrowserProps) {
   const { state, actions } = useBrowseData(serverUri, 'All', undefined, containerPath);
   const { openTiledArray } = useOpenInAnnotate();
+  const navigate = useNavigate();
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
@@ -237,8 +239,14 @@ export default function ColumnBrowser({
       )}
 
       {state.connectionStatus === 'disconnected' && (
-        <div className="shrink-0 px-4 py-2 text-xs border-b border-red-900 bg-red-950/80 text-red-300">
-          Cannot reach the API server. Make sure the backend (port 8002) and Tiled server are running.
+        <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-xs border-b border-red-900 bg-red-950/80 text-red-300">
+          <span>Cannot reach the API server. Make sure the backend (port 8002) and Tiled server are running.</span>
+          <button
+            onClick={() => navigate('/connect')}
+            className="shrink-0 px-2.5 py-1 rounded-md bg-red-900/60 hover:bg-red-900 transition-colors"
+          >
+            Go to Connect
+          </button>
         </div>
       )}
 
