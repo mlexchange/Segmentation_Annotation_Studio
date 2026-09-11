@@ -3,7 +3,11 @@
 There are two ways to run Segmentation Annotation Studio:
 
 - **Local development** — one command starts everything (recommended for annotators and evaluation).
-- **Docker** — a single production container that serves the app against an external Tiled server.
+- **Docker** — a prebuilt or locally-built container image; pick the shape that matches
+  whether you already have a Tiled server and whether you want iPred/Train available.
+
+For hosting a shared, ALS-style deployment behind a reverse proxy (rather than running
+it yourself), see [Production deployment](../reference/deployment.md) instead.
 
 ---
 
@@ -67,20 +71,20 @@ FRONTEND_PORT=5200 BACKEND_PORT=8100 TILED_PORT=8110 ./start_all.sh
 
 ---
 
-## Option 2 — Docker (production)
+## Option 2 — Docker
 
-Docker runs a **single container** that serves the built frontend and the API
-together on port **8002**. Tiled is **not** included — you point the container
-at an existing Tiled server.
+Three Dockerfile targets/compose files cover different needs — pick the one that
+matches what you already have running and whether you want iPred/Train available.
+None replaces the others; `app-ml` and `app-full` each build on the previous stage
+rather than duplicating install steps.
 
-```bash
-docker compose up --build
-```
+| Compose file | Image target | Tiled | iPred / Train | Use when |
+| --- | --- | --- | --- | --- |
+| `docker-compose.yml` | `app` | External (you provide one) | Not included | You already have a Tiled server and only need Connect/Browse/Annotate/Export. |
+| `docker-compose.ml.yml` | `app-ml` | External (you provide one) | **Bundled** | You already have a Tiled server but also want Train/iPred to work, without standing up a separate iPred service. |
+| `docker-compose.full.yml` | `app-full` | **Bundled** | **Bundled** | You want the whole stack (Tiled + backend + iPred) with nothing external to set up — the simplest way to try everything. |
 
-Then open <http://localhost:8002>.
-
-Configure the connection to your external Tiled through environment variables
-(see [Environment variables](#environment-variables)):
+### Lean (`app`) — bring your own Tiled
 
 ```bash
 TILED_URI=https://tiled.example.com \
@@ -88,9 +92,32 @@ TILED_API_KEY=your-key \
 docker compose up --build
 ```
 
+Then open <http://localhost:8002>.
+
+### With iPred/Train, external Tiled (`app-ml`)
+
+```bash
+TILED_URI=https://tiled.example.com \
+TILED_API_KEY=your-key \
+docker compose -f docker-compose.ml.yml up --build
+```
+
+Then open <http://localhost:8002>. iPred is also reachable directly on `:8003` if needed.
+
+### Fully bundled (`app-full`) — nothing external required
+
+```bash
+docker compose -f docker-compose.full.yml up --build
+```
+
+Then open <http://localhost:8002>. Tiled (`:8010`) and iPred (`:8003`) are also
+reachable directly if you want to hit them outside the app.
+
 !!! warning "Persisting your data"
-    Mount `LOCAL_DATA_ROOT` as a volume so annotation drafts, versions, and
-    exports survive container restarts.
+    Every compose file above mounts `LOCAL_DATA_ROOT` (`/data`) as a named volume,
+    so annotation drafts, versions, and exports already survive a container
+    restart. For `app-full`, bind-mount your own source datasets to `/data/raw`
+    (see the compose file's own comment) so Tiled can ingest them.
 
 ---
 
@@ -147,6 +174,12 @@ Backend configuration lives in `backend/.env` (created from
 | `EXPORT_ROOT` | Override output folder for exports | `~/data/exports` |
 | `BROWSE_CACHE_TTL_SECONDS` | Cache lifetime for Tiled browse listings | `300` |
 | `BROWSE_ALLOWED_ORIGINS` | CORS origins (only needed for split frontend/backend hosting) | *(empty)* |
+| `TILED_BROWSE_PATH` | Path into the Tiled tree Browse treats as its root | *(unset — this repo's own ingest root)* |
+
+`VITE_BASE_PATH` is a **frontend build-time** setting (a Docker build-arg, not a
+runtime env var — see [Production deployment](../reference/deployment.md)) for
+hosting under a URL prefix rather than at the domain root; leave it unset for
+everything on this page.
 
 !!! danger "Never commit secrets"
     `backend/.env` is git-ignored. Never commit it, and never expose

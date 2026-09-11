@@ -92,6 +92,7 @@ nav:
       - 7. 3D volume view: guide/volume.md
   - Reference:
       - Software architecture: reference/architecture.md
+      - Production deployment: reference/deployment.md
       - Keyboard shortcuts: reference/shortcuts.md
       - Troubleshooting: reference/troubleshooting.md
 

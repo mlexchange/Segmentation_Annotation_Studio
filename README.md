@@ -71,6 +71,27 @@ PROD=1 ./start_all.sh
 The frontend is built to `backend/static/` and served by FastAPI. The whole app is then
 available at the **Backend** URL (http://127.0.0.1:8002).
 
+## Docker
+
+Three Dockerfile targets/compose files, layered `app` → `app-ml` → `app-full`, cover
+different needs — pick the one that matches what you already have running:
+
+| Compose file | Tiled | iPred / Train | Use when |
+| --- | --- | --- | --- |
+| `docker-compose.yml` | External (bring your own) | Not included | You already have Tiled and just need Connect/Browse/Annotate/Export. |
+| `docker-compose.ml.yml` | External (bring your own) | Bundled | You already have Tiled but also want Train/iPred. |
+| `docker-compose.full.yml` | Bundled | Bundled | Nothing external required — the simplest way to try everything. |
+
+```bash
+docker compose -f docker-compose.full.yml up --build   # fully bundled
+```
+
+Then open <http://localhost:8002>. See
+[Installation](docs/getting-started/installation.md) for the other two images and
+env vars, and [Production deployment](docs/reference/deployment.md) for hosting a
+shared deployment under a URL prefix (e.g. behind a reverse proxy at
+`hub.example.org/your-path/`) with the published `ghcr.io` images.
+
 ## Workflow
 
 The app is organized into four tabs:
@@ -150,4 +171,5 @@ frontend/vendor/  Git submodules — the WebGPU volume renderer used by the 3D t
 tiled/        Local Tiled server config
 docs/         MkDocs Material documentation site
 start_all.sh  One-command launcher for the full stack
+Dockerfile    app / app-ml / app-full image targets (see Docker, above)
 ```
