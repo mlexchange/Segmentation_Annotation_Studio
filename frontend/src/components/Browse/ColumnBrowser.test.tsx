@@ -10,7 +10,7 @@
  * (facets → show-all → items) still runs end to end against a stubbed fetch.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import ColumnBrowser from './ColumnBrowser';
@@ -132,8 +132,49 @@ describe('ColumnBrowser', () => {
     renderBrowser();
 
     expect(await screen.findByTestId('items-column')).toBeInTheDocument();
-    expect(screen.getByText('item:sample-1')).toBeInTheDocument();
+    // showAll() sets showingAll=true and kicks off loadItems({}) without
+    // waiting for it — ColumnBrowser mounts ItemsColumn as soon as
+    // showingAll flips, independent of whether the items fetch has actually
+    // resolved. Finding the (possibly still-empty) column is not proof the
+    // sample has rendered; only findByText's own retry-until-appears
+    // semantics correctly wait for the item itself.
+    expect(await screen.findByText('item:sample-1')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /All samples/ })).toHaveClass('bg-slate-600');
+  });
+
+  it('renders samples when a pending items response completes', async () => {
+    let resolveItems!: (response: Response) => void;
+    const pendingItems = new Promise<Response>((resolve) => {
+      resolveItems = resolve;
+    });
+    const itemsHandler = vi.fn(() => pendingItems);
+
+    global.fetch = makeFetchMock({
+      '/api/browse/facets': () => jsonResponse({ facets: ['field1'] }),
+      '/api/browse/items': itemsHandler,
+    });
+
+    renderBrowser();
+
+    try {
+      expect(await screen.findByTestId('items-column')).toBeInTheDocument();
+      expect(itemsHandler).toHaveBeenCalledTimes(1);
+
+      // The container exists, but the response is deliberately still pending
+      // — this is the intermediate state the race above was missing.
+      expect(screen.queryByText('item:sample-1')).not.toBeInTheDocument();
+    } finally {
+      // Release the request even if an assertion fails, so its timeout and
+      // pending updates do not leak into subsequent tests.
+      await act(async () => {
+        resolveItems(
+          jsonResponse({ items: [{ path: 'p1', sample: 'sample-1', metadata: {} }], total: 1 }),
+        );
+        await pendingItems;
+      });
+    }
+
+    expect(await screen.findByText('item:sample-1')).toBeInTheDocument();
   });
 
   it('shows the disconnected banner when facets cannot be reached, and no items column', async () => {
