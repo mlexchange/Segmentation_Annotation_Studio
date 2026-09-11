@@ -17,6 +17,11 @@ function gitCommit(): string {
 
 export default defineConfig({
   plugins: [react(), tsconfigPaths()],
+  // Read at build time so the same Dockerfile stage can produce either a
+  // root-hosted image (unset, defaults to '/') or a subpath-hosted one (e.g.
+  // `/bl832/seg_studio/` behind a stripping reverse proxy) — see main.tsx's
+  // BrowserRouter basename and config.ts's API_BASE for the other two halves.
+  base: process.env.VITE_BASE_PATH || '/',
   define: {
     __APP_VERSION__: JSON.stringify(appVersion()),
     __GIT_COMMIT__: JSON.stringify(gitCommit()),
@@ -25,6 +30,10 @@ export default defineConfig({
   // (konva, polygon-clipping) land in their own chunks that load with the lazy
   // Annotate page rather than bloating the initial /connect entry.
   build: {
+    // Explicit, not left to Vite's implicit production-mode default — a stray
+    // future `--mode development` in a build script must not silently ship
+    // unminified bundles.
+    minify: 'esbuild',
     rollupOptions: {
       output: {
         manualChunks(id: string) {

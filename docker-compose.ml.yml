@@ -1,0 +1,34 @@
+# Backend (with the ml/dlsia extra) + ipred bundled; Tiled stays external —
+# point TILED_URI/TILED_API_KEY at your own Tiled server (Dockerfile's app-ml
+# stage, the same shape ghcr.io publishes under the `:als` tag). Use this when
+# you already have a Tiled server running and want Train/iPred to work
+# without a second, separately-maintained ipred deployment. For a fully
+# bundled stack with no external services at all, use docker-compose.full.yml
+# instead; for the lightest option (no ipred/ML), use docker-compose.yml.
+#
+#   docker compose -f docker-compose.ml.yml up --build
+#
+services:
+  app-ml:
+    build:
+      context: .
+      target: app-ml
+    ports:
+      - "8002:8002"  # the app itself (SPA + API) — the only port most setups need
+      - "8003:8003"  # ipred, direct access (optional)
+    environment:
+      # External Tiled server (required):
+      TILED_URI: "${TILED_URI:-http://host.docker.internal:8010}"
+      TILED_API_KEY: "${TILED_API_KEY:-}"
+      # Persisted annotation drafts/versions/exports live under this path:
+      LOCAL_DATA_ROOT: "/data"
+      # Same-origin SPA → CORS can be empty; set if you split origins:
+      BROWSE_ALLOWED_ORIGINS: "${BROWSE_ALLOWED_ORIGINS:-}"
+    volumes:
+      - annotation-data-ml:/data
+    # host.docker.internal lets the container reach a Tiled on the host (Linux):
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  annotation-data-ml:

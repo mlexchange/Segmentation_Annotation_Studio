@@ -68,6 +68,7 @@ jobs:
       # complete service, not an override of app), built independently. Does
       # not push anywhere; image publishing is a separate, main-only job below.
       - run: docker compose -f docker-compose.yml build
+      - run: docker compose -f docker-compose.ml.yml build
       - run: docker compose -f docker-compose.full.yml build
 
   # Publishes images on merge to main ONLY — never on a PR run, to avoid
@@ -84,10 +85,42 @@ jobs:
     strategy:
       matrix:
         include:
+          # --- Unchanged, generic builds: root-hosted, no VITE_BASE_PATH ---
           - target: app
             image: app
+            tags: |
+              type=raw,value=latest
+              type=sha
+            vite_base_path: ""
+          - target: app-ml
+            image: app-ml
+            tags: |
+              type=raw,value=latest
+              type=sha
+            vite_base_path: ""
           - target: app-full
             image: app-full
+            tags: |
+              type=raw,value=latest
+              type=sha
+            vite_base_path: ""
+          # --- Purpose-tagged, base-path-baked builds ---
+          # :als — ipred/ML bundled, Tiled external (ALS's own production
+          # Tiled), hosted under ALS's hub path prefix.
+          - target: app-ml
+            image: app-ml
+            tags: |
+              type=raw,value=als
+              type=raw,value=als-{{sha}}
+            vite_base_path: /bl832/seg_studio/
+          # :local — fully bundled (+ Tiled), for anyone running this
+          # repo locally; still exercises subpath hosting by default.
+          - target: app-full
+            image: app-full
+            tags: |
+              type=raw,value=local
+              type=raw,value=local-{{sha}}
+            vite_base_path: /seg_studio/
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,9 +135,7 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.image }}
-          tags: |
-            type=raw,value=latest
-            type=sha
+          tags: ${{ matrix.tags }}
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -112,3 +143,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VITE_BASE_PATH=${{ matrix.vite_base_path }}

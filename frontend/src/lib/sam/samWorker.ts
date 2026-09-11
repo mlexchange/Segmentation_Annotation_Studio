@@ -44,7 +44,7 @@ const MODEL_SOURCES: ModelSource[] = [
 ];
 
 env.allowLocalModels = true;
-env.localModelPath = '/models/';
+env.localModelPath = `${import.meta.env.BASE_URL}models/`;
 if (env.backends?.onnx?.wasm) env.backends.onnx.wasm.numThreads = 1;
 
 interface PromptPoint { x: number; y: number; label: 0 | 1 }

@@ -137,10 +137,11 @@ The dev and production layouts differ mainly in **who serves the SPA** and
     Vite proxies every `/api` request to the backend, so the frontend uses an
     empty `API_BASE` and stays same-origin.
 
-=== "Production (Docker) — two images, pick one"
+=== "Production (Docker) — three images, pick one"
 
-    Two Dockerfile targets/compose files cover different deployment needs —
-    neither replaces the other.
+    Three Dockerfile targets/compose files, layered `app` → `app-ml` → `app-full`
+    (each `FROM` the previous, so the install steps are never duplicated) —
+    each covers a different deployment need, none replaces the others.
 
     **`app` (lean)** — frontend + backend only, for a deployment with its own
     external Tiled and no need for iPred/dlsia:
@@ -157,9 +158,30 @@ The dev and production layouts differ mainly in **who serves the SPA** and
       Container --> Volume
     ```
 
-    **`app-full` (batteries-included)** — one container running all three
-    backend-side services (Tiled and ipred as backgrounded processes, backend
-    as the container's foreground/main process — no Docker networking needed):
+    **`app-ml`** — `app` plus the `ml` extra (torch/dlsia) and ipred bundled,
+    Tiled still external — for a deployment that already has its own
+    production Tiled (bundling a second, empty one would be wrong) but still
+    wants Train/iPred to work without standing up a separate ipred service.
+    This is what the `:als` ghcr.io tag publishes, base path baked in at
+    `/bl832/seg_studio/`:
+
+    ```mermaid
+    flowchart LR
+      Browser["Browser"]
+      Container["app-ml image<br/>backend :8002 (foreground)<br/>+ ipred :8003 (background)"]
+      TiledExt["External Tiled<br/>(TILED_URI env)"]
+      Volume[("/data volume")]
+
+      Browser -->|same origin| Container
+      Container --> TiledExt
+      Container --> Volume
+    ```
+
+    **`app-full` (batteries-included)** — `app-ml` plus a bundled Tiled server
+    too, one container running all three backend-side services (Tiled and
+    ipred as backgrounded processes, backend as the container's foreground/main
+    process — no Docker networking needed). This is what the `:local` ghcr.io
+    tag publishes, base path baked in at `/seg_studio/`:
 
     ```mermaid
     flowchart LR
@@ -171,15 +193,24 @@ The dev and production layouts differ mainly in **who serves the SPA** and
       Container --> Volume
     ```
 
-    Both copy the compiled SPA into `backend/static/`; FastAPI serves the API
-    and static files from one origin. `app-full` adds the `ml` extra, `tiled[all]`,
-    and the `ipred` package on top of the same base layer, plus
-    `docker-entrypoint-full.sh` to start the three processes. Known limitation
-    (documented in that entrypoint's own comment): Tiled/ipred aren't supervised
-    inside `app-full` — if one crashes post-startup the container keeps running
-    (backend is its main process) but that service stays down until a restart.
-    Fine for local/demo use; a real deployment needing that resilience should
-    use `app` against a properly-supervised external Tiled instead.
+    All three copy the compiled SPA into `backend/static/`; FastAPI serves the
+    API and static files from one origin. Known limitation (documented in
+    `docker-entrypoint-full.sh`'s/`docker-entrypoint-ml.sh`'s own comments):
+    Tiled/ipred aren't supervised inside `app-full`/`app-ml` — if one crashes
+    post-startup the container keeps running (backend is its main process) but
+    that service stays down until a restart. Fine for local/demo use; a real
+    deployment needing that resilience should use `app` against a
+    properly-supervised external Tiled instead.
+
+    **Subpath hosting** (e.g. `hub.als.lbl.gov/bl832/seg_studio/`, behind a
+    reverse proxy that strips the prefix before forwarding) is a build-time
+    choice, not a runtime one — Vite bakes `base`/`import.meta.env.BASE_URL`
+    into the compiled JS, so a root-hosted image and a subpath-hosted image are
+    two different build artifacts from the same source. Set the `VITE_BASE_PATH`
+    build-arg (`vite.config.ts`'s `base`, threaded through to `main.tsx`'s
+    `BrowserRouter basename` and `config.ts`'s `API_BASE`) at `docker build`
+    time; leave it unset for root-hosted (local dev, and the generic
+    `:latest`-tagged builds of all three images above are unaffected).
 
 ## Frontend architecture
 
