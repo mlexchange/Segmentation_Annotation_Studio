@@ -164,7 +164,14 @@ npm test           # run the Vitest unit tests
 ## Environment variables
 
 Backend configuration lives in `backend/.env` (created from
-`backend/.env.example` on first launch). The most relevant settings:
+`backend/.env.example` on first launch) when running via `start_all.sh` /
+directly with `uvicorn`. **Running via `docker compose` instead**, copy the
+repo root's own `.env.example` to `.env` — `docker compose` loads that
+automatically for every `docker-compose*.yml` file, so this is where
+`TILED_URI`/`TILED_API_KEY`/`TILED_BROWSE_PATH` (and, for `app-ml`,
+`VITE_BASE_PATH`) actually get substituted in. See
+[Production deployment](../reference/deployment.md#setting-these-for-docker-compose)
+for details. The most relevant settings either way:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |

@@ -19,6 +19,9 @@ services:
     environment:
       LOCAL_DATA_ROOT: "/data"
       BROWSE_ALLOWED_ORIGINS: "${BROWSE_ALLOWED_ORIGINS:-}"
+      # Only relevant if you point this stack's bundled Tiled at pre-existing
+      # data rather than this app's own ingest — leave unset otherwise:
+      TILED_BROWSE_PATH: "${TILED_BROWSE_PATH:-}"
       # Set this to keep the same Tiled API key across container restarts —
       # otherwise docker-entrypoint-full.sh generates a fresh one each time,
       # which is fine (Tiled's catalog itself persists in the volume below)

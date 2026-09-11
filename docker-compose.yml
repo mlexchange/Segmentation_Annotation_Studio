@@ -12,6 +12,10 @@ services:
       # External Tiled server (required):
       TILED_URI: "${TILED_URI:-http://host.docker.internal:8010}"
       TILED_API_KEY: "${TILED_API_KEY:-}"
+      # Path into the Tiled tree Browse treats as its root — set this for a
+      # deployment pointed at an existing institutional Tiled catalog rather
+      # than a from-scratch one (see .env.example):
+      TILED_BROWSE_PATH: "${TILED_BROWSE_PATH:-}"
       # Persisted annotation drafts/versions/exports live under this path:
       LOCAL_DATA_ROOT: "/data"
       # Same-origin SPA → CORS can be empty; set if you split origins:

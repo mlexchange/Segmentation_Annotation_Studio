@@ -60,6 +60,20 @@ If you're standing up your own subpath deployment (a different institution, a
 different path), build your own image with the matching `VITE_BASE_PATH` rather than
 reusing the `:als`/`:local` tags, which are baked for this repo's specific paths.
 
+!!! warning "`VITE_BASE_PATH` is a path, never a hostname"
+    Set it to the path segment only (`/bl832/seg_studio/`) — **never** a full URL
+    with a scheme or host (`https://hub.als.lbl.gov/bl832/seg_studio/` would be
+    wrong). The image has no business knowing what domain fronts it; only the
+    reverse proxy does, and it can change (or differ between environments)
+    without ever touching this build-arg. This is what makes the *same* `:als`
+    image usable unmodified across staging and production — e.g.
+    `hub-staging.als.lbl.gov/bl832/seg_studio/` and
+    `hub.als.lbl.gov/bl832/seg_studio/` sharing the identical `/bl832/seg_studio/`
+    path, routed to whichever environment's container by the proxy's own
+    hostname-based rule, not by anything baked into the image. Baking a real
+    FQDN in would force a separate image build per environment for no reason,
+    and would silently break if that hostname ever changed.
+
 !!! tip "Testing this locally before it matters"
     `docker-compose.local.yml` (see [Installation](../getting-started/installation.md))
     includes a small nginx service that reproduces exactly this proxy-stripping
@@ -83,6 +97,28 @@ Persistent storage (`LOCAL_DATA_ROOT`, defaulting to the `/data` volume already
 declared in the image) and CORS (`BROWSE_ALLOWED_ORIGINS`) need no special
 production-specific handling beyond what's already documented for local Docker use —
 mount a real volume, and leave CORS empty since the SPA and API are served same-origin.
+
+### Setting these for `docker compose`
+
+Copy `.env.example` (repo root) to `.env` and fill it in — `docker compose` loads a
+`.env` file in the same directory automatically, for every compose file:
+
+```bash
+cp .env.example .env
+# edit .env: set TILED_URI, TILED_API_KEY, TILED_BROWSE_PATH, VITE_BASE_PATH
+docker compose -f docker-compose.ml.yml up --build
+```
+
+`.env` is git-ignored — never commit a real `TILED_API_KEY` into it. This is a
+different file from `backend/.env.example`/`frontend/.env.example`, which configure
+`start_all.sh`/plain `npm run dev`/`npm run build` outside a container — the root
+`.env` is specifically what `docker compose` itself substitutes into the compose
+files' `${VAR}` references (`TILED_URI`, `TILED_API_KEY`, and `TILED_BROWSE_PATH` in
+`docker-compose.yml`/`docker-compose.ml.yml`; `VITE_BASE_PATH` as a build-arg in
+`docker-compose.ml.yml`). If you're running the already-published `ghcr.io` image
+directly (`docker run`/your own orchestration) rather than through one of these
+compose files, pass the equivalent `-e`/env vars there instead — `.env` only affects
+`docker compose` invocations in this directory.
 
 ---
 
