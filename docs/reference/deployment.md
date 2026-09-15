@@ -82,6 +82,16 @@ reusing the `:als`/`:local` tags, which are baked for this repo's specific paths
     plain static file server does **not** reproduce this — the stripping proxy is
     load-bearing, not optional.
 
+!!! warning "A real reverse proxy needs a body-size limit raised too"
+    Discovered via the local test proxy: nginx's own default `client_max_body_size`
+    (1MB) rejects the Ingest tab's multi-file uploads (a folder of TIFFs easily
+    reaches hundreds of MB) with a raw `413` *before the request ever reaches this
+    app* — this app's own upload handling is never even consulted. `docker/nginx-
+    local.conf` sets `client_max_body_size 0;` (unlimited; the backend's own
+    job-based, streamed-to-disk ingest route is the real, size-aware boundary) —
+    **`hub.als.lbl.gov`'s real reverse proxy needs the equivalent setting**, or
+    every real-world upload through this app will hit the same wall in production.
+
 ---
 
 ## Environment variables specific to a shared deployment
@@ -92,6 +102,7 @@ Beyond what's already covered in [Installation](../getting-started/installation.
 | --- | --- |
 | `TILED_BROWSE_PATH` | The real path into an existing institutional Tiled catalog Browse should treat as its root (e.g. `beamlines/bl832/processed`). Confirm the exact value with whoever operates that Tiled server — don't assume it matches another deployment's beamline. |
 | `TILED_URI` / `TILED_API_KEY` | Point at the shared production Tiled server. See the open authentication question below — a single shared key is a stopgap, not the final design. |
+| `LOCAL_SOURCE_DIR` | `docker-compose.full.yml`/`docker-compose.local.yml` (bundled-Tiled shapes) only — bind-mounts a real host directory to `/data/raw` so the bundled Tiled server can read it directly. Not applicable to `:als` (`app-ml`), which points at an already-existing external Tiled instead of a bundled one. |
 
 Persistent storage (`LOCAL_DATA_ROOT`, defaulting to the `/data` volume already
 declared in the image) and CORS (`BROWSE_ALLOWED_ORIGINS`) need no special

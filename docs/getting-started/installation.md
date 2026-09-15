@@ -116,8 +116,20 @@ reachable directly if you want to hit them outside the app.
 !!! warning "Persisting your data"
     Every compose file above mounts `LOCAL_DATA_ROOT` (`/data`) as a named volume,
     so annotation drafts, versions, and exports already survive a container
-    restart. For `app-full`, bind-mount your own source datasets to `/data/raw`
-    (see the compose file's own comment) so Tiled can ingest them.
+    restart.
+
+!!! tip "Pointing at your own datasets"
+    For `app-full`, set `LOCAL_SOURCE_DIR` in your own `.env` (copy the repo
+    root's `.env.example`) to an absolute host directory — it's bind-mounted to
+    `/data/raw` inside the container, so the bundled Tiled server (and the Zarr
+    loader's "Browse…" directory picker on the Connect page) can read your real
+    data directly. This matters specifically in Docker: a path from your own
+    machine (e.g. one you'd type into the Zarr loader by hand) means nothing to
+    the container unless it's actually mounted like this — `LOCAL_SOURCE_DIR` is
+    what makes it visible.
+    ```bash
+    LOCAL_SOURCE_DIR=/absolute/path/to/your/data docker compose -f docker-compose.full.yml up --build
+    ```
 
 ---
 
