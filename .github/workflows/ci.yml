@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# None of these jobs push commits, comment on PRs, or touch packages — read-only
+# is the least-privilege default (CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest

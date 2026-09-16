@@ -399,4 +399,8 @@ class TestCapabilityErrorHandling:
         monkeypatch.setattr(train_common, "torch_available", boom)
         result = train_common.capability()
         assert "error" in result
-        assert "tiling import exploded" in result["error"]
+        # The raw exception message must never reach an HTTP response (CodeQL
+        # py/stack-trace-exposure) — only a generic marker crosses the API
+        # boundary; the real detail goes to the server log only.
+        assert "tiling import exploded" not in result["error"]
+        assert result["torch_available"] is False

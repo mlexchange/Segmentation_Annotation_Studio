@@ -14,7 +14,7 @@ import numpy as np
 from ipred import array_source, compositions, features
 from ipred.catalog import Catalog
 from ipred.compose_run import run_composition
-from ipred.paths import project_blob_dir
+from ipred.paths import engine_root, project_blob_dir
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +152,19 @@ def load_feature_bank_arrays(blob_dir: str | Path) -> dict[str, Any]:
 
 
 def channel_png_path(blob_dir: str | Path, index: int) -> Path:
-    """Path to a cached channel PNG."""
-    return Path(blob_dir) / "channels" / f"{index:04d}.png"
+    """Path to a cached channel PNG.
+
+    ``blob_dir`` is read back from the catalog DB keyed by a user-supplied
+    ``feature_id`` — every value ever written there is a server-generated
+    ``uuid4().hex`` under ``engine_root()`` (see ``run_preprocess`` above), so
+    this can never legitimately resolve outside it. Enforce that explicitly
+    rather than trusting the DB round-trip (CodeQL py/path-injection).
+    """
+    root = engine_root().resolve()
+    path = (Path(blob_dir) / "channels" / f"{index:04d}.png").resolve()
+    if path != root and root not in path.parents:
+        raise ValueError(f"channel path {path} escapes engine root")
+    return path
 
 
 def _bank_response(

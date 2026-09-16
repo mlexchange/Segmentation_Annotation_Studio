@@ -343,7 +343,11 @@ def api_feature_channel(feature_id: str, index: int) -> Response:
     row = get_catalog().get_feature_bank(feature_id)
     if row is None:
         raise HTTPException(404, "feature bank not found")
-    path = preprocess.channel_png_path(row["blob_dir"], index)
+    try:
+        path = preprocess.channel_png_path(row["blob_dir"], index)
+    except ValueError as exc:
+        logger.warning("rejected out-of-root channel path: %s", exc)
+        raise HTTPException(404, "channel not found") from exc
     if not path.is_file():
         raise HTTPException(404, "channel not found")
     return FileResponse(path, media_type="image/png")

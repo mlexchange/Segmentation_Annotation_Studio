@@ -861,6 +861,10 @@ def capability() -> dict[str, Any]:
         # PyWavelets, which skimage imports lazily and which is not installed.
         result["denoise"] = {"available": True, "methods": denoise.describe_methods()}
     except Exception as exc:  # noqa: BLE001 — a capability probe must never 500
+        # Full exception detail goes to the server log only — the raw message
+        # (module paths, internal state) must never reach an HTTP response
+        # (CodeQL py/stack-trace-exposure). The client only needs to know the
+        # probe failed; every field above already defaults to unavailable.
         logger.warning("Train capability probe failed: %s", exc)
-        result["error"] = str(exc)
+        result["error"] = "capability probe failed"
     return result
