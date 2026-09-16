@@ -1,0 +1,94 @@
+name: Create and publish image
+
+# Mirrors als-computing/view_tomography_recon_app's own publish-image.yml —
+# same tag names (:local / :als-prod / :als-staging), same one-image-many-
+# tags shape. Runs on merge to main only (never on a PR — that stays in
+# ci.yml's build-only docker-build job, so PRs get a real "does it build"
+# check with no registry pushes or wasted publish minutes).
+on:
+  push:
+    branches: ['main']
+    tags: ['v*']
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # The 3D viewer is a git submodule (frontend/vendor/) — without it
+          # the frontend build stage fails on an unresolved import.
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # :local — fully bundled (Tiled + backend/ml + ipred), for anyone
+      # running this repo locally with nothing external set up. Base path
+      # baked in at /seg_studio/ so it exercises subpath hosting by default,
+      # matching :als-prod/:als-staging below rather than leaving that path
+      # tested only at ALS. See docker-compose.local.yml.
+      - name: Build and push local image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: app-full
+          push: true
+          build-args: |
+            VITE_BASE_PATH=/seg_studio/
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:local
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # :als-prod — ipred/ML bundled, Tiled external (ALS's own production
+      # Tiled — see docker-compose.als-prod.yml for the real TILED_URI
+      # default), hosted under ALS's hub path prefix.
+      - name: Build and push ALS production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: app-ml
+          push: true
+          build-args: |
+            VITE_BASE_PATH=/bl832/seg_studio/
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:als-prod
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # :als-staging — identical build to :als-prod today (this app reads
+      # TILED_URI at container-run time, not build time, so the prod/staging
+      # distinction lives in docker-compose.als-staging.yml's default rather
+      # than here) — kept as its own explicit step, not just a second tag on
+      # the same build, so staging and prod can diverge later without
+      # restructuring this workflow.
+      - name: Build and push ALS staging image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: app-ml
+          push: true
+          build-args: |
+            VITE_BASE_PATH=/bl832/seg_studio/
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:als-staging
+          labels: ${{ steps.meta.outputs.labels }}

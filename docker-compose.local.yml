@@ -2,9 +2,12 @@
 # docker-compose.full.yml) but with VITE_BASE_PATH baked in at
 # /seg_studio/ so it's reachable at the familiar dev-server-shaped URL
 # http://localhost:5173/seg_studio/ by default — exercising the same
-# subpath-hosting behavior ALS's own :als deployment uses, rather than
-# leaving that path only tested at ALS. Host port is configurable via
-# HOST_PORT for anyone who wants a different one.
+# subpath-hosting behavior ALS's own :als-prod/:als-staging deployments use,
+# rather than leaving that path only tested at ALS. Host port is configurable
+# via HOST_PORT for anyone who wants a different one. Published by
+# .github/workflows/publish-image.yml (mirroring als-computing/
+# view_tomography_recon_app's own publish-image.yml — same tag names, same
+# one-image-many-tags shape).
 #
 # The app container itself has NO idea it's hosted under a subpath — same as
 # the real ALS deployment, it depends entirely on a reverse proxy stripping
@@ -16,8 +19,9 @@
 #   docker compose -f docker-compose.local.yml up --build
 #
 # To run the already-published ghcr.io image instead of building locally,
-# skip `build:` on app-local and use `image: ghcr.io/<owner>/<repo>/app-full:local`.
+# skip `build:` on app-local and use `image: ghcr.io/<owner>/<repo>:local`.
 #
+name: segmentation_annotation_studio
 services:
   app-local:
     build:

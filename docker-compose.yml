@@ -3,6 +3,7 @@
 #
 #   docker compose up --build
 #
+name: segmentation_annotation_studio
 services:
   app:
     build: .

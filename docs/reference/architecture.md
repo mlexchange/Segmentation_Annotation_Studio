@@ -162,8 +162,8 @@ The dev and production layouts differ mainly in **who serves the SPA** and
     Tiled still external — for a deployment that already has its own
     production Tiled (bundling a second, empty one would be wrong) but still
     wants Train/iPred to work without standing up a separate ipred service.
-    This is what the `:als` ghcr.io tag publishes, base path baked in at
-    `/bl832/seg_studio/`:
+    This is what the `:als-prod`/`:als-staging` ghcr.io tags publish, base path
+    baked in at `/bl832/seg_studio/`:
 
     ```mermaid
     flowchart LR

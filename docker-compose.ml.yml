@@ -1,13 +1,18 @@
 # Backend (with the ml/dlsia extra) + ipred bundled; Tiled stays external —
 # point TILED_URI/TILED_API_KEY at your own Tiled server (Dockerfile's app-ml
-# stage, the same shape ghcr.io publishes under the `:als` tag). Use this when
-# you already have a Tiled server running and want Train/iPred to work
-# without a second, separately-maintained ipred deployment. For a fully
-# bundled stack with no external services at all, use docker-compose.full.yml
-# instead; for the lightest option (no ipred/ML), use docker-compose.yml.
+# stage — the same shape ghcr.io publishes under the ALS-specific `:als-prod`/
+# `:als-staging` tags, see docker-compose.als-prod.yml/docker-compose.als-
+# staging.yml for those with real defaults baked in). This file is the
+# generic, no-institution-specific-defaults version — use it when you already
+# have a Tiled server running (ALS's or anyone else's) and want Train/iPred
+# to work without a second, separately-maintained ipred deployment. For a
+# fully bundled stack with no external services at all, use docker-
+# compose.full.yml instead; for the lightest option (no ipred/ML), use
+# docker-compose.yml.
 #
 #   docker compose -f docker-compose.ml.yml up --build
 #
+name: segmentation_annotation_studio
 services:
   app-ml:
     build:

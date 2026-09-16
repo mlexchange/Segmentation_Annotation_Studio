@@ -7,6 +7,7 @@
 #
 #   docker compose -f docker-compose.full.yml up --build
 #
+name: segmentation_annotation_studio
 services:
   app-full:
     build:

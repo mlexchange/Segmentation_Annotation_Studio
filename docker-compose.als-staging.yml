@@ -1,0 +1,33 @@
+# The ":als-staging" shape — identical to docker-compose.als-prod.yml except
+# it defaults to ALS's STAGING Tiled server instead of production. See that
+# file for the full explanation; this one exists so pointing at staging vs.
+# production is a matter of which compose file you run, not remembering to
+# override TILED_URI correctly every time.
+#
+#   docker compose -f docker-compose.als-staging.yml up --build
+#
+# To run the already-published ghcr.io image instead of building locally,
+# skip `build:` and use `image: ghcr.io/<owner>/<repo>:als-staging`.
+#
+name: segmentation_annotation_studio
+services:
+  app-als-staging:
+    build:
+      context: .
+      target: app-ml
+      args:
+        VITE_BASE_PATH: "/bl832/seg_studio/"
+    ports:
+      - "8002:8002"
+      - "8003:8003"
+    environment:
+      TILED_URI: "${TILED_URI:-https://tiled-staging.als.lbl.gov}"
+      TILED_API_KEY: "${TILED_API_KEY:-}"
+      TILED_BROWSE_PATH: "${TILED_BROWSE_PATH:-beamlines/bl832/processed}"
+      LOCAL_DATA_ROOT: "/data"
+      BROWSE_ALLOWED_ORIGINS: "${BROWSE_ALLOWED_ORIGINS:-}"
+    volumes:
+      - annotation-data-als-staging:/data
+
+volumes:
+  annotation-data-als-staging:

@@ -119,7 +119,8 @@ reachable directly if you want to hit them outside the app.
     restart.
 
 !!! tip "Pointing at your own datasets"
-    For `app-full`/`app-local`, set `LOCAL_SOURCE_DIR` in your own `.env` (copy
+    For `app-full` (or the published `:local` image, which builds from the same
+    target — see [Deployment](../reference/deployment.md)), set `LOCAL_SOURCE_DIR` in your own `.env` (copy
     the repo root's `.env.example`) to an absolute host directory — it's
     bind-mounted to `/data/processed` inside the container, so the bundled
     Tiled server (and the Zarr loader's "Browse…" directory picker on the
