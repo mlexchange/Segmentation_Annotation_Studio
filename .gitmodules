@@ -1,0 +1,4 @@
+[submodule "frontend/vendor/view_tomography_recon_app"]
+	path = frontend/vendor/view_tomography_recon_app
+	url = https://github.com/als-computing/view_tomography_recon_app.git
+	branch = remote-tiled

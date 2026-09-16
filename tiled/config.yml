@@ -16,5 +16,10 @@ trees:
       writable_storage: ".tiled/data"
       readable_storage:
         - "/Users/david/Documents/data"
+        # Generated 3-D volume pyramids (backend/tiff_stack_source.py). Tiled
+        # serves these in place, so the path must be readable here or the node
+        # registers with no children and every chunk request 500s.
+        # Keep in step with VOLUME_CACHE_DIR.
+        - "./.tiled/volumes"
       init_if_not_exists: true
 

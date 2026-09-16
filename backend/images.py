@@ -71,31 +71,29 @@ def _sample_global_stats(node: Any, meta: dict[str, Any]) -> tuple[float, float]
     return result
 
 
-def render_slice(
+def normalize_scalar_unit(
     arr: np.ndarray,
     opts: dict[str, Any],
     global_range: tuple[float, float] | None = None,
 ) -> np.ndarray:
-    """Render a 2-D or H×W×C array slice to uint8 RGB.
+    """Map a 2-D scalar array to ``[0, 1]`` via the scale transform + vmin/vmax
+    normalisation ``render_slice``'s grayscale branch uses, stopping short of
+    the final colormap/uint8 step.
+
+    Extracted so :mod:`denoise_train` (``_slice_to_gray_uint8``) can train a
+    denoiser on the exact same intensity pipeline the 2-D canvas renders,
+    without duplicating this logic and risking the two drifting apart.
 
     Args:
-        arr: 2-D grayscale or H×W×(3|4) colour array.
+        arr: 2-D grayscale array.
         opts: :class:`~schemas.RenderOpts`-compatible dict with keys
-            ``norm``, ``scale``, ``vmin_pct``, ``vmax_pct``, ``cmap``.
+            ``norm``, ``scale``, ``vmin_pct``, ``vmax_pct``.
         global_range: ``(vmin, vmax)`` used when ``opts["norm"] == "global"``.
             Ignored in slice-norm mode.
 
     Returns:
-        uint8 RGB array of shape ``(H, W, 3)``.
+        ``float64`` array the same shape as *arr*, values in ``[0, 1]``.
     """
-    is_rgb = arr.ndim == 3
-    if is_rgb:
-        rgb = arr[:, :, :3].astype(np.float64)
-        mn, mx = float(rgb.min()), float(rgb.max())
-        if mx > mn:
-            rgb = (rgb - mn) / (mx - mn) * 255.0
-        return np.clip(rgb, 0, 255).astype(np.uint8)
-
     data = arr.astype(np.float64)
     data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -122,7 +120,35 @@ def render_slice(
         data = (data - vmin_abs) / (vmax_abs - vmin_abs)
     else:
         data = np.zeros_like(data)
-    data = np.clip(data, 0.0, 1.0)
+    return np.clip(data, 0.0, 1.0)
+
+
+def render_slice(
+    arr: np.ndarray,
+    opts: dict[str, Any],
+    global_range: tuple[float, float] | None = None,
+) -> np.ndarray:
+    """Render a 2-D or H×W×C array slice to uint8 RGB.
+
+    Args:
+        arr: 2-D grayscale or H×W×(3|4) colour array.
+        opts: :class:`~schemas.RenderOpts`-compatible dict with keys
+            ``norm``, ``scale``, ``vmin_pct``, ``vmax_pct``, ``cmap``.
+        global_range: ``(vmin, vmax)`` used when ``opts["norm"] == "global"``.
+            Ignored in slice-norm mode.
+
+    Returns:
+        uint8 RGB array of shape ``(H, W, 3)``.
+    """
+    is_rgb = arr.ndim == 3
+    if is_rgb:
+        rgb = arr[:, :, :3].astype(np.float64)
+        mn, mx = float(rgb.min()), float(rgb.max())
+        if mx > mn:
+            rgb = (rgb - mn) / (mx - mn) * 255.0
+        return np.clip(rgb, 0, 255).astype(np.uint8)
+
+    data = normalize_scalar_unit(arr, opts, global_range)
 
     cmap = opts.get("cmap", "gray")
     if cmap == "viridis":

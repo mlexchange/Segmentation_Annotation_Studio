@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# None of these jobs push commits, comment on PRs, or touch packages — read-only
+# is the least-privilege default (CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -16,8 +21,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -e ".[dev,test]"
+      # `ml` (torch/dlsia/qlty) installed here so dlsia's train/infer code
+      # paths are actually exercised in CI, CPU-only — without it every
+      # dlsia-dependent test silently skips (torch_available() is False).
+      - run: pip install -e ".[dev,test,ml]"
       - run: flake8 . --max-line-length=120 --extend-ignore=E501,W503
+      - run: pytest
+
+  ipred:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ipred
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[test]"
       - run: pytest
 
   frontend:
@@ -26,10 +47,32 @@ jobs:
       run:
         working-directory: frontend
     steps:
+      # The volume renderer lives in a submodule (frontend/vendor/); without it
+      # typecheck and build fail on an unresolved import.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - run: npm ci
       - run: npm run typecheck
       - run: npm run test
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/setup-buildx-action@v3
+      # Build only — catches a Dockerfile/compose file silently falling
+      # behind the app it packages (the exact drift found in this session's
+      # review: no ipred service, no ml extra, no Tiled service). Three
+      # standalone compose files (not overlays — each is a separate, complete
+      # service, not an override of another), built independently. Does not
+      # push anywhere; image publishing lives in its own workflow
+      # (publish-image.yml), gated on merge to main, not every PR.
+      - run: docker compose -f docker-compose.yml build
+      - run: docker compose -f docker-compose.ml.yml build
+      - run: docker compose -f docker-compose.full.yml build

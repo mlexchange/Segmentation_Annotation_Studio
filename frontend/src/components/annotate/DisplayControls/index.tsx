@@ -6,6 +6,7 @@
 import { ArrowCounterClockwise } from '@phosphor-icons/react';
 import DebouncedSlider from '@/components/common/DebouncedSlider';
 import HistogramControl from '@/components/annotate/HistogramControl';
+import CollapsibleSection from '@/components/common/CollapsibleSection';
 import { COLORMAP_NAMES, colormapGradient, type ColormapName } from '@/lib/colormaps';
 
 export interface DisplayControlsProps {
@@ -30,7 +31,23 @@ export interface DisplayControlsProps {
   sharpen: boolean;
   onClaheChange: (v: boolean) => void;
   onSharpenChange: (v: boolean) => void;
+  /** Gaussian pre-blur sigma in image pixels (0 = off) — denoises what the
+   *  intensity-driven tools see, as well as the display. */
+  blur: number;
+  onBlurChange: (v: number) => void;
+  /** Working resolution multiplier (1, 2, 4) for the drawing tools. */
+  upscale: number;
+  onUpscaleChange: (v: number) => void;
+  /** Highest upscale this slice can afford before the guard clamps it. */
+  maxUpscale?: number;
+  /** Slot rendered above the pre-blur slider, for server-side denoising.
+   *  A slot rather than props so this component stays free of data-fetching
+   *  concerns — denoising needs the dataset identity and a network round trip,
+   *  neither of which any other control here does. */
+  denoiseSlot?: React.ReactNode;
 }
+
+const UPSCALES = [1, 2, 4] as const;
 
 /** Renders the brightness/contrast sliders + levels histogram with reset buttons. */
 export default function DisplayControls({
@@ -52,11 +69,17 @@ export default function DisplayControls({
   sharpen,
   onClaheChange,
   onSharpenChange,
+  blur,
+  onBlurChange,
+  upscale,
+  onUpscaleChange,
+  maxUpscale = 4,
+  denoiseSlot,
 }: DisplayControlsProps) {
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase text-gray-500 tracking-wide">Display</span>
+    <CollapsibleSection
+      title="Display"
+      headerRight={
         <button
           aria-label="Reset brightness and contrast"
           title="Reset display"
@@ -65,8 +88,8 @@ export default function DisplayControls({
         >
           <ArrowCounterClockwise size={14} />
         </button>
-      </div>
-
+      }
+    >
       <div className="flex flex-col gap-0.5">
         <DebouncedSlider
           label="Brightness"
@@ -136,7 +159,30 @@ export default function DisplayControls({
         />
       </div>
 
-      {/* Nonlinear enhancers (display-only; can combine: CLAHE → Sharpen). */}
+      {/* Server-side denoising, applied to the RAW slice before normalization —
+          unlike the pre-blur below, which is a client-side filter on the already
+          8-bit display image. Placed first because it is the upstream stage. */}
+      {denoiseSlot && (
+        <div className="border-t border-gray-100 pt-2">{denoiseSlot}</div>
+      )}
+
+      {/* Gaussian pre-blur — denoises so threshold/wand/fill see coherent regions. */}
+      <div className="flex flex-col gap-0.5">
+        <DebouncedSlider
+          label="Blur (σ)"
+          format={(v) => (v === 0 ? 'off' : v.toFixed(2))}
+          min={0}
+          max={5}
+          step={0.25}
+          value={blur}
+          onChange={onBlurChange}
+          // Each commit re-blurs the whole slice (and invalidates every tool
+          // field), so commit on pause rather than on every tick.
+          debounceMs={200}
+        />
+      </div>
+
+      {/* Nonlinear enhancers (display-only; can combine: Blur → CLAHE → Sharpen). */}
       <div className="flex items-center gap-3 pt-0.5">
         <label
           className="flex items-center gap-1.5 text-[11px] text-gray-600 cursor-pointer"
@@ -153,6 +199,46 @@ export default function DisplayControls({
           Sharpen
         </label>
       </div>
-    </div>
+
+      {/* Working resolution — resamples the slice for the drawing tools so small
+          features get more pixels to annotate against. Coordinates stay native. */}
+      <div className="flex flex-col gap-1 pt-0.5">
+        <span className="text-[11px] text-gray-500">Working resolution</span>
+        <div role="radiogroup" aria-label="Working resolution" className="flex items-center gap-1">
+          {UPSCALES.map((u) => {
+            const tooBig = u > maxUpscale;
+            return (
+              <button
+                key={u}
+                type="button"
+                role="radio"
+                aria-checked={upscale === u}
+                disabled={tooBig}
+                onClick={() => onUpscaleChange(u)}
+                title={tooBig
+                  ? `${u}× needs more memory than this slice size allows`
+                  : u === 1
+                    ? 'Native resolution'
+                    : `Resample ${u}× for the drawing tools — sub-pixel brush and mask detail`}
+                className={[
+                  'flex-1 py-1 rounded-md text-[11px] border transition-colors',
+                  tooBig
+                    ? 'bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed'
+                    : upscale === u
+                      ? 'bg-sky-600 text-white border-sky-700'
+                      : 'bg-white text-gray-700 border-gray-200 hover:bg-sky-50',
+                ].join(' ')}
+              >
+                {u}×
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[10px] text-gray-500 leading-snug">
+          Resamples the slice for the drawing tools so smaller features can be annotated.
+          Exported pixels and annotation coordinates are unchanged.
+        </p>
+      </div>
+    </CollapsibleSection>
   );
 }

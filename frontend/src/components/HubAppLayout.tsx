@@ -2,6 +2,7 @@ import HubHeader from "@/components/HubHeader";
 import HubMainContent from "@/components/HubMainContent";
 import HubSidebar from "@/components/HubSidebar";
 import { cn } from "@/lib/utils";
+import { useConnectionHealth } from "@/hooks/useConnectionHealth";
 
 import { RouteItem } from "@/types/navigationRouterTypes";
 
@@ -36,6 +37,11 @@ export default function HubAppLayout ( {
     onDocs,
     onOpenTabSelector
   }: HubAppLayoutProps) {
+
+  // Drives connectionStore's `status` field from anywhere in the app, so
+  // HubHeader's indicator reflects live Tiled reachability regardless of
+  // which route is active.
+  useConnectionHealth();
 
 return (
     <div className="flex h-screen w-screen max-w-full overflow-hidden">

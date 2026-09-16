@@ -1,0 +1,61 @@
+# The ":local" shape: fully bundled (Tiled + backend/ml + ipred, same as
+# docker-compose.full.yml) but with VITE_BASE_PATH baked in at
+# /seg_studio/ so it's reachable at the familiar dev-server-shaped URL
+# http://localhost:5173/seg_studio/ by default — exercising the same
+# subpath-hosting behavior ALS's own :als-prod/:als-staging deployments use,
+# rather than leaving that path only tested at ALS. Host port is configurable
+# via HOST_PORT for anyone who wants a different one. Published by
+# .github/workflows/publish-image.yml (mirroring als-computing/
+# view_tomography_recon_app's own publish-image.yml — same tag names, same
+# one-image-many-tags shape).
+#
+# The app container itself has NO idea it's hosted under a subpath — same as
+# the real ALS deployment, it depends entirely on a reverse proxy stripping
+# the prefix before the request arrives (see docs/reference/architecture.md's
+# "Subpath hosting" note). A tiny nginx service (docker/nginx-local.conf)
+# provides that here, so this compose file actually reproduces the real
+# hosting behavior instead of only baking in URLs nothing then serves.
+#
+#   docker compose -f docker-compose.local.yml up --build
+#
+# To run the already-published ghcr.io image instead of building locally,
+# skip `build:` on app-local and use `image: ghcr.io/<owner>/<repo>:local`.
+#
+name: segmentation_annotation_studio
+services:
+  app-local:
+    build:
+      context: .
+      target: app-full
+      args:
+        VITE_BASE_PATH: "/seg_studio/"
+    expose:
+      - "8002"
+    ports:
+      - "8003:8003"  # ipred, direct access (optional)
+      - "8010:8010"  # Tiled, direct access (optional)
+    environment:
+      LOCAL_DATA_ROOT: "/data"
+      BROWSE_ALLOWED_ORIGINS: "${BROWSE_ALLOWED_ORIGINS:-}"
+      TILED_API_KEY: "${TILED_API_KEY:-}"
+    volumes:
+      - annotation-data-local:/data
+      # Bind-mount your own source datasets to /data/processed — Tiled's
+      # ingest/register-in-place routes (Browse's Zarr loader, the Connect
+      # page's ingest flow) read directly from here. Must match tiled/config
+      # .docker.yml's readable_storage exactly. Set LOCAL_SOURCE_DIR in your
+      # own .env (see .env.example at the repo root) to a real host
+      # directory; defaults to an empty placeholder so this works unset.
+      - "${LOCAL_SOURCE_DIR:-./.local-source}:/data/processed"
+
+  proxy:
+    image: nginx:stable-alpine
+    depends_on:
+      - app-local
+    ports:
+      - "${HOST_PORT:-5173}:80"
+    volumes:
+      - ./docker/nginx-local.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  annotation-data-local:

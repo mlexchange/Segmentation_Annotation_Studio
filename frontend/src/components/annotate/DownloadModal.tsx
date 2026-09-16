@@ -2,13 +2,15 @@
  * DownloadModal — scope picker + optional star-rating filter, then COCO export.
  */
 import { useMemo, useState } from 'react';
-import { DownloadSimple, X, CheckCircle, WarningCircle } from '@phosphor-icons/react';
+import { useNavigate } from 'react-router';
+import { DownloadSimple, X, CheckCircle, WarningCircle, Cube } from '@phosphor-icons/react';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useAnnotationStore } from '@/stores/annotationStore';
+import { usePredictedRasterStore } from '@/stores/predictedRasterStore';
 import { useClassStore } from '@/stores/classStore';
 import { useRatingStore } from '@/stores/ratingStore';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { buildSourceKey } from '@/lib/sourceKey';
+import { buildSourceKey, parseSourceKey } from '@/lib/sourceKey';
 import { useExportJob } from '@/hooks/useExportJob';
 
 interface DownloadModalProps {
@@ -16,16 +18,6 @@ interface DownloadModalProps {
 }
 
 type Scope = 'slice' | 'current' | 'all' | 'stars1' | 'stars2' | 'stars3';
-
-/** Parse a canonical sourceKey back to { kind, source, serverUri }. */
-function parseSourceKey(sk: string) {
-  if (sk.startsWith('tiled:')) {
-    const rest = sk.slice('tiled:'.length);
-    const sep = rest.indexOf(':');
-    return { kind: 'tiled' as const, serverUri: rest.slice(0, sep) || null, source: rest.slice(sep + 1) };
-  }
-  return { kind: 'local' as const, serverUri: null, source: sk.slice('local:'.length) };
-}
 
 const SCOPE_OPTIONS: { value: Scope; label: string; desc: string; stars?: string }[] = [
   {
@@ -65,8 +57,10 @@ const SCOPE_OPTIONS: { value: Scope; label: string; desc: string; stars?: string
 
 /** Renders the COCO download dialog and drives the export job for the chosen scope. */
 export default function DownloadModal({ onClose }: DownloadModalProps) {
+  const navigate = useNavigate();
   const { source, kind, serverUri, currentSlice } = useDatasetStore();
   const { byImage, splitBySlice, negativeSlices } = useAnnotationStore();
+  const predictedPointers = usePredictedRasterStore((s) => s.bySource);
   const { classes } = useClassStore();
   const ratings = useRatingStore((s) => s.ratings);
   const annotatorName = useSettingsStore((s) => s.annotatorName);
@@ -106,6 +100,19 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
       const split_by_slice = scope === 'slice' ? (allSplits[cur] ? { [cur]: allSplits[cur] } : {}) : allSplits;
       const negative_slices = scope === 'slice' ? allNeg.filter((k) => String(k) === cur) : allNeg;
 
+      // Un-vectorized predicted pointers (see predictedRasterStore) for this
+      // sample — only relevant to mask-sync (build_mask_volumes fetches
+      // their commit.png directly); COCO export ignores this field today,
+      // same as before. "Current slice only" keeps just the one pointer
+      // matching cur, mirroring how slices/negative_slices are scoped above.
+      const allPredicted = predictedPointers[sk] ?? {};
+      const predicted_slices = Object.fromEntries(
+        Object.entries(allPredicted)
+          .filter(([k]) => (scope === 'slice' ? k === cur : true))
+          .filter(([k]) => !(slices[k]?.length))
+          .map(([k, p]) => [k, { run_id: p.runId, class_ids: p.classIds }]),
+      );
+
       return [{
         kind,
         source,
@@ -113,6 +120,7 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
         slices,
         split_by_slice,
         negative_slices,
+        predicted_slices,
       }];
     }
 
@@ -305,13 +313,23 @@ export default function DownloadModal({ onClose }: DownloadModalProps) {
         )}
 
         {status === 'done' && maskResult && (
-          <div className="flex items-start gap-2 text-sm text-green-300">
+          <div className="flex flex-wrap items-start gap-2 text-sm text-green-300">
             <CheckCircle size={16} className="mt-0.5 shrink-0" />
-            <span className="min-w-0 break-words">
+            <span className="min-w-0 flex-1 break-words">
               {maskResult.length === 0
                 ? 'No masks written (no Tiled sources or no annotated slices).'
                 : <>Masks merged into Tiled: {maskResult.map((w) => `${w.container} (${w.n_slices} slices total, ${w.updated ?? 0} updated)`).join(', ')}.</>}
             </span>
+            {maskResult.length > 0 && (
+              <button
+                type="button"
+                onClick={() => { onClose(); navigate('/volume?mask=fast'); }}
+                className="flex shrink-0 items-center gap-1 rounded-md border border-green-600 px-2 py-1 text-xs text-green-300 hover:bg-green-900/30 transition-colors"
+              >
+                <Cube size={12} />
+                View in 3D
+              </button>
+            )}
           </div>
         )}
         {status === 'done' && !maskResult && (

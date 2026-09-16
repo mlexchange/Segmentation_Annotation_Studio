@@ -9,6 +9,7 @@ import { useAnnotationStore } from '@/stores/annotationStore';
 import { useDatasetStore } from '@/stores/datasetStore';
 import { useClassStore } from '@/stores/classStore';
 import { useMaskOps } from '@/hooks/useMaskOps';
+import CollapsibleSection from '@/components/common/CollapsibleSection';
 
 interface MaskToolsPanelProps {
   sourceKey: string | null;
@@ -43,10 +44,7 @@ export default function MaskToolsPanel({ sourceKey, activeClassId }: MaskToolsPa
   if (!isVolume) return null;
 
   return (
-    <div className="flex flex-col gap-2">
-      <span className="flex items-center gap-1.5 text-xs font-semibold uppercase text-gray-500 tracking-wide">
-        <Stack size={13} /> Cross-slice
-      </span>
+    <CollapsibleSection title="Cross-slice" icon={<Stack size={13} />}>
       <p className="text-[10px] text-gray-500 -mt-1">Acts on ‘{className}’.</p>
 
       <button
@@ -61,6 +59,6 @@ export default function MaskToolsPanel({ sourceKey, activeClassId }: MaskToolsPa
       </button>
 
       {status && <p className="text-[10px] text-gray-500 leading-snug">{status}</p>}
-    </div>
+    </CollapsibleSection>
   );
 }

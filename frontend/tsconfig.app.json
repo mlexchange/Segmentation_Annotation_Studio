@@ -3,7 +3,9 @@
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // ES2022.Error is declarations-only (it adds `Error`'s `cause` option, which
+    // the vendored renderer uses). It does not move `target` off ES2020.
+    "lib": ["ES2020", "ES2022.Error", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
     "moduleResolution": "bundler",
@@ -17,8 +19,37 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      // The WebGPU volume renderer, pinned as a git submodule (see .gitmodules).
+      // `@zarrviewer/*` is OUR entry point into it; the `@zarr-viewer/*` and
+      // `@prism/*` aliases below are ITS OWN internal ones, replicated here
+      // because tsc resolves imports against this config, not the submodule's.
+      "@zarrviewer/*": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/*"],
+      "@zarr-viewer/core": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/core/index.ts"],
+      "@zarr-viewer/math": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/math/index.ts"],
+      "@zarr-viewer/scene": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/scene/index.ts"],
+      "@zarr-viewer/controls": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/controls/index.ts"],
+      "@zarr-viewer/io": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/io/index.ts"],
+      "@zarr-viewer/render": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/render/index.ts"],
+      "@zarr-viewer/fx": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/fx/src/index.ts"],
+      "@prism/core": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/core/index.ts"],
+      "@prism/math": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/math/index.ts"],
+      "@prism/render": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/render/index.ts"],
+      "@prism/fx": ["./vendor/view_tomography_recon_app/src/zarr-viewer/src/fx/src/index.ts"]
     }
   },
-  "include": ["src"]
+  // The submodule is typechecked here rather than as a separate project so a bad
+  // pointer bump fails `tsc -b` loudly. Its own tsconfig is *stricter* than ours
+  // (`noUncheckedIndexedAccess`, `verbatimModuleSyntax`), so code written under it
+  // compiles cleanly under ours. If it ever does not, that is an upstream fix on
+  // the viewer repo's own branch — do not edit vendored sources to appease tsc.
+  "include": ["src", "vendor/view_tomography_recon_app/src/zarr-viewer/src"],
+  "exclude": [
+    "vendor/view_tomography_recon_app/src/zarr-viewer/src/fx/test",
+    // Upstream test fixture predates `RenderProvenance.extendedPreIntegration`
+    // (added alongside the mip-pyramid/half-res-lighting work) and was never
+    // updated — a test-only type error with no effect on the exported API we
+    // actually consume. Excluded rather than patched, per the note above.
+    "vendor/view_tomography_recon_app/src/zarr-viewer/src/render/accel/test/accel.spec.ts"
+  ]
 }

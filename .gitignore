@@ -13,6 +13,11 @@ build/
 # Secrets — never commit
 .env
 
+# Default bind-mount target for docker-compose.full.yml/docker-compose.local.yml's
+# LOCAL_SOURCE_DIR (see .env.example) — an empty placeholder so the compose
+# files work unset; your own data lives wherever LOCAL_SOURCE_DIR points, not here.
+.local-source/
+
 # Tiled catalog database (binary, regenerated on first run via start_all.sh)
 .tiled/catalog.db
 .tiled/catalog.db-shm
@@ -22,6 +27,10 @@ build/
 # Demo datasets already committed under .tiled/data/ stay tracked; new arrays
 # ingested locally are ignored. To commit a new demo dataset, use `git add -f`.
 .tiled/data/
+
+# Generated 3-D volume pyramids (backend/tiff_stack_source.py). Derived data —
+# rebuildable from the source TIFFs by re-registering, and large.
+.tiled/volumes/
 
 # Runtime Tiled thumbnail containers created on save
 **/*__v_thumbs/
@@ -52,6 +61,7 @@ Thumbs.db
 htmlcov/
 .coverage
 coverage.xml
+frontend/coverage/
 
 # Vendored SAM model (large, fetched via frontend/scripts/fetch-sam-model.mjs)
 frontend/public/models/
@@ -63,3 +73,9 @@ site/
 peter/
 
 .reset-backups/
+
+.claude/
+
+CLAUDE.md
+
+graphify-out/*

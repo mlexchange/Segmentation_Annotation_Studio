@@ -84,6 +84,21 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
   const cleanRef = useRef(true);
   const payloadCacheRef = useRef<Map<number, VersionPayload>>(new Map());
 
+  // Must run BEFORE the dirty-tracking effect below on the mount/sourceKey-change
+  // commit: it arms cleanRef so that same-commit effect can consume it and treat
+  // the freshly-loaded source's initial data as clean. Effects run in
+  // declaration order, so this one is declared first for that reason —
+  // reversing the order would re-arm cleanRef right after the dirty-tracker
+  // had already consumed it, silently swallowing the next real edit's dirty
+  // flag (a bug this ordering fixes).
+  useEffect(() => {
+    cleanRef.current = true;
+    setIsDirty(false);
+    setLastSavedAt(null);
+    setVersions([]);
+    payloadCacheRef.current.clear();
+  }, [sourceKey]);
+
   useEffect(() => {
     if (cleanRef.current) {
       cleanRef.current = false;
@@ -92,14 +107,6 @@ export function useSave(sourceKey: string | null): UseSaveReturn {
     setIsDirty(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [byImage, splitBySlice, negativeSlices, classes]);
-
-  useEffect(() => {
-    cleanRef.current = true;
-    setIsDirty(false);
-    setLastSavedAt(null);
-    setVersions([]);
-    payloadCacheRef.current.clear();
-  }, [sourceKey]);
 
   /** Assemble the current stores into a draft payload, or null if no sourceKey. */
   const buildSavePayload = useCallback((): SaveDraftPayload | null => {

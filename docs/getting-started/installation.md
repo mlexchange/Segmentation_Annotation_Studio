@@ -3,7 +3,11 @@
 There are two ways to run Segmentation Annotation Studio:
 
 - **Local development** — one command starts everything (recommended for annotators and evaluation).
-- **Docker** — a single production container that serves the app against an external Tiled server.
+- **Docker** — a prebuilt or locally-built container image; pick the shape that matches
+  whether you already have a Tiled server and whether you want iPred/Train available.
+
+For hosting a shared, ALS-style deployment behind a reverse proxy (rather than running
+it yourself), see [Production deployment](../reference/deployment.md) instead.
 
 ---
 
@@ -67,20 +71,20 @@ FRONTEND_PORT=5200 BACKEND_PORT=8100 TILED_PORT=8110 ./start_all.sh
 
 ---
 
-## Option 2 — Docker (production)
+## Option 2 — Docker
 
-Docker runs a **single container** that serves the built frontend and the API
-together on port **8002**. Tiled is **not** included — you point the container
-at an existing Tiled server.
+Three Dockerfile targets/compose files cover different needs — pick the one that
+matches what you already have running and whether you want iPred/Train available.
+None replaces the others; `app-ml` and `app-full` each build on the previous stage
+rather than duplicating install steps.
 
-```bash
-docker compose up --build
-```
+| Compose file | Image target | Tiled | iPred / Train | Use when |
+| --- | --- | --- | --- | --- |
+| `docker-compose.yml` | `app` | External (you provide one) | Not included | You already have a Tiled server and only need Connect/Browse/Annotate/Export. |
+| `docker-compose.ml.yml` | `app-ml` | External (you provide one) | **Bundled** | You already have a Tiled server but also want Train/iPred to work, without standing up a separate iPred service. |
+| `docker-compose.full.yml` | `app-full` | **Bundled** | **Bundled** | You want the whole stack (Tiled + backend + iPred) with nothing external to set up — the simplest way to try everything. |
 
-Then open <http://localhost:8002>.
-
-Configure the connection to your external Tiled through environment variables
-(see [Environment variables](#environment-variables)):
+### Lean (`app`) — bring your own Tiled
 
 ```bash
 TILED_URI=https://tiled.example.com \
@@ -88,9 +92,61 @@ TILED_API_KEY=your-key \
 docker compose up --build
 ```
 
+Then open <http://localhost:8002>.
+
+### With iPred/Train, external Tiled (`app-ml`)
+
+```bash
+TILED_URI=https://tiled.example.com \
+TILED_API_KEY=your-key \
+docker compose -f docker-compose.ml.yml up --build
+```
+
+Then open <http://localhost:8002>. iPred is also reachable directly on `:8003` if needed.
+
+### Fully bundled (`app-full`) — nothing external required
+
+```bash
+docker compose -f docker-compose.full.yml up --build
+```
+
+Then open <http://localhost:8002>. Tiled (`:8010`) and iPred (`:8003`) are also
+reachable directly if you want to hit them outside the app.
+
 !!! warning "Persisting your data"
-    Mount `LOCAL_DATA_ROOT` as a volume so annotation drafts, versions, and
-    exports survive container restarts.
+    Every compose file above mounts `LOCAL_DATA_ROOT` (`/data`) as a named volume,
+    so annotation drafts, versions, and exports already survive a container
+    restart.
+
+!!! tip "Pointing at your own datasets"
+    For `app-full` (or the published `:local` image, which builds from the same
+    target — see [Deployment](../reference/deployment.md)), set `LOCAL_SOURCE_DIR` in your own `.env` (copy
+    the repo root's `.env.example`) to an absolute host directory — it's
+    bind-mounted to `/data/processed` inside the container, so the bundled
+    Tiled server (and the Zarr loader's "Browse…" directory picker on the
+    Connect page) can read your real data directly. This matters specifically
+    in Docker: a path from your own machine (e.g. one you'd type into the Zarr
+    loader by hand) means nothing to the container unless it's actually
+    mounted like this — `LOCAL_SOURCE_DIR` is what makes it visible.
+    ```bash
+    LOCAL_SOURCE_DIR=/absolute/path/to/your/data docker compose -f docker-compose.full.yml up --build
+    ```
+
+    **Everything under that directory is registered into Tiled and shows up in
+    Browse automatically** — on every container start, and again whenever you
+    click **"Scan folder for datasets"** in the Zarr loader's directory
+    browser (useful after adding new files without restarting). This covers
+    both `.zarr` stores and plain folders of TIFF/PNG/JPG slices — the latter
+    register as fast, per-slice ingest with no 3-D pyramid built yet (build
+    one on demand from the 3D tab when you actually need it, so a large
+    dataset doesn't delay startup).
+
+    If a raw image folder and a `.zarr` reconstruction of the same acquisition
+    share a name, only one can occupy that key — the scan reports the second
+    one as **shadowed** rather than silently skipping it, and offers a
+    "Register as…" action (in the UI, or `POST /api/scan-datasets` /
+    `/api/ingest/scan` with a `renames` field) to register it under a
+    different key so both show up side by side.
 
 ---
 
@@ -137,7 +193,14 @@ npm test           # run the Vitest unit tests
 ## Environment variables
 
 Backend configuration lives in `backend/.env` (created from
-`backend/.env.example` on first launch). The most relevant settings:
+`backend/.env.example` on first launch) when running via `start_all.sh` /
+directly with `uvicorn`. **Running via `docker compose` instead**, copy the
+repo root's own `.env.example` to `.env` — `docker compose` loads that
+automatically for every `docker-compose*.yml` file, so this is where
+`TILED_URI`/`TILED_API_KEY`/`TILED_BROWSE_PATH` (and, for `app-ml`,
+`VITE_BASE_PATH`) actually get substituted in. See
+[Production deployment](../reference/deployment.md#setting-these-for-docker-compose)
+for details. The most relevant settings either way:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
@@ -147,6 +210,12 @@ Backend configuration lives in `backend/.env` (created from
 | `EXPORT_ROOT` | Override output folder for exports | `~/data/exports` |
 | `BROWSE_CACHE_TTL_SECONDS` | Cache lifetime for Tiled browse listings | `300` |
 | `BROWSE_ALLOWED_ORIGINS` | CORS origins (only needed for split frontend/backend hosting) | *(empty)* |
+| `TILED_BROWSE_PATH` | Path into the Tiled tree Browse treats as its root | *(unset — this repo's own ingest root)* |
+
+`VITE_BASE_PATH` is a **frontend build-time** setting (a Docker build-arg, not a
+runtime env var — see [Production deployment](../reference/deployment.md)) for
+hosting under a URL prefix rather than at the domain root; leave it unset for
+everything on this page.
 
 !!! danger "Never commit secrets"
     `backend/.env` is git-ignored. Never commit it, and never expose

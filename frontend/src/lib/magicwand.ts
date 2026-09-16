@@ -13,7 +13,8 @@ import { fillHoles } from '@/lib/morphology';
 export interface GrayField {
   gw: number;
   gh: number;
-  /** Image pixels per grid cell (downsample factor). */
+  /** Image pixels per grid cell. >1 when downsampled; FRACTIONAL (e.g. 0.5) when
+   *  the caller asked for an upscaled working resolution. */
   scale: number;
   gray: Float32Array;
   /** Sobel gradient magnitude normalised to ~[0,1] (edge barrier for flood). */
@@ -71,14 +72,24 @@ export function gradientField(gray: Float32Array, gw: number, gh: number): Float
 /** Build a grayscale + gradient field from an image (long side ≤ maxDim).
  *
  * 1600 keeps a 2560px slice at half-resolution (scale 2) — plenty of detail for
- * the edge-aware flood while keeping the per-click work ~4x cheaper than full res. */
+ * the edge-aware flood while keeping the per-click work ~4x cheaper than full res.
+ *
+ * `imgW`/`imgH` are always NATIVE image pixels. `upscale` (1, 2, 4) multiplies the
+ * grid resolution and divides `scale` to match, so the returned polygons carry
+ * sub-pixel coordinates while still being expressed in native image space. Pass an
+ * `image` already rendered at that working resolution to get the extra detail;
+ * it is resampled into the grid either way. */
 export function buildField(
   image: CanvasImageSource,
   imgW: number,
   imgH: number,
   maxDim = 1600,
+  upscale = 1,
+  needGradient = true,
 ): GrayField | null {
-  const scale = Math.max(1, Math.ceil(Math.max(imgW, imgH) / maxDim));
+  const u = Math.max(1, upscale);
+  // Native cell size from the maxDim cap, then `u` sub-cells per native cell.
+  const scale = Math.max(1, Math.ceil(Math.max(imgW, imgH) / maxDim)) / u;
   const gw = Math.max(1, Math.floor(imgW / scale));
   const gh = Math.max(1, Math.floor(imgH / scale));
   const canvas = document.createElement('canvas');
@@ -97,7 +108,57 @@ export function buildField(
   for (let i = 0; i < gw * gh; i++) {
     gray[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
   }
-  return { gw, gh, scale, gray, grad: gradientField(gray, gw, gh) };
+  // The gradient is only needed by the edge-aware flood (`edgeStop`); a pure
+  // intensity consumer like the Threshold Brush skips a full Sobel pass and half
+  // the memory by opting out — which matters at a full-resolution 2x/4x grid.
+  return { gw, gh, scale, gray, ...(needGradient ? { grad: gradientField(gray, gw, gh) } : {}) };
+}
+
+/**
+ * Otsu's method: the 0–255 level that best splits a luminance histogram into two
+ * classes (maximises between-class variance). Drives the Threshold Brush's "Auto"
+ * button, matching ImageJ's default auto-threshold. Returns 128 for a degenerate
+ * (empty or single-valued) histogram.
+ */
+export function otsuThreshold(bins: number[]): number {
+  const n = bins.length;
+  if (n === 0) return 128;
+  let total = 0;
+  let sumAll = 0;
+  for (let i = 0; i < n; i++) {
+    total += bins[i];
+    sumAll += i * bins[i];
+  }
+  if (total === 0) return 128;
+
+  let sumB = 0;
+  let wB = 0;
+  let bestVar = -1;
+  // Between-class variance is flat across the empty gap separating two modes, so
+  // every level in that gap is equally optimal. Average the tied plateau (as
+  // ImageJ does) to land in the middle of the gap rather than hard against the
+  // dark mode, which is what a user dragging "Auto" expects.
+  let tieSum = 0;
+  let tieCount = 0;
+  for (let t = 0; t < n; t++) {
+    wB += bins[t];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += t * bins[t];
+    const mB = sumB / wB;
+    const mF = (sumAll - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > bestVar * (1 + 1e-12)) {
+      bestVar = between;
+      tieSum = t;
+      tieCount = 1;
+    } else if (Math.abs(between - bestVar) <= bestVar * 1e-12) {
+      tieSum += t;
+      tieCount++;
+    }
+  }
+  return tieCount > 0 ? Math.round(tieSum / tieCount) : 128;
 }
 
 /** Robust intensity spread (2nd–98th percentile) for tolerance scaling. */
@@ -239,6 +300,11 @@ interface SelectOpts {
   /** 0–1 edge barrier (contiguous only): higher = flood stops at weaker edges. */
   edgeStop?: number;
   minRegion?: number;  // min component size in grid pixels
+  /** Same `gw*gh` grid as `field` (contiguous mode only): cells already claimed
+   *  by a different annotated class the flood must not cross, e.g. so filling
+   *  one region doesn't spill across an already-labeled wall into a neighbor.
+   *  `1` = blocked. Like `edgeStop`'s wall, the seed cell itself is exempt. */
+  blocked?: Uint8Array;
 }
 
 interface MaskPolyOpts {
@@ -394,7 +460,7 @@ export function magicSelect(
   field: GrayField,
   seedXimg: number,
   seedYimg: number,
-  { toleranceFrac, mode, smooth = 0, edgeStop = 0, minRegion = 12 }: SelectOpts,
+  { toleranceFrac, mode, smooth = 0, edgeStop = 0, minRegion = 12, blocked }: SelectOpts,
 ): number[][] {
   const { gw, gh, scale, grad } = field;
   // Smoothing drives a pre-blur (denoise so the boundary is less ragged) here;
@@ -410,7 +476,8 @@ export function magicSelect(
   // flood won't cross — keeps a void's selection bounded by its rim instead of
   // leaking across a soft/ringy edge. Disabled when edgeStop is 0 or no grad.
   const wallLimit = edgeStop > 0 ? 1 - edgeStop : Infinity;
-  const isWall = (i: number) => grad !== undefined && grad[i] >= wallLimit;
+  const isWall = (i: number) =>
+    (grad !== undefined && grad[i] >= wallLimit) || (blocked !== undefined && blocked[i] === 1);
 
   const mask = new Uint8Array(gw * gh);
   if (mode === 'global') {

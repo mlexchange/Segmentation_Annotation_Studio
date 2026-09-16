@@ -1,0 +1,45 @@
+# The ":als-prod" shape: backend (with ml/dlsia) + ipred bundled, pointed at
+# ALS's real PRODUCTION Tiled server by default — Dockerfile's app-ml stage,
+# base path baked in at /bl832/seg_studio/ (hub.als.lbl.gov's own path
+# prefix). This is what .github/workflows/publish-image.yml publishes under
+# the `:als-prod` tag; this compose file is for running that published image
+# (or building the same thing locally to test before it ships).
+#
+# Tiled itself stays external — ALS already runs its own production Tiled;
+# bundling a second, empty one here would be actively wrong. Only
+# TILED_API_KEY needs setting per deployment (a per-user/service credential —
+# see docs/reference/deployment.md's open question on per-proposal Tiled auth
+# before this goes live with real data).
+#
+#   docker compose -f docker-compose.als-prod.yml up --build
+#
+# To run the already-published ghcr.io image instead of building locally,
+# skip `build:` and use `image: ghcr.io/<owner>/<repo>:als-prod`.
+#
+name: segmentation_annotation_studio
+services:
+  app-als-prod:
+    build:
+      context: .
+      target: app-ml
+      args:
+        VITE_BASE_PATH: "/bl832/seg_studio/"
+    ports:
+      - "8002:8002"  # the app itself (SPA + API) — the only port most setups need
+      - "8003:8003"  # ipred, direct access (optional)
+    environment:
+      # ALS's real production Tiled. Override via TILED_URI in your own .env
+      # only if this ever needs to point somewhere else temporarily.
+      TILED_URI: "${TILED_URI:-https://tiled.als.lbl.gov}"
+      TILED_API_KEY: "${TILED_API_KEY:-}"
+      # Real institutional path into ALS's production catalog — confirm with
+      # whoever operates that Tiled server before assuming this is exactly
+      # right for a different beamline.
+      TILED_BROWSE_PATH: "${TILED_BROWSE_PATH:-beamlines/bl832/processed}"
+      LOCAL_DATA_ROOT: "/data"
+      BROWSE_ALLOWED_ORIGINS: "${BROWSE_ALLOWED_ORIGINS:-}"
+    volumes:
+      - annotation-data-als-prod:/data
+
+volumes:
+  annotation-data-als-prod:

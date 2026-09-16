@@ -224,7 +224,19 @@ def _resolve_split(
         n = len(auto_keys)
         n_train = int(n * ratios[0])
         n_valid = int(n * ratios[1])
-        labels = ["train"] * n_train + ["valid"] * n_valid + ["test"] * (n - n_train - n_valid)
+        n_test = n - n_train - n_valid
+        # A ratio split that floors to zero train slices (e.g. a single annotated
+        # slice at the default 80/10/10) trains on nothing and fails outright —
+        # worse than a slightly-off ratio. Guarantee train gets at least one
+        # slice whenever there is at least one to give, borrowing from whichever
+        # other split has one to spare.
+        if n_train == 0 and n >= 1:
+            n_train = 1
+            if n_valid > 0:
+                n_valid -= 1
+            else:
+                n_test -= 1
+        labels = ["train"] * n_train + ["valid"] * n_valid + ["test"] * n_test
         for k, lbl in zip(auto_keys, labels):
             splits_out[k] = lbl
     return splits_out

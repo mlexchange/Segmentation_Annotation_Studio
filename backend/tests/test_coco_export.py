@@ -235,3 +235,45 @@ def test_polygon_hole_carved_out() -> None:
     assert mask[2, 2], "frame corner must be filled"
     # Area ~= 40*40 - 20*20 = 1200, allow boundary slack.
     assert 1050 < int(mask.sum()) < 1350
+
+
+def test_resolve_split_single_slice_goes_to_train() -> None:
+    """A lone annotated slice at the default 80/10/10 ratio must not be
+    floored out of every split — that leaves nothing to train on."""
+    from coco_export import _resolve_split
+
+    result = _resolve_split(["0"], {}, {"ratios": [0.8, 0.1, 0.1], "seed": 1234})
+    assert result == {"0": "train"}
+
+
+def test_resolve_split_two_slices_still_gets_a_train_slice() -> None:
+    from coco_export import _resolve_split
+
+    result = _resolve_split(["0", "1"], {}, {"ratios": [0.8, 0.1, 0.1], "seed": 1234})
+    assert "train" in result.values()
+
+
+def test_resolve_split_borrows_from_valid_before_test() -> None:
+    """When train floors to zero but valid has slices to spare, borrow from
+    valid rather than test, so the split still roughly tracks the ratios."""
+    from coco_export import _resolve_split
+
+    result = _resolve_split(
+        [str(i) for i in range(3)], {}, {"ratios": [0.1, 0.8, 0.1], "seed": 1234}
+    )
+    counts = {"train": 0, "valid": 0, "test": 0}
+    for v in result.values():
+        counts[v] += 1
+    assert counts["train"] == 1
+    assert counts["valid"] == 1
+    assert counts["test"] == 1
+
+
+def test_resolve_split_respects_explicit_assignments() -> None:
+    """Slices already given an explicit (non-'auto') split are left alone."""
+    from coco_export import _resolve_split
+
+    result = _resolve_split(
+        ["0", "1"], {"0": "valid"}, {"ratios": [0.8, 0.1, 0.1], "seed": 1234}
+    )
+    assert result["0"] == "valid"

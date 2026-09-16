@@ -27,19 +27,39 @@ export function gridFor(width: number, height: number, maxDim = 1600): MaskGrid 
  * full native resolution (scale 1) for reasonably sized images, so re-vectorizing
  * an unchanged region is ~idempotent and existing nodes don't erode or shift a
  * little each time a stroke is added. Only very large images (>4096 px) downsample.
+ *
+ * `upscale` (1, 2, 4) raises the working resolution so sub-pixel geometry — e.g. a
+ * Threshold Brush region traced at 2× — survives a clip/merge round-trip instead of
+ * being re-snapped to the native pixel grid. `scale` becomes fractional (1/upscale);
+ * `rasterizeShapes` divides by it and `maskToPolygons*` multiplies by it, so nothing
+ * downstream needs to change.
  */
-export function fullResGridFor(width: number, height: number): MaskGrid {
+export function fullResGridFor(width: number, height: number, upscale = 1): MaskGrid {
+  const u = Math.max(1, upscale);
   const emax = Math.max(width, height);
-  return gridFor(width, height, emax <= 4096 ? emax : 1600);
+  const base = gridFor(width, height, emax <= 4096 ? emax : 1600);
+  if (u === 1) return base;
+  const scale = base.scale / u;
+  return {
+    gw: Math.max(1, Math.floor(width / scale)),
+    gh: Math.max(1, Math.floor(height / scale)),
+    scale,
+  };
 }
 
 /**
  * Rasterize *shapes* into a `gw × gh` binary mask (Uint8Array of 0/1). Paint
  * strokes and shape bodies set 1; brush erase strokes and vector `erased`
  * carve-outs set 0, applied per-shape so a later shape can repaint.
+ *
+ * Pass `out` to render into an existing buffer instead of allocating one. Callers
+ * that rasterize many shapes in a loop (overlap tests) reuse a single scratch
+ * array this way — at full resolution each allocation is multiple megabytes, and
+ * the garbage adds up fast. `out` must be `gw*gh` long and is NOT cleared: clear
+ * it yourself when reusing, or leave it to accumulate a union deliberately.
  */
-export function rasterizeShapes(shapes: Shape[], gw: number, gh: number, scale = 1): Uint8Array {
-  const mask = new Uint8Array(gw * gh);
+export function rasterizeShapes(shapes: Shape[], gw: number, gh: number, scale = 1, out?: Uint8Array): Uint8Array {
+  const mask = out ?? new Uint8Array(gw * gh);
   const s = scale || 1;
   for (const shape of shapes) {
     if (shape.kind === 'polygon') {
@@ -141,8 +161,12 @@ function fillEllipse(mask: Uint8Array, gw: number, gh: number, cx: number, cy: n
   }
 }
 
-/** Stamp a round-capped thick polyline (image-coord points) with value *v*. */
-function stampStroke(mask: Uint8Array, gw: number, gh: number, imgPts: number[], r: number, scale: number, v: number): void {
+/** Stamp a round-capped thick polyline (image-coord points) with value *v*.
+ *  `r` is the radius in GRID cells (i.e. image radius / scale).
+ *
+ *  `gate`, when given, restricts the stamp to cells where `gate[i]` is non-zero —
+ *  this is what makes the Threshold Brush paint only inside its intensity band. */
+export function stampStroke(mask: Uint8Array, gw: number, gh: number, imgPts: number[], r: number, scale: number, v: number, gate?: Uint8Array): void {
   const rad = Math.max(0.5, r);
   const r2 = rad * rad;
   const pts: number[] = [];
@@ -160,7 +184,10 @@ function stampStroke(mask: Uint8Array, gw: number, gh: number, imgPts: number[],
         t = t < 0 ? 0 : t > 1 ? 1 : t;
         const cxp = ax + t * dx, cyp = ay + t * dy;
         const ddx = x - cxp, ddy = y - cyp;
-        if (ddx * ddx + ddy * ddy <= r2) mask[y * gw + x] = v;
+        if (ddx * ddx + ddy * ddy > r2) continue;
+        const i = y * gw + x;
+        if (gate && !gate[i]) continue;
+        mask[i] = v;
       }
     }
   };

@@ -15,6 +15,10 @@
  *   node scripts/fetch-sam-model.mjs
  *
  * start_all.sh runs this automatically (best-effort, backgrounded) on startup.
+ *
+ * iPred's `slimsam` feature module (ipred/src/ipred/feature_setups.py) also
+ * resolves its ONNX encoder from this exact directory — vendoring here covers
+ * both the Magic tool and iPred, no separate download needed.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
