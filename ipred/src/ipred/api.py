@@ -344,9 +344,9 @@ def api_feature_channel(feature_id: str, index: int) -> Response:
     if row is None:
         raise HTTPException(404, "feature bank not found")
     try:
-        path = preprocess.channel_png_path(row["blob_dir"], index)
+        path = preprocess.channel_png_path(row["project_id"], feature_id, index)
     except ValueError as exc:
-        logger.warning("rejected out-of-root channel path: %s", exc)
+        logger.warning("rejected invalid channel path request: %s", exc)
         raise HTTPException(404, "channel not found") from exc
     if not path.is_file():
         raise HTTPException(404, "channel not found")

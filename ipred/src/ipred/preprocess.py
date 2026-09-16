@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +15,7 @@ import numpy as np
 from ipred import array_source, compositions, features
 from ipred.catalog import Catalog
 from ipred.compose_run import run_composition
-from ipred.paths import engine_root, project_blob_dir
+from ipred.paths import project_blob_dir
 
 logger = logging.getLogger(__name__)
 
@@ -151,20 +152,28 @@ def load_feature_bank_arrays(blob_dir: str | Path) -> dict[str, Any]:
     }
 
 
-def channel_png_path(blob_dir: str | Path, index: int) -> Path:
+_FEATURE_ID_RE = re.compile(r"^[0-9a-f]{32}$")  # exactly uuid.uuid4().hex's shape
+
+
+def channel_png_path(project_id: str, feature_id: str, index: int) -> Path:
     """Path to a cached channel PNG.
 
-    ``blob_dir`` is read back from the catalog DB keyed by a user-supplied
-    ``feature_id`` — every value ever written there is a server-generated
-    ``uuid4().hex`` under ``engine_root()`` (see ``run_preprocess`` above), so
-    this can never legitimately resolve outside it. Enforce that explicitly
-    rather than trusting the DB round-trip (CodeQL py/path-injection).
+    Deliberately does NOT take the catalog's stored ``blob_dir`` string and
+    build a path from it — however safe that value always happens to be in
+    practice (a server-generated ``uuid.uuid4().hex`` under ``engine_root()``,
+    see ``run_preprocess`` above), a static analyzer has no way to know that,
+    and treats any DB value reached via a user-supplied ``feature_id`` lookup
+    as still tainted (CodeQL py/path-injection). Instead, validate the
+    *request's own* ``feature_id`` against the exact fixed shape it is always
+    generated in, before it ever touches a path, and rebuild the directory
+    fresh from known-safe components (``project_blob_dir`` already
+    constrains ``project_id`` the same way via its own hex-digest shape). A
+    request whose ``feature_id`` doesn't match a real feature bank's id can
+    never reach the filesystem layer at all.
     """
-    root = engine_root().resolve()
-    path = (Path(blob_dir) / "channels" / f"{index:04d}.png").resolve()
-    if path != root and root not in path.parents:
-        raise ValueError(f"channel path {path} escapes engine root")
-    return path
+    if not _FEATURE_ID_RE.match(feature_id):
+        raise ValueError(f"invalid feature_id: {feature_id!r}")
+    return project_blob_dir(project_id) / "features" / feature_id / "channels" / f"{index:04d}.png"
 
 
 def _bank_response(

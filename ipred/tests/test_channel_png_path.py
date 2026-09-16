@@ -1,6 +1,9 @@
-"""channel_png_path's engine-root containment guard (CodeQL py/path-injection)."""
+"""channel_png_path validates feature_id against its known-safe shape before
+ever constructing a filesystem path from it (CodeQL py/path-injection)."""
 
 from __future__ import annotations
+
+import uuid
 
 import pytest
 
@@ -13,23 +16,25 @@ def local_data_root(tmp_path, monkeypatch: pytest.MonkeyPatch):
     return tmp_path
 
 
-def test_normal_blob_dir_resolves_under_engine_root(local_data_root) -> None:
-    from ipred.paths import engine_root
+def test_valid_feature_id_resolves_under_project_blob_dir(local_data_root) -> None:
+    from ipred.paths import project_blob_dir
 
-    blob_dir = engine_root() / "projects" / "abc123" / "features" / "def456"
-    path = preprocess.channel_png_path(str(blob_dir), 0)
-    assert path == (blob_dir / "channels" / "0000.png").resolve()
-
-
-def test_traversal_in_blob_dir_is_rejected(local_data_root) -> None:
-    from ipred.paths import engine_root
-
-    escaping = engine_root() / "projects" / ".." / ".." / "etc"
-    with pytest.raises(ValueError, match="escapes engine root"):
-        preprocess.channel_png_path(str(escaping), 0)
+    feature_id = uuid.uuid4().hex
+    path = preprocess.channel_png_path("abc123", feature_id, 0)
+    assert path == project_blob_dir("abc123") / "features" / feature_id / "channels" / "0000.png"
 
 
-def test_absolute_blob_dir_outside_root_is_rejected(local_data_root, tmp_path) -> None:
-    outside = tmp_path.parent / "somewhere-else"
-    with pytest.raises(ValueError, match="escapes engine root"):
-        preprocess.channel_png_path(str(outside), 0)
+def test_traversal_payload_as_feature_id_is_rejected(local_data_root) -> None:
+    with pytest.raises(ValueError, match="invalid feature_id"):
+        preprocess.channel_png_path("abc123", "../../../../etc/passwd", 0)
+
+
+def test_wrong_length_feature_id_is_rejected(local_data_root) -> None:
+    with pytest.raises(ValueError, match="invalid feature_id"):
+        preprocess.channel_png_path("abc123", "not-a-real-uuid", 0)
+
+
+def test_uppercase_hex_feature_id_is_rejected(local_data_root) -> None:
+    # uuid.uuid4().hex is always lowercase — anything else can't be a real one.
+    with pytest.raises(ValueError, match="invalid feature_id"):
+        preprocess.channel_png_path("abc123", uuid.uuid4().hex.upper(), 0)
