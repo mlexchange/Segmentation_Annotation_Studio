@@ -13,6 +13,19 @@
 #                          see docker-compose.full.yml, and the `:local` tag.
 # Local dev still uses start_all.sh, which runs the same three services as
 # separate local processes instead of inside a container.
+#
+# Each publishable target is a thin `*-base` stage (Python deps only) plus one
+# final layer that copies in the built frontend. This is deliberate: the
+# frontend build changes far more often than the Python deps do, and
+# Docker/BuildKit's cache is a linear chain per stage — a layer's cache key
+# depends on its parent layer's digest. If the frontend COPY sat partway
+# through a stage (as it once did), any frontend-only change would invalidate
+# every layer built on top of it, including the expensive torch/CUDA and
+# tiled[all] installs in app-ml/app-full, forcing them to reinstall from
+# scratch for a one-line frontend fix. Keeping the frontend COPY as the LAST
+# layer in each `*-base` stage's leaf means a frontend-only change only ever
+# invalidates that one small COPY (+ its trailing EXPOSE/CMD/ENTRYPOINT
+# metadata) — never the Python installs above it.
 
 # --- Stage: build the frontend (same-origin: VITE_API_BASE left empty) ---
 FROM node:22-alpine AS web
@@ -34,8 +47,8 @@ ARG VITE_BASE_PATH=""
 ENV VITE_BASE_PATH=${VITE_BASE_PATH}
 RUN npm run build   # → /web/dist
 
-# --- Stage: lightweight production image (frontend + backend only) ---
-FROM python:3.12-slim AS app
+# --- Stage: lightweight production base (backend deps + source, no frontend) ---
+FROM python:3.12-slim AS app-base
 WORKDIR /app
 
 # Install Python deps first (cached until pyproject changes). py-modules=[] means
@@ -47,23 +60,26 @@ WORKDIR /app
 COPY backend/pyproject.toml ./pyproject.toml
 RUN pip install --no-cache-dir .
 
-# App source + the built SPA (served from ./static by annotation_server.py).
+# App source (the built SPA is copied in by each leaf stage below, last).
 COPY backend/ ./
-COPY --from=web /web/dist ./static
 
 # Drafts/versions/exports persist here — mount a volume in production.
 ENV LOCAL_DATA_ROOT=/data
 VOLUME ["/data"]
 
+# --- Stage: lightweight production image (frontend + backend only) ---
+FROM app-base AS app
+COPY --from=web /web/dist ./static
+
 EXPOSE 8002
 CMD ["uvicorn", "annotation_server:app", "--host", "0.0.0.0", "--port", "8002"]
 
-# --- Stage: backend + ipred + ml, Tiled still external ---
+# --- Stage: backend + ipred + ml base, Tiled still external ---
 # For a deployment that already has its own production Tiled (so bundling a
 # second, empty one would be actively wrong) but still wants the Train tab
 # and the fast pixel classifier to work without standing up a separate ipred
 # service just for this app — see the `:als` tag and docker-compose.ml.yml.
-FROM app AS app-ml
+FROM app-base AS app-ml-base
 
 # The `ml` extra (torch/dlsia/qlty) — kept out of the lean `app` image above.
 # Pulls in the full CUDA toolkit (nvidia-cudnn-cu12, nvidia-cublas-cu12, etc.)
@@ -81,19 +97,23 @@ RUN pip install --no-cache-dir /ipred
 COPY docker-entrypoint-ml.sh /usr/local/bin/docker-entrypoint-ml.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint-ml.sh
 
+# --- Stage: backend + ipred + ml, Tiled still external ---
+FROM app-ml-base AS app-ml
+COPY --from=web /web/dist ./static
+
 # 8002 backend; 8003 ipred, exposed so it can be reached directly if wanted.
 # No Tiled port here — this stage never starts one; TILED_URI at `docker run`
 # time points at the deployment's own external Tiled.
 EXPOSE 8002 8003
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint-ml.sh"]
 
-# --- Stage: batteries-included image (+ Tiled server too) ---
+# --- Stage: batteries-included base (+ Tiled server too) ---
 # Bundles all three backend services into one container over loopback — the
 # CI/Docker coverage gap this stage fixes: previously NOTHING packaged ipred
 # or a Tiled server at all, so the app image alone could never run iPred or
 # dlsia, and there was no single-command way to try the full stack without
 # start_all.sh's separate local processes.
-FROM app-ml AS app-full
+FROM app-ml-base AS app-full-base
 
 # tiled[all] pulls in the actual server (catalog, array/table adapters) —
 # `app`'s pyproject only pins tiled[client], which has no server component.
@@ -106,6 +126,10 @@ COPY tiled/config.docker.yml /app/tiled/config.docker.yml
 
 COPY docker-entrypoint-full.sh /usr/local/bin/docker-entrypoint-full.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint-full.sh
+
+# --- Stage: batteries-included image (+ Tiled server too) ---
+FROM app-full-base AS app-full
+COPY --from=web /web/dist ./static
 
 # 8002 backend (the only port most deployments need — same-origin SPA+API);
 # 8003/8010 exposed too so ipred/Tiled can be reached directly if wanted.

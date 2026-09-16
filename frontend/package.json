@@ -46,5 +46,8 @@
     "vite": "^6.0.3",
     "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^3.2.3"
+  },
+  "overrides": {
+    "@blueskyproject/tiled": "^0.0.34"
   }
 }

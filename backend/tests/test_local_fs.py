@@ -19,6 +19,15 @@ def default_root(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 
 # ---------------------------------------------------------------------------
+# default_root
+# ---------------------------------------------------------------------------
+
+class TestDefaultRoot:
+    def test_returns_the_default_root_as_a_string(self, default_root):
+        assert local_fs.default_root() == str(default_root)
+
+
+# ---------------------------------------------------------------------------
 # _resolve_root / _within / _safe
 # ---------------------------------------------------------------------------
 

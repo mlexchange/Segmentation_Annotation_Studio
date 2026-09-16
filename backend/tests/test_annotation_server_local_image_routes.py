@@ -43,6 +43,19 @@ class FakeNode:
 
 
 # ---------------------------------------------------------------------------
+# /api/local/root
+# ---------------------------------------------------------------------------
+
+class TestLocalRoot:
+    @pytest.mark.asyncio
+    async def test_returns_the_default_root(self, client, monkeypatch):
+        monkeypatch.setattr(local_fs, "default_root", lambda: "/data/raw")
+        response = await client.get("/api/local/root")
+        assert response.status_code == 200
+        assert response.json() == {"root": "/data/raw"}
+
+
+# ---------------------------------------------------------------------------
 # /api/local/list, /api/local/samples
 # ---------------------------------------------------------------------------
 

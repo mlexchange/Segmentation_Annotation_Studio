@@ -13,6 +13,11 @@ build/
 # Secrets — never commit
 .env
 
+# Default bind-mount target for docker-compose.full.yml/docker-compose.local.yml's
+# LOCAL_SOURCE_DIR (see .env.example) — an empty placeholder so the compose
+# files work unset; your own data lives wherever LOCAL_SOURCE_DIR points, not here.
+.local-source/
+
 # Tiled catalog database (binary, regenerated on first run via start_all.sh)
 .tiled/catalog.db
 .tiled/catalog.db-shm

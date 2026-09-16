@@ -89,6 +89,7 @@ from schemas import (
     TrainRequest,
     VolumeBuildRequest,
     ZarrRegisterRequest,
+    ZarrScanRequest,
 )
 from source_keys import parse_source_key
 from thumbnails import render_thumbnail
@@ -420,6 +421,18 @@ async def browse_thumbnail(
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=300"},
     )
+
+
+@app.get("/api/local/root")
+async def local_root() -> dict:
+    """Return the default local browse root (``LOCAL_DATA_ROOT``) as an absolute path.
+
+    ``/api/local/list`` returns entries relative to whatever root was granted;
+    when no explicit root is granted, callers that need to build an absolute
+    server-side path (e.g. the Zarr loader's directory browser) fetch it here
+    once rather than duplicating the ``LOCAL_DATA_ROOT`` default client-side.
+    """
+    return {"root": local_fs.default_root()}
 
 
 @app.get("/api/local/list")
@@ -1378,6 +1391,69 @@ async def zarr_register(req: ZarrRegisterRequest) -> dict:
         req.description,
         req.on_conflict,
     )
+
+
+@app.post("/api/zarr/scan")
+async def zarr_scan(req: ZarrScanRequest) -> dict:
+    """Scan a directory for Zarr stores and register any not already present.
+
+    For a bind-mounted directory of already-reconstructed volumes that should
+    all show up in Browse in one action, rather than registering each one
+    individually via ``/api/zarr/register``. Safe to re-run — already-
+    registered stores are skipped, not re-registered.
+    """
+    return await asyncio.to_thread(
+        zarr_source.scan_and_register_zarrs,
+        req.server_uri,
+        req.scan_root,
+        req.container_path,
+        req.on_conflict,
+        req.renames,
+    )
+
+
+@app.post("/api/ingest/scan")
+async def ingest_scan(req: ZarrScanRequest) -> dict:
+    """Scan a directory for folders of image slices and ingest any not already
+    present, as fast per-slice registration (no 3-D pyramid — see the 3D
+    page's on-demand "Build 3D volume" for that). Safe to re-run.
+    """
+    return await asyncio.to_thread(
+        ingest_mod.scan_and_register_image_stacks,
+        req.server_uri,
+        req.scan_root,
+        req.container_path,
+        req.on_conflict,
+        req.renames,
+    )
+
+
+@app.post("/api/scan-datasets")
+async def scan_datasets(req: ZarrScanRequest) -> dict:
+    """Scan a directory for BOTH Zarr stores and folders of image slices,
+    registering whatever isn't already present. The single combined action
+    behind the Connect page's "Scan folder" button and the `:local`/`:full`
+    container's startup auto-discovery — one call instead of two, with one
+    merged result.
+    """
+    # Sequential, not concurrent: both scans call _ensure_container against the
+    # same target container, and running them in parallel would race on its
+    # creation.
+    zarr_result = await asyncio.to_thread(
+        zarr_source.scan_and_register_zarrs,
+        req.server_uri, req.scan_root, req.container_path, req.on_conflict, req.renames,
+    )
+    image_result = await asyncio.to_thread(
+        ingest_mod.scan_and_register_image_stacks,
+        req.server_uri, req.scan_root, req.container_path, req.on_conflict, req.renames,
+    )
+    return {
+        "scanned": zarr_result["scanned"] + image_result["scanned"],
+        "registered": zarr_result["registered"] + image_result["registered"],
+        "skipped": zarr_result["skipped"] + image_result["skipped"],
+        "shadowed": zarr_result["shadowed"] + image_result["shadowed"],
+        "errors": zarr_result["errors"] + image_result["errors"],
+    }
 
 
 def _centre_crop(arr: np.ndarray, size: int) -> np.ndarray:

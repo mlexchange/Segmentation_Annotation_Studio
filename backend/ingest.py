@@ -30,12 +30,15 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
+import tempfile
 import threading
 import uuid
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from fastapi import HTTPException
 
 from tiled_clients import api_key_for_uri, get_tiled_client
 
@@ -366,6 +369,7 @@ def run_ingest_job(
         container_meta: dict[str, Any] = {
             "sample_name": parts[-1] if parts else "",
             "n_images": len(temp_files),
+            "source_format": IMAGE_STACK_SOURCE_FORMAT,
         }
         if description:
             container_meta["description"] = description
@@ -436,3 +440,188 @@ def run_ingest_job(
                 tmp.unlink(missing_ok=True)
             except Exception:  # noqa: BLE001
                 pass
+
+
+def node_source_kind(node: Any) -> str | None:
+    """The ``source_format`` tag on *node*'s metadata, or None if absent/unreadable.
+
+    Used to tell whether an existing Tiled node at a candidate key is the SAME
+    kind of registration a scan is about to (re-)create, vs. an unrelated
+    dataset that happens to share the same stem name (e.g. a raw image folder
+    and its own already-registered Zarr reconstruction) — so a scan can report
+    that collision honestly as "shadowed" instead of a misleading "already
+    registered". Shared by :mod:`zarr_source`'s own scan function too.
+    """
+    try:
+        return dict(getattr(node, "metadata", {}) or {}).get("source_format")
+    except Exception:  # noqa: BLE001 — best-effort
+        return None
+
+
+#: Tag written on every container this module ingests into — lets a later scan
+#: (of any kind) recognize "this key already holds a real per-slice ingest"
+#: and distinguish it from an external Zarr/tiff-stack-3d registration sharing
+#: the same stem name.
+IMAGE_STACK_SOURCE_FORMAT = "image-stack"
+
+
+def _is_image_stack_dir(path: Path) -> bool:
+    """True if *path* is a directory holding 2+ directly-supported image files.
+
+    A single image isn't a "stack" worth its own ingest — mirrors
+    :func:`tiff_stack_source.inspect_tiff_stack`'s own ``len(files) < 2`` rule,
+    generalized to every :data:`IMAGE_EXTS` type, not just TIFF.
+    """
+    if not path.is_dir():
+        return False
+    count = 0
+    for child in path.iterdir():
+        if child.is_file() and child.suffix.lower() in IMAGE_EXTS:
+            count += 1
+            if count >= 2:
+                return True
+    return False
+
+
+def scan_and_register_image_stacks(
+    server_uri: str | None,
+    scan_root: str,
+    container_path: str = "browse",
+    on_conflict: str = "skip",
+    renames: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Walk *scan_root* for folders of image slices and ingest each not already
+    present, as fast per-slice registration — no 3-D pyramid is built here.
+
+    Deliberately the "quick" path: each slice is copied into Tiled as its own
+    2-D node (exactly what dropping the folder onto the Connect page's
+    dropzone already does), with no multiscale volume generated. Building a
+    3-D pyramid is comparatively expensive (reads every slice at least once)
+    and is left to the existing, on-demand "Build 3D volume" button on the 3D
+    page (:mod:`volume_build`) — a discovery scan should not silently take
+    minutes per folder.
+
+    Only top-level subdirectories of *scan_root* are candidates — one level,
+    matching :func:`zarr_source.scan_and_register_zarrs`'s own non-recursive
+    scope. A `.zarr` directory is never a candidate here even if it happens to
+    also contain 2+ loose image files at its root (it shouldn't, but the check
+    is cheap insurance against double-registering the same data two ways).
+
+    A raw image folder and an unrelated dataset (e.g. a Zarr reconstruction of
+    the same acquisition) commonly share the same stem name — in which case
+    they'd derive the identical Tiled key. Rather than silently treating that
+    as "already registered" (misleading — the raw slices were never actually
+    ingested) or blindly replacing someone else's data, a same-key collision
+    with a DIFFERENT kind of registration (per the ``source_format`` tag; see
+    :func:`node_source_kind`) is reported as **shadowed**, distinctly from a
+    same-kind ``skipped`` match from a previous run of this same scan.
+
+    Args:
+        server_uri: Connected Tiled server URI.
+        scan_root: Absolute directory to scan.
+        container_path: Parent container each discovered folder registers
+            under, keyed by its own (sanitized) folder name — matching how a
+            dropped folder is named today.
+        on_conflict: ``"skip"`` (default, safe to re-run) or ``"replace"`` —
+            applies only to a same-kind (not shadowed) collision.
+        renames: Optional ``{folder_name: alternate_key}`` override, so a
+            shadowed candidate can be retried under a different key without
+            re-scanning everything else.
+
+    Returns:
+        Dict with ``scanned``, ``registered`` (``name``/``key``/``tiled_path``),
+        ``skipped`` (names), ``shadowed`` (``name``/``key``/``existing_kind``/
+        ``suggested_key`` — a different-kind collision, nothing registered),
+        and ``errors`` (``name``/``error`` pairs).
+
+    Raises:
+        HTTPException: 400/404 if *scan_root* itself is unusable.
+    """
+    from tiled.client.register import Settings
+
+    import zarr_source
+
+    if on_conflict not in ("skip", "replace"):
+        on_conflict = "skip"
+    renames = renames or {}
+
+    root = Path(scan_root).expanduser()
+    if not root.is_absolute():
+        raise HTTPException(400, f"Path must be absolute: {scan_root!r}")
+    if not root.is_dir():
+        raise HTTPException(404, f"No such directory: {root}")
+
+    candidates = sorted(
+        (p for p in root.iterdir() if not zarr_source._is_zarr_dir(p) and _is_image_stack_dir(p)),
+        key=lambda p: p.name,
+    )
+
+    client = get_tiled_client(server_uri, api_key_for_uri(server_uri))
+    parts = [p for p in container_path.strip("/").split("/") if p]
+    target = _ensure_container(client, parts)
+
+    registered: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    shadowed: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    for candidate in candidates:
+        default_key = Settings.init().key_from_filename(candidate.name)
+        key = renames.get(candidate.name, default_key)
+        existing_keys = _child_keys(target)
+        if key in existing_keys:
+            existing_kind = node_source_kind(target[key])
+            if existing_kind != IMAGE_STACK_SOURCE_FORMAT:
+                shadowed.append(
+                    {
+                        "name": candidate.name,
+                        "key": key,
+                        "existing_kind": existing_kind or "unknown",
+                        "suggested_key": f"{key}_images",
+                    }
+                )
+                continue
+            if on_conflict == "skip":
+                skipped.append(key)
+                continue
+            try:
+                target.delete_contents(key, recursive=True, external_only=False)
+            except Exception as exc:  # noqa: BLE001 — one bad entry must not sink the scan
+                errors.append({"name": candidate.name, "error": str(exc)})
+                continue
+
+        # Copy each slice to a REAL temp file before ingesting — run_ingest_job
+        # unlinks its inputs when done (correct for its normal caller, the
+        # upload route's own tempfile.mkdtemp()); pointing it at scan_root's
+        # actual files would delete the user's real source data.
+        tmp_dir = Path(tempfile.mkdtemp(prefix="scan_ingest_"))
+        try:
+            temp_files: list[tuple[str, Path]] = []
+            for index, src in enumerate(
+                sorted(p for p in candidate.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+            ):
+                dest = tmp_dir / f"{index:06d}{src.suffix.lower()}"
+                shutil.copy2(src, dest)
+                temp_files.append((src.name, dest))
+
+            jid = new_job(len(temp_files), server_uri, f"{container_path}/{key}".strip("/"))
+            run_ingest_job(jid, server_uri, f"{container_path}/{key}".strip("/"), temp_files, on_conflict=on_conflict)
+            job = get_job(jid) or {}
+            if job.get("state") == "error":
+                errs = job.get("errors") or [{"error": "ingest failed"}]
+                errors.append({"name": candidate.name, "error": errs[0].get("error", "ingest failed")})
+            else:
+                registered.append(
+                    {"name": candidate.name, "key": key, "tiled_path": f"{container_path}/{key}".strip("/")}
+                )
+        except Exception as exc:  # noqa: BLE001 — one bad folder must not sink the scan
+            errors.append({"name": candidate.name, "error": str(exc)})
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return {
+        "scanned": len(candidates),
+        "registered": registered,
+        "skipped": skipped,
+        "shadowed": shadowed,
+        "errors": errors,
+    }

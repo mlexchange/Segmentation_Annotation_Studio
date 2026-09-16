@@ -29,9 +29,11 @@ services:
       TILED_API_KEY: "${TILED_API_KEY:-}"
     volumes:
       - annotation-data-full:/data
-      # Bind-mount your own source datasets to /data/raw (matches
-      # tiled/config.docker.yml's readable_storage), e.g.:
-      #   - /path/to/your/data:/data/raw
+      # Bind-mount your own source datasets to /data/processed (matches
+      # tiled/config.docker.yml's readable_storage). Set LOCAL_SOURCE_DIR in
+      # your own .env (see .env.example at the repo root) to a real host
+      # directory; defaults to an empty placeholder so this works unset.
+      - "${LOCAL_SOURCE_DIR:-./.local-source}:/data/processed"
 
 volumes:
   annotation-data-full:

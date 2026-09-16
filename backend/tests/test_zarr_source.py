@@ -138,6 +138,203 @@ class TestInspect:
         assert [lv["path"] for lv in info["levels"]] == ["volume"]
         assert info["full_shape"] == [4, 8, 8]
 
+    def test_handles_a_bare_array_store_with_no_group_wrapper(self, tmp_path: Path) -> None:
+        """A store that's just a 3-D array at its own root (.zarray, no
+        .zgroup) — e.g. written via `zarr.open(mode='w', ...)` / `dask.array
+        .to_zarr()` with no OME-NGFF multiscale wrapper. `_is_zarr_dir`
+        already recognizes this shape; `inspect_zarr` must not reject it."""
+        import zarr
+
+        store = tmp_path / "plain.zarr"
+        arr = zarr.open(str(store), mode="w", shape=(6, 10, 12), dtype="uint16", zarr_format=2)
+        arr[:] = np.arange(6 * 10 * 12, dtype="uint16").reshape(6, 10, 12)
+        assert not (store / ".zgroup").exists()  # confirm this really is group-less
+
+        info = zarr_source.inspect_zarr(str(store))
+        assert len(info["levels"]) == 1
+        level = info["levels"][0]
+        assert level["path"] == ""
+        assert level["shape"] == [6, 10, 12]
+        assert level["downsample"] == [1.0, 1.0, 1.0]
+        assert info["full_shape"] == [6, 10, 12]
+        assert info["dtype"] == "uint16"
+        assert info["voxel_size"] is None
+
+    def test_rejects_a_bare_array_that_is_not_3d(self, tmp_path: Path) -> None:
+        import zarr
+
+        store = tmp_path / "plain2d.zarr"
+        zarr.open(str(store), mode="w", shape=(10, 12), dtype="uint16", zarr_format=2)
+        with pytest.raises(HTTPException) as exc:
+            zarr_source.inspect_zarr(str(store))
+        assert exc.value.status_code == 422
+        assert "not 3-D" in exc.value.detail
+
+
+class TestScanAndRegisterZarrs:
+    """scan_and_register_zarrs's own logic (candidate discovery, shadow
+    detection, aggregation) — register_zarr itself needs a live Tiled server
+    (see TestPreflightZarr's own docstring), so it's mocked here rather than
+    re-proven. The shadow pre-check navigates a fake Tiled client (see
+    FakeContainer, defined below in this file) the same way preflight_zarr's
+    own tests do."""
+
+    def _fake_client(self, monkeypatch, browse_children=None):
+        client = FakeContainer({"browse": FakeContainer(browse_children or {})})
+        monkeypatch.setattr(zarr_source, "get_tiled_client", lambda uri, key: client)
+        monkeypatch.setattr(zarr_source, "api_key_for_uri", lambda uri: None)
+        return client
+
+    def test_finds_only_top_level_zarr_dirs_and_registers_each(self, tmp_path: Path, monkeypatch) -> None:
+        import zarr
+
+        for name in ("a.zarr", "b.zarr"):
+            store = tmp_path / name
+            zarr.open(str(store), mode="w", shape=(2, 4, 4), dtype="uint8", zarr_format=2)
+        (tmp_path / "not_a_store").mkdir()
+        (tmp_path / "readme.txt").write_text("hi")
+        # A Zarr store's OWN internals must never be treated as a second
+        # candidate — only immediate children of scan_root are considered.
+        (tmp_path / "a.zarr" / "nested.zarr").mkdir()
+
+        self._fake_client(monkeypatch)
+        calls: list[str] = []
+
+        def fake_register_zarr(server_uri, path, container_path, description="", on_conflict="fail"):
+            calls.append(Path(path).name)
+            return {"key": Path(path).stem, "tiled_path": f"browse/{Path(path).stem}", "skipped": False}
+
+        monkeypatch.setattr(zarr_source, "register_zarr", fake_register_zarr)
+
+        result = zarr_source.scan_and_register_zarrs(None, str(tmp_path), "browse")
+        assert result["scanned"] == 2
+        assert sorted(calls) == ["a.zarr", "b.zarr"]
+        assert sorted(r["name"] for r in result["registered"]) == ["a.zarr", "b.zarr"]
+        assert result["skipped"] == []
+        assert result["shadowed"] == []
+        assert result["errors"] == []
+
+    def test_reports_skipped_entries_separately_from_newly_registered(self, tmp_path: Path, monkeypatch) -> None:
+        import zarr
+
+        zarr.open(str(tmp_path / "existing.zarr"), mode="w", shape=(2, 4, 4), dtype="uint8", zarr_format=2)
+        # A same-kind ("zarr") existing node — a legitimate re-scan match, not
+        # a shadow — so register_zarr's own on_conflict=skip path is what
+        # reports it, exactly as before.
+        self._fake_client(monkeypatch, {"existing": FakeContainer({}, metadata={"source_format": "zarr"})})
+
+        def fake_register_zarr(server_uri, path, container_path, description="", on_conflict="fail"):
+            return {"key": "existing", "tiled_path": "browse/existing", "skipped": True}
+
+        monkeypatch.setattr(zarr_source, "register_zarr", fake_register_zarr)
+
+        result = zarr_source.scan_and_register_zarrs(None, str(tmp_path), "browse")
+        assert result["registered"] == []
+        assert result["skipped"] == ["existing"]
+        assert result["shadowed"] == []
+
+    def test_a_different_kind_collision_is_reported_as_shadowed_not_skipped(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import zarr
+
+        zarr.open(str(tmp_path / "existing.zarr"), mode="w", shape=(2, 4, 4), dtype="uint8", zarr_format=2)
+        self._fake_client(
+            monkeypatch, {"existing": FakeContainer({}, metadata={"source_format": "image-stack"})}
+        )
+        register_calls: list[str] = []
+        monkeypatch.setattr(
+            zarr_source, "register_zarr",
+            lambda *a, **kw: register_calls.append(a) or {"key": "existing", "tiled_path": "x", "skipped": False},
+        )
+
+        result = zarr_source.scan_and_register_zarrs(None, str(tmp_path), "browse")
+        assert result["registered"] == []
+        assert result["skipped"] == []
+        assert result["shadowed"] == [
+            {"name": "existing.zarr", "key": "existing", "existing_kind": "image-stack", "suggested_key": "existing_zarr"}
+        ]
+        # register_zarr must never be called for a shadowed candidate — no
+        # blind replace, no misleading "skip" of someone else's data.
+        assert register_calls == []
+
+    def test_renames_lets_a_shadowed_candidate_register_under_an_alternate_key(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import zarr
+
+        zarr.open(str(tmp_path / "existing.zarr"), mode="w", shape=(2, 4, 4), dtype="uint8", zarr_format=2)
+        self._fake_client(
+            monkeypatch, {"existing": FakeContainer({}, metadata={"source_format": "image-stack"})}
+        )
+        calls = []
+
+        def fake_register_zarr(server_uri, path, container_path, on_conflict="fail"):
+            calls.append(container_path)
+            return {"key": "existing", "tiled_path": f"{container_path}/existing", "skipped": False}
+
+        monkeypatch.setattr(zarr_source, "register_zarr", fake_register_zarr)
+
+        result = zarr_source.scan_and_register_zarrs(
+            None, str(tmp_path), "browse", renames={"existing.zarr": "existing_zarr"}
+        )
+        assert result["shadowed"] == []
+        assert [r["key"] for r in result["registered"]] == ["existing_zarr"]
+        # Registered one level deeper, under a container named for the
+        # chosen alternate key — the only way to make Tiled's own
+        # filename-derived key land under a different name.
+        assert calls == ["browse/existing_zarr"]
+        assert result["registered"][0]["tiled_path"] == "browse/existing_zarr/existing"
+
+    def test_one_bad_store_does_not_abort_the_rest(self, tmp_path: Path, monkeypatch) -> None:
+        import zarr
+
+        for name in ("good.zarr", "bad.zarr"):
+            zarr.open(str(tmp_path / name), mode="w", shape=(2, 4, 4), dtype="uint8", zarr_format=2)
+
+        self._fake_client(monkeypatch)
+
+        def fake_register_zarr(server_uri, path, container_path, description="", on_conflict="fail"):
+            if Path(path).name == "bad.zarr":
+                raise HTTPException(502, "boom")
+            return {"key": "good", "tiled_path": "browse/good", "skipped": False}
+
+        monkeypatch.setattr(zarr_source, "register_zarr", fake_register_zarr)
+
+        result = zarr_source.scan_and_register_zarrs(None, str(tmp_path), "browse")
+        assert [r["name"] for r in result["registered"]] == ["good.zarr"]
+        assert result["errors"] == [{"name": "bad.zarr", "error": "boom"}]
+
+    def test_rejects_relative_scan_root(self) -> None:
+        with pytest.raises(HTTPException) as exc:
+            zarr_source.scan_and_register_zarrs(None, "relative/dir", "browse")
+        assert exc.value.status_code == 400
+
+    def test_rejects_missing_scan_root(self, tmp_path: Path) -> None:
+        with pytest.raises(HTTPException) as exc:
+            zarr_source.scan_and_register_zarrs(None, str(tmp_path / "nope"), "browse")
+        assert exc.value.status_code == 404
+
+    def test_empty_directory_scans_cleanly_with_nothing_found(self, tmp_path: Path, monkeypatch) -> None:
+        self._fake_client(monkeypatch)
+        result = zarr_source.scan_and_register_zarrs(None, str(tmp_path), "browse")
+        assert result == {"scanned": 0, "registered": [], "skipped": [], "shadowed": [], "errors": []}
+
+    def test_invalid_on_conflict_falls_back_to_skip(self, tmp_path: Path, monkeypatch) -> None:
+        import zarr
+
+        zarr.open(str(tmp_path / "a.zarr"), mode="w", shape=(2, 4, 4), dtype="uint8", zarr_format=2)
+        self._fake_client(monkeypatch)
+        seen_on_conflict = []
+
+        def fake_register_zarr(server_uri, path, container_path, description="", on_conflict="fail"):
+            seen_on_conflict.append(on_conflict)
+            return {"key": "a", "tiled_path": "browse/a", "skipped": False}
+
+        monkeypatch.setattr(zarr_source, "register_zarr", fake_register_zarr)
+        zarr_source.scan_and_register_zarrs(None, str(tmp_path), "browse", on_conflict="fail")
+        assert seen_on_conflict == ["skip"]
+
 
 class TestRegisteredKey:
     def test_strips_the_zarr_extension(self, pyramid: Path) -> None:

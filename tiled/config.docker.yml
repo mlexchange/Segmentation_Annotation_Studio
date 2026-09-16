@@ -22,9 +22,11 @@ trees:
       uri: "sqlite+aiosqlite:////data/.tiled/catalog.db"
       writable_storage: "/data/.tiled/data"
       readable_storage:
-        # Bind-mount your own source datasets here (see
-        # docker-compose.full.yml's volumes). Uploads/ingest also land here.
-        - "/data/raw"
+        # Bind-mount your own source datasets here (see docker-compose.full.yml
+        # / docker-compose.local.yml's volumes). Uploads/ingest also land here.
+        # Must match the bind-mount target in both compose files exactly —
+        # Tiled refuses to register an external asset outside this list.
+        - "/data/processed"
         # Generated 3-D volume pyramids (backend/tiff_stack_source.py) and
         # mask pyramids (backend/mask_pyramid.py) — must stay in step with
         # VOLUME_CACHE_DIR, set by docker-entrypoint-full.sh.

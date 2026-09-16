@@ -102,7 +102,7 @@ Beyond what's already covered in [Installation](../getting-started/installation.
 | --- | --- |
 | `TILED_BROWSE_PATH` | The real path into an existing institutional Tiled catalog Browse should treat as its root (e.g. `beamlines/bl832/processed`). Confirm the exact value with whoever operates that Tiled server — don't assume it matches another deployment's beamline. |
 | `TILED_URI` / `TILED_API_KEY` | Point at the shared production Tiled server. See the open authentication question below — a single shared key is a stopgap, not the final design. |
-| `LOCAL_SOURCE_DIR` | `docker-compose.full.yml`/`docker-compose.local.yml` (bundled-Tiled shapes) only — bind-mounts a real host directory to `/data/raw` so the bundled Tiled server can read it directly. Not applicable to `:als` (`app-ml`), which points at an already-existing external Tiled instead of a bundled one. |
+| `LOCAL_SOURCE_DIR` | `docker-compose.full.yml`/`docker-compose.local.yml` (bundled-Tiled shapes) only — bind-mounts a real host directory to `/data/processed` so the bundled Tiled server can read it directly. Everything under it (Zarr stores and plain image-slice folders) auto-registers into Tiled on every container start (see [Installation](../getting-started/installation.md#option-2-docker)) — no manual ingest step needed for pre-existing data. Not applicable to `:als` (`app-ml`), which points at an already-existing external Tiled instead of a bundled one. |
 
 Persistent storage (`LOCAL_DATA_ROOT`, defaulting to the `/data` volume already
 declared in the image) and CORS (`BROWSE_ALLOWED_ORIGINS`) need no special

@@ -327,6 +327,34 @@ class ZarrRegisterRequest(BaseModel):
     server_uri: str | None = None
 
 
+class ZarrScanRequest(BaseModel):
+    """Request body for scanning a directory and registering every Zarr store found.
+
+    For pointing a mounted directory of already-reconstructed volumes at Tiled
+    in bulk, rather than registering each one individually via
+    :class:`ZarrRegisterRequest`. Non-recursive: only immediate subdirectories
+    of ``scan_root`` that look like a Zarr store are considered.
+
+    Attributes:
+        scan_root: Absolute directory to scan (e.g. a bind-mounted host folder).
+        container_path: Target container every discovered store registers into.
+        on_conflict: ``"skip"`` (default, safe to re-run) or ``"replace"`` for
+            a same-kind entry that already exists — ``"fail"`` makes no sense
+            here since one conflicting store shouldn't abort the whole scan.
+        server_uri: Target Tiled server URI; ``None`` uses the default server.
+        renames: Optional ``{folder_name: alternate_key}`` override, so a
+            candidate reported as "shadowed" (its natural key collides with
+            an unrelated, different-kind registration) can be retried under a
+            different key without re-scanning everything else.
+    """
+
+    scan_root: str
+    container_path: str = "browse"
+    on_conflict: str = "skip"
+    renames: dict[str, str] = Field(default_factory=dict)
+    server_uri: str | None = None
+
+
 class TiffStackRegisterRequest(ZarrRegisterRequest):
     """Request body for registering a TIFF directory as a 3-D volume.
 

@@ -119,17 +119,33 @@ reachable directly if you want to hit them outside the app.
     restart.
 
 !!! tip "Pointing at your own datasets"
-    For `app-full`, set `LOCAL_SOURCE_DIR` in your own `.env` (copy the repo
-    root's `.env.example`) to an absolute host directory — it's bind-mounted to
-    `/data/raw` inside the container, so the bundled Tiled server (and the Zarr
-    loader's "Browse…" directory picker on the Connect page) can read your real
-    data directly. This matters specifically in Docker: a path from your own
-    machine (e.g. one you'd type into the Zarr loader by hand) means nothing to
-    the container unless it's actually mounted like this — `LOCAL_SOURCE_DIR` is
-    what makes it visible.
+    For `app-full`/`app-local`, set `LOCAL_SOURCE_DIR` in your own `.env` (copy
+    the repo root's `.env.example`) to an absolute host directory — it's
+    bind-mounted to `/data/processed` inside the container, so the bundled
+    Tiled server (and the Zarr loader's "Browse…" directory picker on the
+    Connect page) can read your real data directly. This matters specifically
+    in Docker: a path from your own machine (e.g. one you'd type into the Zarr
+    loader by hand) means nothing to the container unless it's actually
+    mounted like this — `LOCAL_SOURCE_DIR` is what makes it visible.
     ```bash
     LOCAL_SOURCE_DIR=/absolute/path/to/your/data docker compose -f docker-compose.full.yml up --build
     ```
+
+    **Everything under that directory is registered into Tiled and shows up in
+    Browse automatically** — on every container start, and again whenever you
+    click **"Scan folder for datasets"** in the Zarr loader's directory
+    browser (useful after adding new files without restarting). This covers
+    both `.zarr` stores and plain folders of TIFF/PNG/JPG slices — the latter
+    register as fast, per-slice ingest with no 3-D pyramid built yet (build
+    one on demand from the 3D tab when you actually need it, so a large
+    dataset doesn't delay startup).
+
+    If a raw image folder and a `.zarr` reconstruction of the same acquisition
+    share a name, only one can occupy that key — the scan reports the second
+    one as **shadowed** rather than silently skipping it, and offers a
+    "Register as…" action (in the UI, or `POST /api/scan-datasets` /
+    `/api/ingest/scan` with a `renames` field) to register it under a
+    different key so both show up side by side.
 
 ---
 

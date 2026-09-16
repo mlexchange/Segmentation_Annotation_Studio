@@ -154,8 +154,48 @@ def inspect_zarr(raw_path: str) -> dict[str, Any]:
     path = _resolve_path(raw_path)
     try:
         group = zarr.open_group(str(path), mode="r")
-    except Exception as exc:  # noqa: BLE001 — surface as a clean 422
-        raise HTTPException(422, f"Could not open {path.name!r} as Zarr: {exc}") from exc
+    except Exception as group_exc:  # noqa: BLE001 — try a bare array next
+        # Not a group — a store with a bare 3-D array at its root (no OME-NGFF
+        # multiscales wrapper) is an equally common, simpler way to save a
+        # volume (e.g. `zarr.save`/`dask.array.to_zarr` with no group). `_is_
+        # zarr_dir` already accepts this shape (its own `.zarray`/`zarr.json`
+        # marker check) — rejecting it here would contradict that.
+        try:
+            arr = zarr.open_array(str(path), mode="r")
+        except Exception as arr_exc:  # noqa: BLE001 — genuinely neither
+            raise HTTPException(
+                422, f"Could not open {path.name!r} as Zarr: {group_exc}"
+            ) from arr_exc
+        if arr.ndim != 3:
+            raise HTTPException(
+                422,
+                f"{path.name!r} is a Zarr array but not 3-D (shape {arr.shape}) "
+                "— expected (z, y, x).",
+            )
+        shape = [int(v) for v in arr.shape]
+        return {
+            "name": path.name,
+            "path": str(path),
+            # Empty: the store registers as a single leaf array node directly
+            # at the container key, with no sub-path to descend into (see the
+            # frontend's own guard against appending a trailing empty segment).
+            "levels": [
+                {
+                    "path": "",
+                    "shape": shape,
+                    "dtype": str(arr.dtype),
+                    "n_slices": shape[0],
+                    "height": shape[1],
+                    "width": shape[2],
+                    "downsample": [1.0, 1.0, 1.0],
+                }
+            ],
+            "full_shape": shape,
+            "dtype": str(arr.dtype),
+            "voxel_size": None,
+            "voxel_unit": None,
+            "pixel_size": None,
+        }
 
     # Prefer the declared multiscales order; fall back to discovering 3-D arrays.
     datasets = _multiscale_datasets(path)
@@ -409,4 +449,123 @@ def register_zarr(
         "key": key,
         "tiled_path": "/".join([*parts, key]),
         "skipped": False,
+    }
+
+
+def scan_and_register_zarrs(
+    server_uri: str | None,
+    scan_root: str,
+    container_path: str = "browse",
+    on_conflict: str = "skip",
+    renames: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Walk *scan_root* for Zarr stores and register each one not already present.
+
+    For a directory of already-reconstructed volumes (e.g. a bind-mounted host
+    folder) that should all show up in Browse without registering each one
+    individually through the UI. Non-recursive by design: only immediate
+    subdirectories of *scan_root* that look like a Zarr store (`_is_zarr_dir`)
+    are candidates — a store's own internal structure (`scale0/`, chunk files)
+    must never be treated as separate stores to register.
+
+    A Zarr store and an unrelated dataset (e.g. a raw image folder of the same
+    acquisition) commonly share the same stem name — in which case they'd
+    derive the identical Tiled key. Rather than silently treating that as
+    "already registered" (misleading — this store was never actually
+    registered) or blindly replacing someone else's data, a same-key collision
+    with a DIFFERENT kind of registration (per the ``source_format`` tag; see
+    :func:`ingest.node_source_kind`) is reported as **shadowed**, distinctly
+    from a same-kind ``skipped`` match from a previous run of this same scan.
+
+    Args:
+        server_uri: Connected Tiled server URI.
+        scan_root: Absolute directory to scan.
+        container_path: Target container every discovered store registers into.
+        on_conflict: Passed through to :func:`register_zarr` for each same-kind
+            match — ``"skip"`` (default) leaves already-registered entries
+            alone, so re-running the scan after adding new datasets is always
+            safe. ``"fail"`` is rejected: one conflicting store shouldn't be
+            able to abort a bulk scan the way it correctly can for a single
+            register.
+        renames: Optional ``{folder_name: alternate_key}`` override, so a
+            shadowed candidate can be retried under a different key without
+            re-scanning everything else.
+
+    Returns:
+        Dict with ``scanned`` (candidate count), ``registered`` (newly
+        registered, each with ``name``/``key``/``tiled_path``), ``skipped``
+        (names already present), ``shadowed`` (``name``/``key``/
+        ``existing_kind``/``suggested_key`` — a different-kind collision,
+        nothing registered), and ``errors`` (``name``/``error`` pairs for
+        anything that failed to register — a bad store never aborts the rest).
+
+    Raises:
+        HTTPException: 400/404 if *scan_root* itself is unusable.
+    """
+    if on_conflict not in ("skip", "replace"):
+        on_conflict = "skip"
+    renames = renames or {}
+
+    root = Path(scan_root).expanduser()
+    if not root.is_absolute():
+        raise HTTPException(400, f"Path must be absolute: {scan_root!r}")
+    if not root.is_dir():
+        raise HTTPException(404, f"No such directory: {root}")
+
+    candidates = sorted((p for p in root.iterdir() if _is_zarr_dir(p)), key=lambda p: p.name)
+
+    parts = [p for p in container_path.strip("/").split("/") if p]
+    target = ingest_mod._walk(get_tiled_client(server_uri, api_key_for_uri(server_uri)), parts)
+
+    registered: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    shadowed: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    for candidate in candidates:
+        default_key = registered_key(candidate)
+        key = renames.get(candidate.name, default_key)
+
+        if target is not None and key in ingest_mod._child_keys(target):
+            existing_kind = ingest_mod.node_source_kind(target[key])
+            if existing_kind != "zarr":
+                shadowed.append(
+                    {
+                        "name": candidate.name,
+                        "key": key,
+                        "existing_kind": existing_kind or "unknown",
+                        "suggested_key": f"{key}_zarr",
+                    }
+                )
+                continue
+
+        try:
+            if key != default_key:
+                # register_zarr always derives the key from the path's own
+                # filename — the only way to register under a chosen
+                # alternate key is to nest one level deeper, in a container
+                # named for it. Only affects this explicit, rare rename-
+                # recovery path, not registration in general.
+                nested_container = f"{container_path}/{key}".strip("/")
+                result = register_zarr(server_uri, str(candidate), nested_container, on_conflict=on_conflict)
+                if not result.get("skipped"):
+                    result = {**result, "tiled_path": f"{nested_container}/{result['key']}"}
+            else:
+                result = register_zarr(server_uri, str(candidate), container_path, on_conflict=on_conflict)
+        except HTTPException as exc:
+            errors.append({"name": candidate.name, "error": str(exc.detail)})
+            continue
+        except Exception as exc:  # noqa: BLE001 — one bad store must not sink the scan
+            errors.append({"name": candidate.name, "error": str(exc)})
+            continue
+        if result.get("skipped"):
+            skipped.append(key)
+        else:
+            registered.append({"name": candidate.name, "key": key, "tiled_path": result["tiled_path"]})
+
+    return {
+        "scanned": len(candidates),
+        "registered": registered,
+        "skipped": skipped,
+        "shadowed": shadowed,
+        "errors": errors,
     }

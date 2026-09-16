@@ -19,6 +19,7 @@ import annotation_server
 import denoise as denoise_mod
 import export_jobs
 import infer_jobs
+import ingest as ingest_mod
 import tiff_stack_source
 import train_common
 import volume_build
@@ -100,6 +101,78 @@ class TestZarrRoutes:
         )
         assert response.status_code == 200
         assert response.json() == {"key": "x"}
+
+    @pytest.mark.asyncio
+    async def test_scan_delegates_with_request_fields(self, client, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            zarr_source, "scan_and_register_zarrs",
+            lambda server_uri, scan_root, container_path, on_conflict, renames: (
+                calls.append((server_uri, scan_root, container_path, on_conflict, renames))
+                or {"scanned": 2, "registered": [], "skipped": [], "shadowed": [], "errors": []}
+            ),
+        )
+        response = await client.post(
+            "/api/zarr/scan",
+            json={"scan_root": "/data/processed", "container_path": "browse"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"scanned": 2, "registered": [], "skipped": [], "shadowed": [], "errors": []}
+        assert calls == [(None, "/data/processed", "browse", "skip", {})]
+
+    @pytest.mark.asyncio
+    async def test_ingest_scan_delegates_with_request_fields(self, client, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            ingest_mod, "scan_and_register_image_stacks",
+            lambda server_uri, scan_root, container_path, on_conflict, renames: (
+                calls.append((server_uri, scan_root, container_path, on_conflict, renames))
+                or {"scanned": 1, "registered": [], "skipped": [], "shadowed": [], "errors": []}
+            ),
+        )
+        response = await client.post(
+            "/api/ingest/scan",
+            json={"scan_root": "/data/processed", "container_path": "browse"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"scanned": 1, "registered": [], "skipped": [], "shadowed": [], "errors": []}
+        assert calls == [(None, "/data/processed", "browse", "skip", {})]
+
+    @pytest.mark.asyncio
+    async def test_scan_datasets_merges_zarr_and_image_scan_results(self, client, monkeypatch):
+        monkeypatch.setattr(
+            zarr_source, "scan_and_register_zarrs",
+            lambda *a: {
+                "scanned": 2,
+                "registered": [{"name": "a.zarr", "key": "a", "tiled_path": "browse/a"}],
+                "skipped": ["b"],
+                "shadowed": [{"name": "e", "key": "e", "existing_kind": "image-stack", "suggested_key": "e_zarr"}],
+                "errors": [],
+            },
+        )
+        monkeypatch.setattr(
+            ingest_mod, "scan_and_register_image_stacks",
+            lambda *a: {
+                "scanned": 1,
+                "registered": [{"name": "c", "key": "c", "tiled_path": "browse/c"}],
+                "skipped": [],
+                "shadowed": [],
+                "errors": [{"name": "d", "error": "boom"}],
+            },
+        )
+        response = await client.post(
+            "/api/scan-datasets",
+            json={"scan_root": "/data/processed", "container_path": "browse"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["scanned"] == 3
+        assert sorted(r["name"] for r in body["registered"]) == ["a.zarr", "c"]
+        assert body["skipped"] == ["b"]
+        assert body["shadowed"] == [
+            {"name": "e", "key": "e", "existing_kind": "image-stack", "suggested_key": "e_zarr"}
+        ]
+        assert body["errors"] == [{"name": "d", "error": "boom"}]
 
 
 # ---------------------------------------------------------------------------

@@ -202,4 +202,358 @@ describe('ZarrLoader', () => {
     await user.click(screen.getByRole('button', { name: /Load volume/ }));
     expect(await screen.findByText('disk full')).toBeInTheDocument();
   });
+
+  describe('server-side directory browser', () => {
+    function mockBrowseFetch(entriesByRel: Record<string, { name: string; path: string; is_dir: boolean }[]>) {
+      return vi.fn(async (url: string) => {
+        if (url.includes('/api/local/root')) return jsonResponse({ root: '/data/raw' });
+        if (url.includes('/api/local/list')) {
+          const rel = new URL(url, 'http://x').searchParams.get('rel') ?? '';
+          return jsonResponse(entriesByRel[rel] ?? []);
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+    }
+
+    it('opens the browser, fetches the root, and lists directories (files filtered out)', async () => {
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+        mockBrowseFetch({
+          '': [
+            { name: 'scratch', path: 'scratch', is_dir: true },
+            { name: 'readme.txt', path: 'readme.txt', is_dir: false },
+          ],
+        }),
+      );
+      const user = userEvent.setup();
+      renderLoader();
+
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      expect(await screen.findByText('/data/raw')).toBeInTheDocument();
+      expect(screen.getByText('scratch')).toBeInTheDocument();
+      expect(screen.queryByText('readme.txt')).not.toBeInTheDocument();
+    });
+
+    it('descends into a plain subfolder, and selecting a .zarr entry fills the path and closes the browser', async () => {
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+        mockBrowseFetch({
+          '': [{ name: 'scratch', path: 'scratch', is_dir: true }],
+          scratch: [{ name: 'ant_m12.zarr', path: 'scratch/ant_m12.zarr', is_dir: true }],
+        }),
+      );
+      const user = userEvent.setup();
+      renderLoader();
+
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      await screen.findByText('scratch');
+      await user.click(screen.getByText('scratch'));
+
+      expect(await screen.findByText('ant_m12.zarr')).toBeInTheDocument();
+      await user.click(screen.getByText('ant_m12.zarr'));
+
+      // Browser closes and the path field now has the full absolute path —
+      // no more guessing a container-visible path blind.
+      expect(screen.queryByText('ant_m12.zarr')).not.toBeInTheDocument();
+      expect(screen.getByPlaceholderText('/absolute/path/to/volume.zarr')).toHaveValue(
+        '/data/raw/scratch/ant_m12.zarr',
+      );
+    });
+
+    it('"Use this folder" selects the currently-browsed directory even without a .zarr suffix', async () => {
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+        mockBrowseFetch({ '': [{ name: 'my_volume', path: 'my_volume', is_dir: true }] }),
+      );
+      const user = userEvent.setup();
+      renderLoader();
+
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      await user.click(await screen.findByText('my_volume'));
+      await screen.findByText(/Use this folder/);
+      await user.click(screen.getByText(/Use this folder/));
+
+      expect(screen.getByPlaceholderText('/absolute/path/to/volume.zarr')).toHaveValue('/data/raw/my_volume');
+    });
+
+    it('shows an error if the root or a directory listing fails', async () => {
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) => {
+        if (url.includes('/api/local/root')) return jsonResponse({ detail: 'no access' }, false, 500);
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const user = userEvent.setup();
+      renderLoader();
+
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      expect(await screen.findByText('no access')).toBeInTheDocument();
+    });
+
+    it('closes the browser when Browse… is clicked again', async () => {
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(mockBrowseFetch({ '': [] }));
+      const user = userEvent.setup();
+      renderLoader();
+
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      await screen.findByText('/data/raw');
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      expect(screen.queryByText('/data/raw')).not.toBeInTheDocument();
+    });
+
+    it('an empty directory shows actionable LOCAL_SOURCE_DIR guidance, not a bare "no sub-folders" dead end', async () => {
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(mockBrowseFetch({ '': [] }));
+      const user = userEvent.setup();
+      renderLoader();
+
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      expect(await screen.findByText('No sub-folders here.')).toBeInTheDocument();
+      expect(screen.getByText(/LOCAL_SOURCE_DIR=\/path\/to\/your\/data/)).toBeInTheDocument();
+    });
+
+    it('overriding the root (e.g. anywhere on disk when run via start_all.sh) browses from there instead', async () => {
+      const listCalls: { root: string; rel: string }[] = [];
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) => {
+        if (url.includes('/api/local/root')) return jsonResponse({ root: '/data' });
+        if (url.includes('/api/local/list')) {
+          const u = new URL(url, 'http://x');
+          const root = u.searchParams.get('root') ?? '';
+          const rel = u.searchParams.get('rel') ?? '';
+          listCalls.push({ root, rel });
+          if (root === '/Users/me/tomo' && rel === '') {
+            return jsonResponse([{ name: 'ant_m12.zarr', path: 'ant_m12.zarr', is_dir: true }]);
+          }
+          return jsonResponse([]);
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const user = userEvent.setup();
+      renderLoader();
+
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      await screen.findByText('/data');
+
+      const rootField = screen.getByPlaceholderText('Root to browse from');
+      await user.clear(rootField);
+      await user.type(rootField, '/Users/me/tomo');
+      await user.click(screen.getByRole('button', { name: 'Go' }));
+
+      expect(await screen.findByText('ant_m12.zarr')).toBeInTheDocument();
+      expect(await screen.findByText('/Users/me/tomo')).toBeInTheDocument();
+      expect(listCalls).toContainEqual({ root: '/Users/me/tomo', rel: '' });
+
+      await user.click(screen.getByText('ant_m12.zarr'));
+      expect(screen.getByPlaceholderText('/absolute/path/to/volume.zarr')).toHaveValue(
+        '/Users/me/tomo/ant_m12.zarr',
+      );
+    });
+
+    it('sends the granted root on every subsequent list call (breadcrumbs, descending)', async () => {
+      const listCalls: { root: string; rel: string }[] = [];
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) => {
+        if (url.includes('/api/local/root')) return jsonResponse({ root: '/data' });
+        if (url.includes('/api/local/list')) {
+          const u = new URL(url, 'http://x');
+          const root = u.searchParams.get('root') ?? '';
+          const rel = u.searchParams.get('rel') ?? '';
+          listCalls.push({ root, rel });
+          if (rel === '') return jsonResponse([{ name: 'sub', path: 'sub', is_dir: true }]);
+          return jsonResponse([]);
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const user = userEvent.setup();
+      renderLoader();
+
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      await user.click(await screen.findByText('sub'));
+
+      expect(listCalls).toContainEqual({ root: '/data', rel: 'sub' });
+    });
+  });
+
+  it('a bare-array store (single level, empty level.path) builds the Tiled path without a trailing slash', async () => {
+    const BARE_ARRAY_INFO = {
+      name: 'plain.zarr',
+      path: '/data/plain.zarr',
+      levels: [
+        { path: '', shape: [6, 10, 12], dtype: 'uint16', n_slices: 6, height: 10, width: 12, downsample: [1, 1, 1] },
+      ],
+      full_shape: [6, 10, 12],
+      dtype: 'uint16',
+      voxel_size: null,
+      voxel_unit: null,
+    };
+    (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) => {
+      if (url.includes('/api/zarr/inspect')) return jsonResponse(BARE_ARRAY_INFO);
+      if (url.includes('/api/zarr/preflight')) return jsonResponse({ exists: false });
+      if (url.includes('/api/zarr/register')) return jsonResponse({ tiled_path: 'browse/plain' });
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const user = userEvent.setup();
+    const { props } = renderLoader();
+    await typePathAndInspect(user, '/data/plain.zarr');
+    await screen.findByText('plain.zarr');
+
+    await user.click(screen.getByRole('button', { name: /Load volume/ }));
+    await screen.findByText(/Loaded 6 slices — no data was copied\./);
+
+    await user.click(screen.getByRole('button', { name: 'Annotate' }));
+    expect(props.onAnnotate).toHaveBeenCalledWith('browse/plain');
+  });
+
+  describe('scan folder for Zarr volumes', () => {
+    async function openBrowserAt(user: ReturnType<typeof userEvent.setup>, root = '/data') {
+      await user.click(screen.getByRole('button', { name: /Browse…/ }));
+      await screen.findByText(root);
+    }
+
+    it('scans the currently-browsed folder and reports registered/skipped/errors', async () => {
+      const scanCalls: unknown[] = [];
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url.includes('/api/local/root')) return jsonResponse({ root: '/data' });
+        if (url.includes('/api/local/list')) return jsonResponse([]);
+        if (url.includes('/api/scan-datasets')) {
+          scanCalls.push(JSON.parse(String(init?.body)));
+          return jsonResponse({
+            scanned: 3,
+            registered: [{ name: 'a.zarr', key: 'a', tiled_path: 'browse/a' }],
+            skipped: ['b'],
+            shadowed: [],
+            errors: [{ name: 'c.zarr', error: 'boom' }],
+          });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const user = userEvent.setup();
+      const { props } = renderLoader({ serverUri: 'http://tiled.example' });
+
+      await openBrowserAt(user);
+      await user.click(screen.getByRole('button', { name: /Scan folder for datasets/ }));
+
+      expect(await screen.findByText(/Scanned 3 — registered 1 new, skipped 1 already present, 1 failed\./))
+        .toBeInTheDocument();
+      expect(screen.getByText('a.zarr')).toBeInTheDocument();
+      expect(screen.getByText(/c\.zarr/)).toBeInTheDocument();
+      expect(screen.getByText(/boom/)).toBeInTheDocument();
+      expect(scanCalls).toEqual([
+        { scan_root: '/data', container_path: 'browse', server_uri: 'http://tiled.example' },
+      ]);
+
+      await user.click(screen.getByRole('button', { name: 'Go to Browse' }));
+      expect(props.onBrowse).toHaveBeenCalledWith('browse', 1);
+    });
+
+    it('scans a descended-into subfolder using its full path, not just the root', async () => {
+      const scanCalls: unknown[] = [];
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url.includes('/api/local/root')) return jsonResponse({ root: '/data' });
+        if (url.includes('/api/local/list')) {
+          const rel = new URL(url, 'http://x').searchParams.get('rel') ?? '';
+          if (rel === '') return jsonResponse([{ name: 'scratch', path: 'scratch', is_dir: true }]);
+          return jsonResponse([]);
+        }
+        if (url.includes('/api/scan-datasets')) {
+          scanCalls.push(JSON.parse(String(init?.body)));
+          return jsonResponse({ scanned: 0, registered: [], skipped: [], shadowed: [], errors: [] });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const user = userEvent.setup();
+      renderLoader();
+
+      await openBrowserAt(user);
+      await user.click(await screen.findByText('scratch'));
+      await user.click(await screen.findByRole('button', { name: /Scan folder for datasets \(scratch\)/ }));
+
+      await screen.findByText(/Scanned 0/);
+      expect(scanCalls).toEqual([
+        { scan_root: '/data/scratch', container_path: 'browse', server_uri: 'http://tiled.example' },
+      ]);
+    });
+
+    it('shows an error if the scan request fails', async () => {
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) => {
+        if (url.includes('/api/local/root')) return jsonResponse({ root: '/data' });
+        if (url.includes('/api/local/list')) return jsonResponse([]);
+        if (url.includes('/api/scan-datasets')) return jsonResponse({ detail: 'no such directory' }, false, 404);
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const user = userEvent.setup();
+      renderLoader();
+
+      await openBrowserAt(user);
+      await user.click(screen.getByRole('button', { name: /Scan folder for datasets/ }));
+      expect(await screen.findByText('no such directory')).toBeInTheDocument();
+    });
+
+    it('does not show "Go to Browse" when nothing new was registered', async () => {
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) => {
+        if (url.includes('/api/local/root')) return jsonResponse({ root: '/data' });
+        if (url.includes('/api/local/list')) return jsonResponse([]);
+        if (url.includes('/api/scan-datasets')) {
+          return jsonResponse({ scanned: 1, registered: [], skipped: ['already-there'], shadowed: [], errors: [] });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const user = userEvent.setup();
+      renderLoader();
+
+      await openBrowserAt(user);
+      await user.click(screen.getByRole('button', { name: /Scan folder for datasets/ }));
+      await screen.findByText(/Scanned 1/);
+      expect(screen.queryByRole('button', { name: 'Go to Browse' })).not.toBeInTheDocument();
+    });
+
+    it('shows a shadowed collision distinctly, and retrying it merges into the existing summary', async () => {
+      const scanCalls: unknown[] = [];
+      (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(async (url: string, init?: RequestInit) => {
+        if (url.includes('/api/local/root')) return jsonResponse({ root: '/data' });
+        if (url.includes('/api/local/list')) return jsonResponse([]);
+        if (url.includes('/api/scan-datasets')) {
+          const body = JSON.parse(String(init?.body));
+          scanCalls.push(body);
+          if (body.renames) {
+            return jsonResponse({
+              scanned: 1,
+              registered: [{ name: 'stack_a', key: 'stack_a_images', tiled_path: 'browse/stack_a_images' }],
+              skipped: [],
+              shadowed: [],
+              errors: [],
+            });
+          }
+          return jsonResponse({
+            scanned: 1,
+            registered: [],
+            skipped: [],
+            shadowed: [
+              { name: 'stack_a', key: 'stack_a', existing_kind: 'zarr', suggested_key: 'stack_a_images' },
+            ],
+            errors: [],
+          });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const user = userEvent.setup();
+      renderLoader();
+
+      await openBrowserAt(user);
+      await user.click(screen.getByRole('button', { name: /Scan folder for datasets/ }));
+
+      expect(await screen.findByText(/Scanned 1 — registered 0 new, skipped 0 already present, 1 shadowed\./))
+        .toBeInTheDocument();
+      expect(screen.getByText('stack_a')).toBeInTheDocument();
+      expect(screen.getByText(/already registered as a/)).toBeInTheDocument();
+      expect(screen.getByText('zarr')).toBeInTheDocument();
+      const input = screen.getByDisplayValue('stack_a_images');
+
+      await user.click(screen.getByRole('button', { name: 'Register as this' }));
+
+      // The shadowed entry is gone once resolved, replaced by a registered
+      // one (rendered by name, so still "stack_a" — merged in, not dangling).
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: 'Register as this' })).not.toBeInTheDocument();
+      });
+      expect(screen.getByText(/registered 1 new/)).toBeInTheDocument();
+      expect(scanCalls).toContainEqual(
+        expect.objectContaining({ renames: { stack_a: 'stack_a_images' } }),
+      );
+      expect(input).toBeDefined();
+    });
+  });
 });

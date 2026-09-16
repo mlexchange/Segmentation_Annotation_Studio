@@ -187,7 +187,7 @@ The dev and production layouts differ mainly in **who serves the SPA** and
     flowchart LR
       Browser["Browser"]
       Container["app-full image<br/>backend :8002 (foreground)<br/>+ ipred :8003 (background)<br/>+ Tiled :8010 (background)"]
-      Volume[("/data volume<br/>/data/raw bind mount")]
+      Volume[("/data volume<br/>/data/processed bind mount")]
 
       Browser -->|":8002 only"| Container
       Container --> Volume

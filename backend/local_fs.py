@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 _DEFAULT_ROOT: Path = Path(os.getenv("LOCAL_DATA_ROOT", "~/data")).expanduser().resolve()
 
 
+def default_root() -> str:
+    """Return the default browse root (``LOCAL_DATA_ROOT``) as an absolute path.
+
+    Used by callers that need to construct an absolute path from a directory
+    listing's root-relative entries (``list_dir`` returns paths relative to
+    the root, not absolute ones) when no explicit *root* was granted.
+    """
+    return str(_DEFAULT_ROOT)
+
+
 def _resolve_root(root: str | None) -> Path:
     """Return the granted browse root as an absolute, resolved Path.
 
